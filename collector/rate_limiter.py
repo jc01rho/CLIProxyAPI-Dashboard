@@ -283,7 +283,13 @@ class RateLimiter:
         model_pattern: str,
         baseline_override: Optional[Dict[str, Dict[str, int]]] = None
     ) -> Dict[str, int]:
-        """Helper function to calculate the usage delta between two snapshot times."""
+        """
+        Helper function to calculate the usage delta between two snapshot times.
+
+        Includes restart detection logic similar to main.py:
+        - If delta is negative (CLIProxy restarted), treat current value as the increment
+        - If delta equals current value and is suspiciously large (False Start), skip it
+        """
         logger.info(f"Calculating delta between latest ({latest_time}) and baseline ({baseline_time})")
 
         # Get data from the latest snapshot
@@ -295,20 +301,64 @@ class RateLimiter:
         else:
             baseline_map = self._build_snapshot_map(model_pattern, baseline_time)
 
-        # Sum the deltas for all relevant models
+        # Sum the deltas for all relevant models with restart/false-start detection
         total_used_tokens = 0
         total_used_requests = 0
-        for model_name, current_rec in current_map.items():
-            current_tokens = current_rec.get('total_tokens', 0)
-            current_reqs = current_rec.get('request_count', 0)
 
-            baseline_rec = baseline_map.get(model_name, {}) # Default to empty dict if model didn't exist at baseline
+        # Track all models (both in current and baseline)
+        all_models = set(current_map.keys()) | set(baseline_map.keys())
+
+        for model_name in all_models:
+            current_rec = current_map.get(model_name, {})
+            baseline_rec = baseline_map.get(model_name, {})
+
+            current_tokens = current_rec.get('total_tokens', 0) or 0
+            current_reqs = current_rec.get('request_count', 0) or 0
             baseline_tokens = baseline_rec.get('total_tokens', 0) or 0
             baseline_reqs = baseline_rec.get('request_count', 0) or 0
 
-            # Delta calculation
-            total_used_tokens += max(0, current_tokens - baseline_tokens)
-            total_used_requests += max(0, current_reqs - baseline_reqs)
+            # Calculate raw delta
+            delta_tokens = current_tokens - baseline_tokens
+            delta_reqs = current_reqs - baseline_reqs
+
+            # === RESTART DETECTION ===
+            # If delta is negative, CLIProxy was restarted and counters reset to 0
+            # In this case, the current value IS the usage since restart
+            if delta_tokens < 0 or delta_reqs < 0:
+                logger.warning(
+                    f"Restart detected for '{model_name}'! "
+                    f"Baseline: {baseline_tokens} tokens, {baseline_reqs} reqs | "
+                    f"Current: {current_tokens} tokens, {current_reqs} reqs | "
+                    f"Using current as increment."
+                )
+                delta_tokens = current_tokens
+                delta_reqs = current_reqs
+
+            # === FALSE START DETECTION ===
+            # If this model didn't exist in baseline (new model) and has large values,
+            # it might be a "false start" - a model with pre-existing usage history
+            # that we're seeing for the first time. Skip to avoid spike.
+            is_new_model = model_name not in baseline_map or (baseline_tokens == 0 and baseline_reqs == 0)
+
+            # Threshold: if delta equals current (meaning baseline was 0) and tokens > 100k, likely false start
+            FALSE_START_TOKEN_THRESHOLD = 100000  # 100k tokens
+
+            if is_new_model and delta_tokens > FALSE_START_TOKEN_THRESHOLD:
+                # Check if delta is approximately equal to current (indicates no real baseline)
+                if baseline_tokens == 0 or abs(delta_tokens - current_tokens) < 100:
+                    logger.warning(
+                        f"False Start detected for '{model_name}'! "
+                        f"New model with {delta_tokens} tokens (threshold: {FALSE_START_TOKEN_THRESHOLD}). "
+                        f"Skipping to avoid spike."
+                    )
+                    continue  # Skip this model entirely
+
+            # Add valid deltas (ensure non-negative after all checks)
+            total_used_tokens += max(0, delta_tokens)
+            total_used_requests += max(0, delta_reqs)
+
+            if delta_tokens > 0 or delta_reqs > 0:
+                logger.debug(f"  Model '{model_name}': +{delta_tokens} tokens, +{delta_reqs} requests")
 
         logger.info(f"Delta calculated: {total_used_tokens} tokens, {total_used_requests} requests.")
         return {'total_tokens': total_used_tokens, 'request_count': total_used_requests}

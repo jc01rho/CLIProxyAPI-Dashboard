@@ -1,6 +1,6 @@
 # CLIProxy Dashboard
 
-🎛️ **Real-time monitoring dashboard for CLIProxy API usage** - Track requests, tokens, costs, and rate limits across all your AI models.
+Real-time monitoring dashboard for CLIProxy API usage - Track requests, tokens, costs, and rate limits across all your AI models.
 
 ![Dashboard Preview](https://img.shields.io/badge/status-active-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -10,40 +10,18 @@
   <img src="docs/assets/dashboard_preview.png" alt="CLIProxy Dashboard Preview" width="100%">
 </p>
 
-## 📋 Overview
+## Features
 
-CLIProxy Dashboard collects usage data from your CLIProxy Management API, stores it in Supabase, and displays beautiful analytics with cost estimation.
-
-```mermaid
-graph LR
-    User["User / AI Clients"] --> Proxy["CLIProxy Server"]
-    Proxy --> Provider["AI Provider (OpenAI/Anthropic)"]
-    
-    subgraph "Data Pipeline"
-        Proxy -- API --> Collector["Python Collector"]
-        Collector -- Writes --> DB[("Supabase DB")]
-    end
-    
-    subgraph "Visualization"
-        DB -- Reads --> Dashboard["React Dashboard"]
-        Dashboard --> Browser["User Browser"]
-    end
-```
-
-## ✨ Features
-
-- 📊 **Usage Analytics** - Track requests, tokens, success rates over time
-- 💰 **Cost Estimation** - Calculate estimated API costs per model
-- 🔄 **Date Range Filters** - View Today, Yesterday, 7 Days, 30 Days, or All Time
-- 📈 **Hourly Breakdown** - See usage patterns throughout the day
-- 🚦 **Rate Limit Tracking** - Monitor remaining quotas for each provider
-- 🤖 **Model Breakdown** - Usage and cost per AI model
+- **Usage Analytics** - Track requests, tokens, success rates over time
+- **Cost Estimation** - Calculate estimated API costs per model
+- **Date Range Filters** - View Today, Yesterday, 7 Days, 30 Days, or All Time
+- **Hourly Breakdown** - See usage patterns throughout the day
+- **Rate Limit Tracking** - Monitor remaining quotas for each provider
+- **Model Breakdown** - Usage and cost per AI model
 
 ---
 
-## 🚀 Quick Start
-
-> **New users?** See [SETUP.md](SETUP.md) for a complete step-by-step guide!
+## Quick Start (Production)
 
 ### Prerequisites
 
@@ -51,22 +29,122 @@ graph LR
 - [Supabase](https://supabase.com) account (free tier works)
 - CLIProxy running with Management API enabled
 
+### 1. Download Configuration
+
+```bash
+# Create project directory
+mkdir cliproxy-dashboard && cd cliproxy-dashboard
+
+# Download docker-compose.yml
+curl -O https://raw.githubusercontent.com/leolionart/CLIProxyAPI-Dashboard/main/docker-compose.yml
+
+# Download environment template
+curl -O https://raw.githubusercontent.com/leolionart/CLIProxyAPI-Dashboard/main/.env.example
+cp .env.example .env
+```
+
+### 2. Configure Environment
+
+Edit `.env` with your credentials:
+
+```env
+# Supabase Configuration
+SUPABASE_URL=https://xxxxx.supabase.co
+SUPABASE_SECRET_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+
+# CLIProxy Connection
+CLIPROXY_URL=http://host.docker.internal:8317
+CLIPROXY_MANAGEMENT_KEY=your-management-secret-key
+
+# Optional Settings
+COLLECTOR_INTERVAL_SECONDS=300
+TIMEZONE_OFFSET_HOURS=7
+```
+
+### 3. Start Dashboard
+
+```bash
+docker compose up -d
+```
+
+### 4. Access Dashboard
+
+Open your browser: **http://localhost:8417**
+
+> First data will appear after ~5 minutes (first collection cycle)
+
 ---
 
-## 📦 Step 1: Set Up Supabase
+## Updating
 
-### 1.1 Create a Supabase Project
+Pull the latest images and restart:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+---
+
+## Configuration Reference
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SUPABASE_URL` | Your Supabase project URL | Required |
+| `SUPABASE_SECRET_KEY` | Supabase service role key | Required |
+| `CLIPROXY_URL` | CLIProxy Management API URL | `http://host.docker.internal:8317` |
+| `CLIPROXY_MANAGEMENT_KEY` | CLIProxy management secret | Required |
+| `COLLECTOR_INTERVAL_SECONDS` | Polling interval | `300` (5 min) |
+| `TIMEZONE_OFFSET_HOURS` | Your timezone offset from UTC | `7` |
+
+---
+
+## Troubleshooting
+
+### Check Logs
+
+```bash
+# All services
+docker compose logs -f
+
+# Collector only
+docker compose logs -f collector
+
+# Frontend only
+docker compose logs -f frontend
+```
+
+### Common Issues
+
+**Dashboard shows no data:**
+- Wait 5 minutes for first data collection
+- Check collector logs for connection errors
+- Verify Supabase tables exist (see Initial Setup below)
+
+**Collector can't connect to CLIProxy:**
+- Ensure CLIProxy has `remote-management.allow-remote: true`
+- Verify `CLIPROXY_MANAGEMENT_KEY` matches CLIProxy's secret
+- Check CLIProxy is accessible from Docker (`host.docker.internal`)
+
+---
+
+<details>
+<summary><h2>Initial Setup (First-time only)</h2></summary>
+
+### Set Up Supabase
+
+#### 1. Create a Supabase Project
 
 1. Go to [supabase.com](https://supabase.com) and sign in
 2. Click **New Project**
-3. Choose your organization, name your project, and set a database password
-4. Wait for project to be created (~2 minutes)
+3. Choose your organization, name your project, set database password
+4. Wait for project creation (~2 minutes)
 
-### 1.2 Create Database Tables
+#### 2. Create Database Tables
 
-1. In your Supabase project, go to **SQL Editor** (left sidebar)
+1. In Supabase, go to **SQL Editor** (left sidebar)
 2. Click **New Query**
-3. Copy and paste the following SQL:
+3. Paste and run the following SQL:
 
 ```sql
 -- ============================================
@@ -85,7 +163,7 @@ CREATE TABLE IF NOT EXISTS usage_snapshots (
     raw_data JSONB
 );
 
--- Table for storing per-model usage data (granular snapshot details)
+-- Table for storing per-model usage data
 CREATE TABLE IF NOT EXISTS model_usage (
     id BIGSERIAL PRIMARY KEY,
     snapshot_id BIGINT REFERENCES usage_snapshots(id) ON DELETE CASCADE,
@@ -108,7 +186,7 @@ CREATE TABLE IF NOT EXISTS daily_stats (
     failure_count INTEGER NOT NULL DEFAULT 0,
     total_tokens BIGINT NOT NULL DEFAULT 0,
     estimated_cost_usd DECIMAL(10, 6) DEFAULT 0,
-    breakdown JSONB DEFAULT '{}'::jsonb, -- Stores granular daily breakdown for models/endpoints
+    breakdown JSONB DEFAULT '{}'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -132,8 +210,8 @@ CREATE TABLE IF NOT EXISTS rate_limit_configs (
     request_limit INTEGER,
     context_window INTEGER,
     window_minutes INTEGER NOT NULL DEFAULT 1440,
-    reset_strategy VARCHAR(20) NOT NULL DEFAULT 'daily', -- 'daily' or 'rolling'
-    reset_anchor_timestamp TIMESTAMPTZ, -- For 'daily' strategy anchor
+    reset_strategy VARCHAR(20) NOT NULL DEFAULT 'daily',
+    reset_anchor_timestamp TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -168,7 +246,7 @@ ALTER TABLE model_pricing ENABLE ROW LEVEL SECURITY;
 ALTER TABLE rate_limit_configs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE rate_limit_status ENABLE ROW LEVEL SECURITY;
 
--- Create policies for read access (Frontend / Anon)
+-- Create policies for read access
 CREATE POLICY "Allow read access" ON usage_snapshots FOR SELECT USING (true);
 CREATE POLICY "Allow read access" ON model_usage FOR SELECT USING (true);
 CREATE POLICY "Allow read access" ON daily_stats FOR SELECT USING (true);
@@ -176,37 +254,29 @@ CREATE POLICY "Allow read access" ON model_pricing FOR SELECT USING (true);
 CREATE POLICY "Allow read access" ON rate_limit_configs FOR SELECT USING (true);
 CREATE POLICY "Allow read access" ON rate_limit_status FOR SELECT USING (true);
 
--- Create policies for service role (Collector / Write Access)
--- Note: 'service_role' key bypasses RLS by default, but explicit policies help clarity
+-- Create policies for service role (Collector)
 CREATE POLICY "Allow service insert" ON usage_snapshots FOR INSERT WITH CHECK (true);
 CREATE POLICY "Allow service update" ON usage_snapshots FOR UPDATE USING (true);
-
 CREATE POLICY "Allow service insert" ON model_usage FOR INSERT WITH CHECK (true);
-
 CREATE POLICY "Allow service upsert" ON daily_stats FOR ALL USING (true);
-
 CREATE POLICY "Allow service insert" ON model_pricing FOR INSERT WITH CHECK (true);
 CREATE POLICY "Allow service update" ON model_pricing FOR UPDATE USING (true);
-
 CREATE POLICY "Allow service all" ON rate_limit_configs FOR ALL USING (true);
 CREATE POLICY "Allow service all" ON rate_limit_status FOR ALL USING (true);
 ```
 
-4. Click **Run** to execute the SQL
-
-### 1.3 Get Your API Keys
+#### 3. Get Your API Keys
 
 1. Go to **Settings** > **API** in Supabase
 2. Copy these values:
    - **Project URL**: `https://xxxxx.supabase.co`
-   - **anon/public key**: Under "Project API keys" > "anon public"
-   - **service_role key**: Under "Project API keys" > "service_role" (click eye icon to reveal)
+   - **service_role key**: Under "Project API keys" > "service_role" (click eye icon)
 
 ---
 
-## ⚙️ Step 2: Configure CLIProxy
+### Configure CLIProxy
 
-Ensure your CLIProxy has the Management API enabled. In your CLIProxy config:
+Ensure your CLIProxy has Management API enabled:
 
 ```yaml
 remote-management:
@@ -214,81 +284,80 @@ remote-management:
   secret: "your-management-secret-key"
 ```
 
-Note the `secret` value - you'll need it in the next step.
+Note the `secret` value - use it as `CLIPROXY_MANAGEMENT_KEY` in your `.env`.
+
+</details>
 
 ---
 
-## 🔧 Step 3: Configure Dashboard
+<details>
+<summary><h2>Developer Guide</h2></summary>
 
-### 3.1 Clone the Repository
-
-```bash
-git clone https://github.com/yourusername/cliproxy-dashboard.git
-cd cliproxy-dashboard
-```
-
-### 3.2 Create Environment File
+### Local Frontend Development
 
 ```bash
-cp .env.example .env
+cd frontend
+npm install
+npm run dev
 ```
 
-### 3.3 Edit Environment Variables
+Access at `http://localhost:5173` with hot reload.
 
-Open `.env` and fill in your values:
+### Local Collector Development
 
-```env
-# Supabase Configuration
-SUPABASE_URL=https://xxxxx.supabase.co
-SUPABASE_PUBLISHABLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-SUPABASE_SECRET_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-
-# CLIProxy Connection
-CLIPROXY_URL=http://host.docker.internal:8317
-CLIPROXY_MANAGEMENT_KEY=your-management-secret-key
-
-# Collection Settings
-COLLECTOR_INTERVAL_SECONDS=300  # Poll every 5 minutes
-
-# Your timezone offset from UTC (default: 7 for Vietnam/Bangkok)
-TIMEZONE_OFFSET_HOURS=7
+```bash
+cd collector
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+python main.py
 ```
 
-**Important Notes:**
+### Building Docker Images Locally
 
-- `SUPABASE_PUBLISHABLE_KEY` = The "anon public" key from Supabase
-- `SUPABASE_SECRET_KEY` = The "service_role" key from Supabase
-- `CLIPROXY_URL` = Use `host.docker.internal:PORT` if CLIProxy runs on same machine
-- `CLIPROXY_MANAGEMENT_KEY` = Must match the `secret` in your CLIProxy config
+```bash
+# Build from source
+docker compose -f docker-compose.dev.yml build
+docker compose -f docker-compose.dev.yml up -d
+```
+
+### Project Structure
+
+```
+cliproxy-dashboard/
+├── collector/           # Python data collector
+│   ├── main.py         # Collector logic
+│   ├── rate_limiter.py # Rate limit tracking
+│   ├── Dockerfile
+│   └── requirements.txt
+├── frontend/           # React dashboard
+│   ├── src/
+│   │   ├── App.jsx
+│   │   ├── components/
+│   │   └── lib/
+│   ├── Dockerfile
+│   └── package.json
+├── docker-compose.yml  # Production (GHCR images)
+├── .env.example
+└── README.md
+```
+
+</details>
 
 ---
 
-## 🚢 Step 4: Deploy
-
-### Build and Start
-
-```bash
-docker compose build
-docker compose up -d
-```
-
-### Access Dashboard
-
-Open your browser to: **http://localhost:8417**
-
----
-
-## 📊 Usage
+<details>
+<summary><h2>Dashboard Usage Guide</h2></summary>
 
 ### Date Range Tabs
 
-| Tab                 | Description                            |
-| ------------------- | -------------------------------------- |
-| **Today**     | Shows usage delta for current day only |
-| **Yesterday** | Shows usage delta for previous day     |
-| **7 Days**    | Shows total usage over past week       |
-| **30 Days**   | Shows total usage over past month      |
-| **This Year** | Shows total usage for current year     |
+| Tab | Description |
+|-----|-------------|
+| **Today** | Usage delta for current day only |
+| **Yesterday** | Usage delta for previous day |
+| **7 Days** | Total usage over past week |
+| **30 Days** | Total usage over past month |
+| **This Year** | Total usage for current year |
 
 ### Dashboard Sections
 
@@ -301,153 +370,51 @@ Open your browser to: **http://localhost:8417**
 7. **Rate Limits** - Remaining quota for each provider
 8. **Cost Details** - Detailed cost table by model
 
----
-
-## 🔧 Configuration Reference
-
-### Environment Variables
-
-| Variable                       | Description                   | Default                              |
-| ------------------------------ | ----------------------------- | ------------------------------------ |
-| `SUPABASE_URL`               | Your Supabase project URL     | Required                             |
-| `SUPABASE_PUBLISHABLE_KEY`   | Supabase anon/public key      | Required                             |
-| `SUPABASE_SECRET_KEY`        | Supabase service role key     | Required                             |
-| `CLIPROXY_URL`               | CLIProxy Management API URL   | `http://host.docker.internal:8317` |
-| `CLIPROXY_MANAGEMENT_KEY`    | CLIProxy management secret    | Required                             |
-| `COLLECTOR_INTERVAL_SECONDS` | Polling interval              | `300` (5 min)                      |
-| `TIMEZONE_OFFSET_HOURS`      | Your timezone offset from UTC | `7`                                |
-
 ### Default Model Pricing (USD per 1M tokens)
 
-| Model             | Input          | Output |
-| ----------------- | -------------- | ------ |
-| GPT-4o            | $2.50 | $10.00 |        |
-| GPT-4o-mini       | $0.15 | $0.60  |        |
-| Claude 3.5 Sonnet | $3.00 | $15.00 |        |
-| Claude 4 Sonnet   | $3.00 | $15.00 |        |
-| Gemini 2.5 Flash  | $0.15 | $0.60  |        |
-| Gemini 2.5 Pro    | $1.25 | $10.00 |        |
+| Model | Input | Output |
+|-------|-------|--------|
+| GPT-4o | $2.50 | $10.00 |
+| GPT-4o-mini | $0.15 | $0.60 |
+| Claude 3.5 Sonnet | $3.00 | $15.00 |
+| Claude 4 Sonnet | $3.00 | $15.00 |
+| Gemini 2.5 Flash | $0.15 | $0.60 |
+| Gemini 2.5 Pro | $1.25 | $10.00 |
+
+</details>
 
 ---
 
-## 🛠 Developer Guide
+## Architecture
 
-### A. Local Frontend Development (Hot Reload)
-To quickly test changes in the UI without rebuilding Docker every time:
+```mermaid
+graph LR
+    User["User / AI Clients"] --> Proxy["CLIProxy Server"]
+    Proxy --> Provider["AI Provider (OpenAI/Anthropic)"]
 
-1.  **Navigate to frontend**:
-    ```bash
-    cd frontend
-    ```
-2.  **Install Dependencies**:
-    ```bash
-    npm install
-    ```
-3.  **Start Dev Server**:
-    ```bash
-    npm run dev
-    ```
-    Access at: `http://localhost:5173`
+    subgraph "Data Pipeline"
+        Proxy -- API --> Collector["Python Collector"]
+        Collector -- Writes --> DB[("Supabase DB")]
+    end
 
-*Note: The frontend will still connect to the Supabase instance defined in your `.env` file.*
-
-### B. Verifying Full Stack Changes (Docker)
-If you modify the Python Collector or want to simulate the production build:
-
-```bash
-# Stop running containers
-docker compose down
-
-# Rebuild and start (forces recreation of images with latest code)
-docker compose up -d --build
+    subgraph "Visualization"
+        DB -- Reads --> Dashboard["React Dashboard"]
+        Dashboard --> Browser["User Browser"]
+    end
 ```
 
 ---
 
-## 🔍 Troubleshooting
-
-### Collector can't connect to CLIProxy
-
-```bash
-# Check collector logs
-docker compose logs -f collector
-```
-
-- Ensure CLIProxy is running on the specified port
-- Verify `remote-management.allow-remote: true` in CLIProxy config
-- Check that `CLIPROXY_MANAGEMENT_KEY` matches the secret
-
-### Dashboard shows no data
-
-1. Wait 5 minutes for first data collection
-2. Check collector logs: `docker compose logs collector`
-3. Verify Supabase tables were created correctly
-4. Check browser console for errors (F12)
-
-### Connection issues with host.docker.internal
-
-On Linux, you may need to add to docker-compose.yml:
-
-```yaml
-extra_hosts:
-  - "host.docker.internal:host-gateway"
-```
-
----
-
-## 🔄 Updating
-
-```bash
-git pull
-docker compose build
-docker compose up -d
-```
-
----
-
-## 📁 Project Structure
-
-```
-cliproxy-dashboard/
-├── collector/           # Python data collector
-│   ├── main.py         # Collector logic
-│   ├── Dockerfile
-│   └── requirements.txt
-├── frontend/           # React dashboard
-│   ├── src/
-│   │   ├── App.jsx    # Main application
-│   │   ├── components/
-│   │   └── lib/
-│   ├── Dockerfile
-│   └── package.json
-├── docker-compose.yml
-├── .env.example
-├── supabase-schema.sql
-└── README.md
-```
-
----
-
-## 📝 License
+## License
 
 MIT License - see [LICENSE](LICENSE) file for details
 
----
+## Contributing
 
-## 🤝 Contributing
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+## Support
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+If you find this project helpful, please give it a star!
 
----
-
-## ⭐ Support
-
-If you find this project helpful, please give it a star ⭐
-
-For detailed setup instructions, see [SETUP.md](SETUP.md)
+For detailed setup, see the [Initial Setup](#initial-setup-first-time-only) section above.

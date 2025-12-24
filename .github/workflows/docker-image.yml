@@ -6,22 +6,65 @@ on:
   pull_request:
     branches: [ "main" ]
 
+env:
+  REGISTRY: ghcr.io
+  COLLECTOR_IMAGE: cliproxy-collector
+  FRONTEND_IMAGE: cliproxy-dashboard
+
 jobs:
-
-  build:
-
+  build-and-push:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read
+      packages: write
+
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-    - name: Build Collector image
-      run: docker build ./collector --file ./collector/Dockerfile --tag cliproxy-collector:$(date +%s)
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Build Frontend image
-      run: |
-        docker build ./frontend \
-          --file ./frontend/Dockerfile \
-          --build-arg VITE_SUPABASE_URL=https://placeholder.supabase.co \
-          --build-arg VITE_SUPABASE_PUBLISHABLE_KEY=placeholder \
-          --tag cliproxy-dashboard:$(date +%s)
+    - name: Extract metadata for Collector
+      id: meta-collector
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.COLLECTOR_IMAGE }}
+        tags: |
+          type=raw,value=latest,enable={{is_default_branch}}
+          type=sha,prefix=
+
+    - name: Extract metadata for Frontend
+      id: meta-frontend
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.FRONTEND_IMAGE }}
+        tags: |
+          type=raw,value=latest,enable={{is_default_branch}}
+          type=sha,prefix=
+
+    - name: Build and push Collector image
+      uses: docker/build-push-action@v6
+      with:
+        context: ./collector
+        file: ./collector/Dockerfile
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta-collector.outputs.tags }}
+        labels: ${{ steps.meta-collector.outputs.labels }}
+
+    - name: Build and push Frontend image
+      uses: docker/build-push-action@v6
+      with:
+        context: ./frontend
+        file: ./frontend/Dockerfile
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta-frontend.outputs.tags }}
+        labels: ${{ steps.meta-frontend.outputs.labels }}
+        build-args: |
+          VITE_SUPABASE_URL=https://placeholder.supabase.co
+          VITE_SUPABASE_PUBLISHABLE_KEY=placeholder

@@ -1,6 +1,6 @@
 services:
   collector:
-    build: ./collector
+    image: ghcr.io/leolionart/cliproxy-collector:latest
     container_name: cliproxy-collector
     environment:
       - SUPABASE_URL=${SUPABASE_URL}
@@ -32,12 +32,7 @@ services:
         max-file: "3"
 
   frontend:
-    build:
-      context: ./frontend
-      args:
-        - VITE_SUPABASE_URL=${SUPABASE_URL}
-        - VITE_SUPABASE_PUBLISHABLE_KEY=${SUPABASE_PUBLISHABLE_KEY}
-        - VITE_COLLECTOR_URL=
+    image: ghcr.io/leolionart/cliproxy-dashboard:latest
     container_name: cliproxy-dashboard
     ports:
       - "8417:80"

@@ -5,6 +5,8 @@ import {
 } from 'recharts'
 import { BarGraph, PieGraph, DollarSign, Zap, Clock, Moon, Sun, Refresh } from './Icons'
 import RateLimitCard from './RateLimitCard'
+import UsageHeatmap from './UsageHeatmap'
+import FailureRateCard from './FailureRateCard'
 
 
 const COLORS = ['#8b5cf6', '#3b82f6', '#06b6d4', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#6366f1']
@@ -232,7 +234,7 @@ const ApiKeyLabel = ({ x, y, width, height, value, data, isDarkMode }) => {
     )
 }
 
-function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefreshing, lastUpdated, dateRange, onDateRangeChange, endpointUsage: rawEndpointUsage }) {
+function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefreshing, lastUpdated, dateRange, onDateRangeChange, endpointUsage: rawEndpointUsage, onSignOut }) {
     // Auto-select time range based on dateRange: hour for today/yesterday, day for longer ranges
     const defaultTimeRange = (dateRange === 'today' || dateRange === 'yesterday') ? 'hour' : 'day'
 
@@ -513,6 +515,28 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                     <button className="theme-toggle" onClick={toggleTheme} title="Toggle theme">
                         {isDarkMode ? <Sun /> : <Moon />}
                     </button>
+                    {onSignOut && (
+                        <button className="logout-btn" onClick={onSignOut} title="Sign out" style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            padding: '8px 12px',
+                            borderRadius: '8px',
+                            border: 'none',
+                            background: isDarkMode ? 'rgba(239, 68, 68, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+                            color: '#ef4444',
+                            fontSize: '13px',
+                            fontWeight: '500',
+                            cursor: 'pointer',
+                            transition: 'background 0.2s'
+                        }}>
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" width="16" height="16">
+                                <path fillRule="evenodd" d="M3 4.25A2.25 2.25 0 015.25 2h5.5A2.25 2.25 0 0113 4.25v2a.75.75 0 01-1.5 0v-2a.75.75 0 00-.75-.75h-5.5a.75.75 0 00-.75.75v11.5c0 .414.336.75.75.75h5.5a.75.75 0 00.75-.75v-2a.75.75 0 011.5 0v2A2.25 2.25 0 0110.75 18h-5.5A2.25 2.25 0 013 15.75V4.25z" clipRule="evenodd" />
+                                <path fillRule="evenodd" d="M19 10a.75.75 0 00-.75-.75H8.704l1.048-.943a.75.75 0 10-1.004-1.114l-2.5 2.25a.75.75 0 000 1.114l2.5 2.25a.75.75 0 101.004-1.114l-1.048-.943h9.546A.75.75 0 0019 10z" clipRule="evenodd" />
+                            </svg>
+                            Logout
+                        </button>
+                    )}
                 </div>
             </header>
 
@@ -824,6 +848,12 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                     </table>
                 </div>
             </div>
+
+            {/* Usage Pattern Heatmap */}
+            <UsageHeatmap dailyStats={filteredDailyStats} isDarkMode={isDarkMode} />
+
+            {/* Failure Rate Analysis */}
+            <FailureRateCard dailyStats={filteredDailyStats} isDarkMode={isDarkMode} />
         </div>
     )
 }

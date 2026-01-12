@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS model_usage (
     input_tokens BIGINT NOT NULL DEFAULT 0,
     output_tokens BIGINT NOT NULL DEFAULT 0,
     total_tokens BIGINT NOT NULL DEFAULT 0,
-    estimated_cost_usd DECIMAL(10, 6) DEFAULT 0,
+    estimated_cost_usd DECIMAL(16, 6) DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS daily_stats (
     success_count INTEGER NOT NULL DEFAULT 0,
     failure_count INTEGER NOT NULL DEFAULT 0,
     total_tokens BIGINT NOT NULL DEFAULT 0,
-    estimated_cost_usd DECIMAL(10, 6) DEFAULT 0,
+    estimated_cost_usd DECIMAL(16, 6) DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

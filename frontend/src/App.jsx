@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from './lib/supabase'
 import Dashboard from './components/Dashboard'
+import Auth from './components/Auth'
 
 // Helper to get date boundaries based on range ID
 // Uses local timezone for date display, converts to UTC for timestamp queries
@@ -80,6 +81,11 @@ const getDateBoundaries = (rangeId) => {
 }
 
 function App() {
+    // Auth state
+    const [session, setSession] = useState(null)
+    const [authLoading, setAuthLoading] = useState(true)
+
+    // Data state
     const [stats, setStats] = useState(null)
     const [dailyStats, setDailyStats] = useState([])
     const [modelUsage, setModelUsage] = useState([])
@@ -89,6 +95,27 @@ function App() {
     const [isRefreshing, setIsRefreshing] = useState(false) // For date range changes
     const [lastUpdated, setLastUpdated] = useState(null)
     const [dateRange, setDateRange] = useState('today') // 'today', 'yesterday', '7d', '30d', 'year', 'all'
+
+    // Auth: Check session on mount and listen for changes
+    useEffect(() => {
+        // Get initial session
+        supabase.auth.getSession().then(({ data: { session } }) => {
+            setSession(session)
+            setAuthLoading(false)
+        })
+
+        // Listen for auth state changes
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+            setSession(session)
+        })
+
+        return () => subscription.unsubscribe()
+    }, [])
+
+    // Sign out handler
+    const handleSignOut = async () => {
+        await supabase.auth.signOut()
+    }
 
     const fetchData = useCallback(async (rangeId = dateRange, isInitial = false) => {
         try {
@@ -705,6 +732,38 @@ function App() {
         setDateRange(days)
     }
 
+    // Show loading while checking auth
+    if (authLoading) {
+        return (
+            <div className="app" style={{
+                minHeight: '100vh',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)'
+            }}>
+                <div className="spinner" style={{
+                    width: '40px',
+                    height: '40px',
+                    border: '3px solid rgba(59, 130, 246, 0.2)',
+                    borderTopColor: '#3b82f6',
+                    borderRadius: '50%',
+                    animation: 'spin 1s linear infinite'
+                }} />
+                <style>{`
+                    @keyframes spin {
+                        to { transform: rotate(360deg); }
+                    }
+                `}</style>
+            </div>
+        )
+    }
+
+    // Show Auth if not logged in
+    if (!session) {
+        return <Auth />
+    }
+
     return (
         <div className="app">
             <Dashboard
@@ -718,6 +777,7 @@ function App() {
                 dateRange={dateRange}
                 onDateRangeChange={handleDateRangeChange}
                 endpointUsage={endpointUsage}
+                onSignOut={handleSignOut}
             />
         </div>
     )

@@ -1,6 +1,6 @@
 services:
   collector:
-    image: ghcr.io/leolionart/cliproxy-collector:latest
+    image: ghcr.io/jc01rho/cliproxy-collector:latest
     container_name: cliproxy-collector
     environment:
       - SUPABASE_URL=${SUPABASE_URL}
@@ -27,10 +27,10 @@ services:
   frontend:
     build:
       context: ./frontend
-      args:
-        - VITE_SUPABASE_URL=${SUPABASE_URL}
-        - VITE_SUPABASE_PUBLISHABLE_KEY=${SUPABASE_PUBLISHABLE_KEY}
     container_name: cliproxy-dashboard
+    environment:
+      - VITE_SUPABASE_URL=${SUPABASE_URL}
+      - VITE_SUPABASE_PUBLISHABLE_KEY=${SUPABASE_PUBLISHABLE_KEY}
     ports:
       - "8318:80"
     depends_on:

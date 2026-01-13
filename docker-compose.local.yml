@@ -25,8 +25,7 @@ services:
     networks:
       - cliproxy-network
   frontend:
-    build:
-      context: ./frontend
+    image: ghcr.io/jc01rho/cliproxy-dashboard:latest
     container_name: cliproxy-dashboard
     environment:
       - VITE_SUPABASE_URL=${SUPABASE_URL}

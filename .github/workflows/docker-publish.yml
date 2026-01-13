@@ -59,6 +59,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+        continue-on-error: true
 
   build-dashboard:
     runs-on: ubuntu-latest
@@ -102,3 +103,4 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+        continue-on-error: true

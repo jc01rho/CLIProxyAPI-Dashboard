@@ -83,6 +83,23 @@ DEFAULT_PRICING = {
     "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
     "_default": {"input": 0.15, "output": 0.60},
 }
+
+# Priority model patterns - checked FIRST before DEFAULT_PRICING
+# If model name contains the pattern, use this pricing (USD per 1M tokens)
+PRIORITY_MODEL_PATTERNS = {
+    "opus-4-5": {"input": 5.00, "output": 25.00},
+    "gemini-3-pro": {"input": 2.00, "output": 12.00},
+    "glm-4.7": {"input": 0.40, "output": 1.50},
+    "grok-code-fast-1": {"input": 0.20, "output": 1.50},
+    "gemini-3-flash": {"input": 0.50, "output": 3.00},
+    "kimi-k2-thinking": {"input": 0.40, "output": 1.75},
+    "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+    "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
+    "minimax-m2.1": {"input": 0.27, "output": 1.12},
+    "deepseek-v3.2-reasoner": {"input": 0.25, "output": 0.38},
+    "sonnet-4-5": {"input": 3.00, "output": 15.00},
+}
+
 LLM_PRICES_URL = "https://www.llm-prices.com/current-v1.json"
 
 # --- Globals ---
@@ -287,8 +304,13 @@ def get_model_pricing() -> Dict[str, Dict[str, float]]:
 def find_pricing_for_model(
     model_name: str, pricing: Dict
 ) -> tuple[Dict[str, float], bool]:
-    # (Implementation from before)
+    # Check PRIORITY_MODEL_PATTERNS FIRST (highest priority)
     model_lower = model_name.lower()
+    for pattern, prices in PRIORITY_MODEL_PATTERNS.items():
+        if pattern in model_lower:
+            return prices, True
+
+    # Then check regular pricing (DEFAULT_PRICING + remote pricing)
     if model_lower in pricing:
         return pricing[model_lower], True
     for pattern, prices in pricing.items():

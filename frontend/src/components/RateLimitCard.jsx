@@ -436,6 +436,9 @@ function RateLimitCard({ usageData }) {
     }
 
     const enabledProviders = config && config.providers ? Object.entries(config.providers) : []
+    const hasAnyLimits = enabledProviders.some(([, provider]) => 
+        provider.enabled && provider.limits && provider.limits.length > 0
+    )
 
     return (
         <>
@@ -454,7 +457,7 @@ function RateLimitCard({ usageData }) {
                     </div>
                 </div>
 
-                {enabledProviders.length > 0 ? (
+                {hasAnyLimits ? (
                     <div className="providers-limits-grid">
                         {enabledProviders.map(([key, provider]) => (
                             <ProviderCard

@@ -280,9 +280,11 @@ function App() {
                         hasBreakdownData = true
                         const b = row.breakdown
 
-                        // Store daily breakdown for charts
-                        if (b.models) {
-                             breakdownByDate[row.stat_date] = b.models
+                        // Store daily breakdown for charts (including hourly for heatmap)
+                        breakdownByDate[row.stat_date] = {
+                            models: b.models || {},
+                            hourly: b.hourly || {},
+                            endpoints: b.endpoints || {}
                         }
 
                         // Merge Models
@@ -364,7 +366,7 @@ function App() {
                     success_count: fromDB?.success_count ?? (calculated?.success || 0),
                     failure_count: fromDB?.failure_count ?? (calculated?.failure || 0),
                     estimated_cost_usd: fromDB?.estimated_cost_usd ?? 0,
-                    models: breakdownByDate[dateKey] || {}
+                    breakdown: breakdownByDate[dateKey] || { models: {}, hourly: {}, endpoints: {} }
                 }
             }).sort((a, b) => a.stat_date.localeCompare(b.stat_date))
 

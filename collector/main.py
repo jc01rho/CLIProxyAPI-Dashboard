@@ -394,6 +394,7 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                         "model_name": model_name,
                         "estimated_cost_usd": cost,
                         "request_count": model_data.get("total_requests", 0),
+                        "failure_count": model_data.get("failure_count", 0),
                         "input_tokens": input_tok,
                         "output_tokens": output_tok,
                         "total_tokens": model_data.get("total_tokens", 0),
@@ -524,18 +525,21 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
 
                 # Get values safely
                 p_req = prev.get("request_count", 0)
+                p_fail = prev.get("failure_count", 0)
                 p_tok = prev.get("total_tokens", 0)
                 p_cost = float(prev.get("estimated_cost_usd", 0))
                 p_in = prev.get("input_tokens", 0)
                 p_out = prev.get("output_tokens", 0)
 
                 c_req = curr.get("request_count", 0)
+                c_fail = curr.get("failure_count", 0)
                 c_tok = curr.get("total_tokens", 0)
                 c_cost = float(curr.get("estimated_cost_usd", 0))
                 c_in = curr.get("input_tokens", 0)
                 c_out = curr.get("output_tokens", 0)
 
                 d_req = c_req - p_req
+                d_fail = c_fail - p_fail
                 d_tok = c_tok - p_tok
                 d_cost = c_cost - p_cost
                 d_in = c_in - p_in
@@ -544,6 +548,7 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                 # Granular restart detection
                 if d_req < 0 or d_tok < 0:
                     d_req = c_req
+                    d_fail = c_fail
                     d_tok = c_tok
                     d_cost = c_cost
                     d_in = c_in
@@ -588,6 +593,7 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                             "failures": 0,
                         }
                     breakdown_deltas["models"][model_name]["requests"] += d_req
+                    breakdown_deltas["models"][model_name]["failures"] += d_fail
                     breakdown_deltas["models"][model_name]["tokens"] += d_tok
                     breakdown_deltas["models"][model_name]["cost"] += d_cost
                     breakdown_deltas["models"][model_name]["input_tokens"] += d_in
@@ -655,6 +661,7 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                 model_name = r.get("model_name")
                 endpoint = r.get("api_endpoint") or "unknown"
                 req = r.get("request_count", 0)
+                fail = r.get("failure_count", 0)
                 tok = r.get("total_tokens", 0)
                 cost = float(r.get("estimated_cost_usd", 0))
                 in_tok = r.get("input_tokens", 0)
@@ -670,6 +677,7 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                         "failures": 0,
                     }
                 breakdown_deltas["models"][model_name]["requests"] += req
+                breakdown_deltas["models"][model_name]["failures"] += fail
                 breakdown_deltas["models"][model_name]["tokens"] += tok
                 breakdown_deltas["models"][model_name]["cost"] += cost
                 breakdown_deltas["models"][model_name]["input_tokens"] += in_tok

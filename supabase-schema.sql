@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS model_usage (
     api_endpoint VARCHAR(255) NOT NULL,
     model_name VARCHAR(255) NOT NULL,
     request_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
     input_tokens BIGINT NOT NULL DEFAULT 0,
     output_tokens BIGINT NOT NULL DEFAULT 0,
     total_tokens BIGINT NOT NULL DEFAULT 0,

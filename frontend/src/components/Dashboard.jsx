@@ -193,9 +193,16 @@ const CustomTooltip = ({ active, payload, label, isDarkMode, forceCurrency }) =>
                             <span style={{ color: isDarkMode ? '#CBD5E1' : '#334155', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 140 }}>
                                 {mName}
                             </span>
-                            <span style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'monospace', fontSize: 10 }}>
-                                ${mData.cost?.toFixed(2) || '0.00'}
-                            </span>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                {(mData.input_tokens || mData.output_tokens) > 0 && (
+                                    <span style={{ color: isDarkMode ? '#94A3B8' : '#64748B', fontFamily: 'monospace', fontSize: 9 }}>
+                                        {(mData.input_tokens || 0).toLocaleString()}/{(mData.output_tokens || 0).toLocaleString()}
+                                    </span>
+                                )}
+                                <span style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'monospace', fontSize: 10, minWidth: 45, textAlign: 'right' }}>
+                                    ${mData.cost?.toFixed(2) || '0.00'}
+                                </span>
+                            </div>
                         </div>
                     ))}
                     {Object.keys(data.models).length > 5 && (
@@ -205,17 +212,40 @@ const CustomTooltip = ({ active, payload, label, isDarkMode, forceCurrency }) =>
                     )}
                 </div>
             )}
+
+            {/* Token Summary for API Keys */}
+            {(data.input_tokens || data.output_tokens || data.total_tokens) && (
+                <div style={{ marginTop: 8, borderTop: `1px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.2)' : 'rgba(71, 85, 105, 0.1)'}`, paddingTop: 8 }}>
+                    <div style={{ fontSize: 10, color: isDarkMode ? '#94A3B8' : '#64748B', marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>Tokens</div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 2 }}>
+                        <span style={{ color: isDarkMode ? '#CBD5E1' : '#334155' }}>Input</span>
+                        <span style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'monospace' }}>{(data.input_tokens || 0).toLocaleString()}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 2 }}>
+                        <span style={{ color: isDarkMode ? '#CBD5E1' : '#334155' }}>Output</span>
+                        <span style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'monospace' }}>{(data.output_tokens || 0).toLocaleString()}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}>
+                        <span style={{ color: isDarkMode ? '#CBD5E1' : '#334155', fontWeight: 500 }}>Total</span>
+                        <span style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'monospace', fontWeight: 600 }}>{((data.input_tokens || 0) + (data.output_tokens || 0)).toLocaleString()}</span>
+                    </div>
+                </div>
+            )}
         </div>
     )
 }
 
-// Custom Label for API Keys chart to show requests and cost
+// Custom Label for API Keys chart to show requests, tokens and cost
 const ApiKeyLabel = ({ x, y, width, height, value, data, isDarkMode }) => {
     const item = data
     if (!item) return null
 
     const labelX = x + width + 10
     const labelY = y + height / 2
+
+    // Calculate total tokens (prefer total_tokens, fallback to input+output)
+    const totalTokens = item.total_tokens || (item.input_tokens || 0) + (item.output_tokens || 0)
+    const tokensText = totalTokens > 0 ? `${totalTokens.toLocaleString()} tok | ` : ''
 
     return (
         <g>
@@ -228,7 +258,7 @@ const ApiKeyLabel = ({ x, y, width, height, value, data, isDarkMode }) => {
                 textAnchor="start"
                 dominantBaseline="middle"
             >
-                {value.toLocaleString()} req | ${item.cost?.toFixed(2) || '0.00'}
+                {value.toLocaleString()} req | {tokensText}${item.cost?.toFixed(2) || '0.00'}
             </text>
         </g>
     )

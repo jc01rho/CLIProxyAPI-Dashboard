@@ -318,30 +318,40 @@ function App() {
                         // Merge Endpoints
                         if (b.endpoints) {
                              for (const [epName, data] of Object.entries(b.endpoints)) {
-                                 if (!aggregatedBreakdown.endpoints[epName]) {
-                                     aggregatedBreakdown.endpoints[epName] = {
-                                         api_endpoint: epName,
-                                         request_count: 0,
-                                         estimated_cost_usd: 0,
-                                         models: {} // Track nested model usage
-                                     }
-                                 }
-                                 const e = aggregatedBreakdown.endpoints[epName]
-                                 e.request_count += data.requests || 0
-                                 e.estimated_cost_usd += data.cost || 0
+                                  if (!aggregatedBreakdown.endpoints[epName]) {
+                                      aggregatedBreakdown.endpoints[epName] = {
+                                          api_endpoint: epName,
+                                          request_count: 0,
+                                          estimated_cost_usd: 0,
+                                          input_tokens: 0,
+                                          output_tokens: 0,
+                                          total_tokens: 0,
+                                          models: {} // Track nested model usage
+                                      }
+                                  }
+                                  const e = aggregatedBreakdown.endpoints[epName]
+                                  e.request_count += data.requests || 0
+                                  e.estimated_cost_usd += data.cost || 0
 
-                                 // Merge nested models if available
-                                 if (data.models) {
-                                     for (const [mName, mData] of Object.entries(data.models)) {
-                                         if (!e.models[mName]) {
-                                             e.models[mName] = { requests: 0, cost: 0, tokens: 0 }
-                                         }
-                                         e.models[mName].requests += mData.requests || 0
-                                         e.models[mName].cost += mData.cost || 0
-                                         e.models[mName].tokens += mData.tokens || 0
-                                     }
-                                 }
-                            }
+                                  // Merge nested models if available
+                                  if (data.models) {
+                                      for (const [mName, mData] of Object.entries(data.models)) {
+                                          if (!e.models[mName]) {
+                                              e.models[mName] = { requests: 0, cost: 0, tokens: 0, input_tokens: 0, output_tokens: 0 }
+                                          }
+                                          e.models[mName].requests += mData.requests || 0
+                                          e.models[mName].cost += mData.cost || 0
+                                          e.models[mName].tokens += mData.tokens || 0
+                                          e.models[mName].input_tokens += mData.input_tokens || 0
+                                          e.models[mName].output_tokens += mData.output_tokens || 0
+
+                                          // Aggregate tokens to endpoint level
+                                          e.input_tokens += mData.input_tokens || 0
+                                          e.output_tokens += mData.output_tokens || 0
+                                          e.total_tokens += mData.tokens || 0
+                                      }
+                                  }
+                             }
                         }
                     }
                 })

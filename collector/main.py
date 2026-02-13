@@ -48,7 +48,7 @@ TRIGGER_PORT = int(os.getenv("COLLECTOR_TRIGGER_PORT", "5001"))
 
 # Default pricing (USD per 1M tokens) - Updated Dec 2024
 DEFAULT_PRICING = {
-    # ... (pricing data remains the same)
+    # OpenAI
     "gpt-4o": {"input": 2.50, "output": 10.00},
     "gpt-4o-mini": {"input": 0.15, "output": 0.60},
     "gpt-4-turbo": {"input": 10.00, "output": 30.00},
@@ -59,10 +59,14 @@ DEFAULT_PRICING = {
     "o1-preview": {"input": 15.00, "output": 60.00},
     "o3": {"input": 15.00, "output": 60.00},
     "o3-mini": {"input": 1.10, "output": 4.40},
+    # Anthropic Claude
     "claude-sonnet-4": {"input": 3.00, "output": 15.00},
     "claude-4-sonnet": {"input": 3.00, "output": 15.00},
     "claude-opus-4": {"input": 15.00, "output": 75.00},
     "claude-4-opus": {"input": 15.00, "output": 75.00},
+    "claude-opus-4.5": {"input": 5.00, "output": 25.00},
+    "claude-opus-4.6": {"input": 5.00, "output": 25.00},
+    "claude-sonnet-4.5": {"input": 3.00, "output": 15.00},
     "claude-3-5-sonnet": {"input": 3.00, "output": 15.00},
     "claude-3.5-sonnet": {"input": 3.00, "output": 15.00},
     "claude-3-5-haiku": {"input": 0.80, "output": 4.00},
@@ -73,34 +77,63 @@ DEFAULT_PRICING = {
     "claude-sonnet": {"input": 3.00, "output": 15.00},
     "claude-opus": {"input": 15.00, "output": 75.00},
     "claude-haiku": {"input": 0.80, "output": 4.00},
+    # Google Gemini
     "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
-    "gemini-2.5-flash": {"input": 0.075, "output": 0.30},
-    "gemini-2.5-flash-preview": {"input": 0.075, "output": 0.30},
+    "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+    "gemini-2.5-flash-preview": {"input": 0.30, "output": 2.50},
     "gemini-2.0-flash": {"input": 0.10, "output": 0.40},
     "gemini-2.0-flash-lite": {"input": 0.075, "output": 0.30},
     "gemini-2.0-flash-exp": {"input": 0.10, "output": 0.40},
     "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
     "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
-    "_default": {"input": 0.15, "output": 0.60},
+    "gemini-3-pro": {"input": 2.00, "output": 12.00},
+    "gemini-3-flash": {"input": 0.50, "output": 3.00},
+    # DeepSeek
+    "deepseek-r1": {"input": 0.55, "output": 2.19},
+    "deepseek-v3": {"input": 0.27, "output": 1.10},
+    "deepseek-chat": {"input": 0.27, "output": 1.10},
+    "deepseek-reasoner": {"input": 0.55, "output": 2.19},
+    # MiniMax
+    "minimax-m2.1": {"input": 0.27, "output": 1.12},
+    "minimax-m2.5": {"input": 0.30, "output": 1.20},
+    # Z-AI (GLM)
+    "glm-4.5-air": {"input": 0.14, "output": 0.14},
+    "glm-5": {"input": 0.80, "output": 2.56},
+    "glm-4.7": {"input": 0.40, "output": 1.50},
+    # Qwen
+    "qwen3-coder": {"input": 0.07, "output": 0.30},
+    "qwen3-max": {"input": 1.20, "output": 6.00},
+    "qwen-2.5": {"input": 0.40, "output": 1.60},
+    # Moonshot (Kimi)
+    "kimi-k2.5": {"input": 0.45, "output": 2.25},
+    "kimi-k2-thinking": {"input": 0.40, "output": 1.75},
+    # Default - raised from $0.15/$0.60 to more realistic average
+    "_default": {"input": 1.00, "output": 4.00},
 }
 
 # Priority model patterns - checked FIRST before DEFAULT_PRICING
 # If model name contains the pattern, use this pricing (USD per 1M tokens)
 PRIORITY_MODEL_PATTERNS = {
     "opus-4-5": {"input": 5.00, "output": 25.00},
-    "gemini-3-pro": {"input": 2.00, "output": 12.00},
-    "glm-4.7": {"input": 0.40, "output": 1.50},
-    "grok-code-fast-1": {"input": 0.20, "output": 1.50},
-    "gemini-3-flash": {"input": 0.50, "output": 3.00},
-    "kimi-k2-thinking": {"input": 0.40, "output": 1.75},
-    "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
-    "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
-    "minimax-m2.1": {"input": 0.27, "output": 1.12},
-    "deepseek-v3.2-reasoner": {"input": 0.25, "output": 0.38},
+    "opus-4.6": {"input": 5.00, "output": 25.00},
     "sonnet-4-5": {"input": 3.00, "output": 15.00},
+    "gemini-3-pro": {"input": 2.00, "output": 12.00},
+    "gemini-3-flash": {"input": 0.50, "output": 3.00},
+    "deepseek-r1": {"input": 0.55, "output": 2.19},
+    "deepseek-v3": {"input": 0.27, "output": 1.10},
+    "minimax-m2.5": {"input": 0.30, "output": 1.20},
+    "minimax-m2.1": {"input": 0.27, "output": 1.12},
+    "glm-5": {"input": 0.80, "output": 2.56},
+    "glm-4.7": {"input": 0.40, "output": 1.50},
+    "kimi-k2.5": {"input": 0.45, "output": 2.25},
+    "kimi-k2-thinking": {"input": 0.40, "output": 1.75},
+    "grok-code-fast-1": {"input": 0.20, "output": 1.50},
+    "qwen3-coder": {"input": 0.07, "output": 0.30},
+    "qwen3-max": {"input": 1.20, "output": 6.00},
 }
 
 LLM_PRICES_URL = "https://www.llm-prices.com/current-v1.json"
+OPENROUTER_PRICES_URL = "https://openrouter.ai/api/v1/models"
 
 # --- Globals ---
 supabase: Optional[Client] = None
@@ -239,34 +272,89 @@ def run_full_sync_once():
 
 
 # --- Core Logic Functions (fetch_remote_pricing, init_supabase, etc.) ---
-# These functions remain largely the same as before.
 def fetch_remote_pricing() -> Dict[str, Dict[str, float]]:
-    # (Implementation from before)
     global remote_pricing_cache, remote_pricing_last_fetch
     if remote_pricing_cache and (time.time() - remote_pricing_last_fetch) < 3600:
         return remote_pricing_cache
+
+    pricing = {}
+
     try:
-        logger.info("Fetching latest pricing from llm-prices.com...")
+        logger.info("Fetching latest pricing from OpenRouter...")
+        response = requests.get(OPENROUTER_PRICES_URL, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+
+        for item in data.get("data", []):
+            model_id = item.get("id", "")
+            if not model_id:
+                continue
+
+            item_pricing = item.get("pricing", {})
+            prompt_price = item_pricing.get("prompt")
+            completion_price = item_pricing.get("completion")
+
+            if prompt_price is None or completion_price is None:
+                continue
+
+            try:
+                prompt_per_token = float(prompt_price)
+                completion_per_token = float(completion_price)
+
+                if prompt_per_token <= 0 and completion_per_token <= 0:
+                    continue
+
+                input_per_million = prompt_per_token * 1_000_000
+                output_per_million = completion_per_token * 1_000_000
+
+                pricing[model_id.lower()] = {
+                    "input": round(input_per_million, 4),
+                    "output": round(output_per_million, 4),
+                }
+
+                parts = model_id.split("/")
+                if len(parts) == 2:
+                    provider, model = parts
+                    if model.lower() not in pricing:
+                        pricing[model.lower()] = {
+                            "input": round(input_per_million, 4),
+                            "output": round(output_per_million, 4),
+                        }
+
+            except (ValueError, TypeError):
+                continue
+
+        if pricing:
+            remote_pricing_cache = pricing
+            remote_pricing_last_fetch = time.time()
+            logger.info(f"Fetched {len(pricing)} model prices from OpenRouter")
+            return pricing
+
+    except Exception as e:
+        logger.warning(f"Could not fetch OpenRouter pricing: {e}")
+
+    try:
+        logger.info("Falling back to llm-prices.com...")
         response = requests.get(LLM_PRICES_URL, timeout=30)
         response.raise_for_status()
         data = response.json()
-        pricing = {
-            item["id"].lower(): {
-                "input": float(item["input"]),
-                "output": float(item["output"]),
-                "vendor": item.get("vendor", "unknown"),
-            }
-            for item in data.get("prices", [])
-            if item.get("id")
-            and item.get("input") is not None
-            and item.get("output") is not None
-        }
+        for item in data.get("prices", []):
+            if (
+                item.get("id")
+                and item.get("input") is not None
+                and item.get("output") is not None
+            ):
+                pricing[item["id"].lower()] = {
+                    "input": float(item["input"]),
+                    "output": float(item["output"]),
+                }
         if pricing:
             remote_pricing_cache = pricing
             remote_pricing_last_fetch = time.time()
             return pricing
     except Exception as e:
-        logger.warning(f"Could not fetch remote pricing: {e}")
+        logger.warning(f"Could not fetch llm-prices pricing: {e}")
+
     return {}
 
 

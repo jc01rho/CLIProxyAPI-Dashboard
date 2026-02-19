@@ -338,6 +338,8 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                 total_requests: epData.requests || 0,
                 estimated_cost_usd: epData.cost || 0,
                 total_tokens: epData.tokens || epData.total_tokens || 0,
+                input_tokens: epData.input_tokens || 0,
+                output_tokens: epData.output_tokens || 0,
                 success_count: 0,
                 failure_count: 0,
                 models: epData.models || {}

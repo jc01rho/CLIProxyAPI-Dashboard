@@ -776,11 +776,15 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                         "requests": 0,
                         "tokens": 0,
                         "cost": 0.0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
                         "models": {},
                     }
                 breakdown_deltas["endpoints"][endpoint]["requests"] += req
                 breakdown_deltas["endpoints"][endpoint]["tokens"] += tok
                 breakdown_deltas["endpoints"][endpoint]["cost"] += cost
+                breakdown_deltas["endpoints"][endpoint]["input_tokens"] += in_tok
+                breakdown_deltas["endpoints"][endpoint]["output_tokens"] += out_tok
 
                 # Add to nested models within endpoint
                 if model_name not in breakdown_deltas["endpoints"][endpoint]["models"]:
@@ -788,11 +792,15 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                         "requests": 0,
                         "tokens": 0,
                         "cost": 0.0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
                     }
                 m_data = breakdown_deltas["endpoints"][endpoint]["models"][model_name]
                 m_data["requests"] += req
                 m_data["tokens"] += tok
                 m_data["cost"] += cost
+                m_data["input_tokens"] += in_tok
+                m_data["output_tokens"] += out_tok
 
                 # Add to Hourly aggregation (current hour)
                 if hour_key not in breakdown_deltas["hourly"]:

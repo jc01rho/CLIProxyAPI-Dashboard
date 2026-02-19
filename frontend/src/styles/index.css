@@ -235,6 +235,44 @@ body {
   box-shadow: 0 4px 15px var(--color-glow);
 }
 
+.api-key-selector {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  padding: 4px;
+  border-radius: var(--radius-md);
+  border: var(--glass-border);
+  display: flex;
+  align-items: center;
+}
+
+.api-key-select {
+  background: transparent;
+  border: none;
+  padding: 6px 12px;
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  outline: none;
+  max-width: 200px;
+}
+
+.api-key-select option {
+  background: var(--color-bg-surface);
+  color: var(--color-text);
+}
+
+.api-key-select:hover {
+  background: var(--color-bg-hover);
+}
+
+.api-key-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Responsive date range selector */
 @media (max-width: 1100px) {
   .date-range-selector {

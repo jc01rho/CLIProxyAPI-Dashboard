@@ -268,6 +268,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
     // Auto-select time range based on dateRange: hour for today/yesterday, day for longer ranges
     const defaultTimeRange = (dateRange === 'today' || dateRange === 'yesterday') ? 'hour' : 'day'
 
+    const [selectedApiKey, setSelectedApiKey] = useState('all')
     const [requestTimeRange, setRequestTimeRange] = useState(defaultTimeRange)
     const [tokenTimeRange, setTokenTimeRange] = useState(defaultTimeRange)
     const [chartAnimated, setChartAnimated] = useState(false)
@@ -283,19 +284,26 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
         return true
     })
 
-    // Auto-switch time range when dateRange changes
     useEffect(() => {
         const newTimeRange = (dateRange === 'today' || dateRange === 'yesterday') ? 'hour' : 'day'
-        setRequestTimeRange(newTimeRange)
-        setTokenTimeRange(newTimeRange)
-    }, [dateRange])
+        const effectiveTimeRange = selectedApiKey !== 'all' ? 'day' : newTimeRange
+        
+        setRequestTimeRange(effectiveTimeRange)
+        setTokenTimeRange(effectiveTimeRange)
+    }, [dateRange, selectedApiKey])
+
+    useEffect(() => {
+        if (selectedApiKey !== 'all') {
+            setRequestTimeRange('day')
+            setTokenTimeRange('day')
+        }
+    }, [selectedApiKey])
 
     useEffect(() => {
         const timer = setTimeout(() => setChartAnimated(true), 300)
         return () => clearTimeout(timer)
     }, [])
 
-    // Re-trigger animation when switching chart tabs
     useEffect(() => {
         setChartAnimated(false)
         const timer = setTimeout(() => setChartAnimated(true), 50)
@@ -310,22 +318,72 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
         })
     }
 
-    // Use data directly from props (already filtered by API)
-    const filteredDailyStats = dailyStats || []
-    const filteredModelUsage = modelUsage || []
+    const uniqueApiKeys = useMemo(() => {
+        if (!rawEndpointUsage) return []
+        return rawEndpointUsage
+            .map(u => u.api_endpoint)
+            .filter((v, i, a) => v && a.indexOf(v) === i)
+            .sort()
+    }, [rawEndpointUsage])
 
-    // Calculate totals from filtered daily stats (properly filtered by date range)
+    const filteredDailyStats = useMemo(() => {
+        const baseStats = dailyStats || []
+        if (selectedApiKey === 'all') return baseStats
+
+        return baseStats.map(d => {
+            const epData = d.breakdown?.endpoints?.[selectedApiKey] || {}
+            
+            return {
+                ...d,
+                total_requests: epData.requests || 0,
+                estimated_cost_usd: epData.cost || 0,
+                total_tokens: epData.tokens || epData.total_tokens || 0,
+                success_count: 0,
+                failure_count: 0,
+                models: epData.models || {}
+            }
+        })
+    }, [dailyStats, selectedApiKey])
+
+    const filteredModelUsage = useMemo(() => {
+        const baseUsage = modelUsage || []
+        if (selectedApiKey === 'all') return baseUsage
+
+        const aggregated = {}
+        
+        filteredDailyStats.forEach(day => {
+            if (day.models) {
+                Object.entries(day.models).forEach(([mName, mData]) => {
+                    if (!aggregated[mName]) {
+                        aggregated[mName] = { 
+                            model_name: mName, 
+                            request_count: 0, 
+                            total_tokens: 0, 
+                            estimated_cost_usd: 0,
+                            input_tokens: 0,
+                            output_tokens: 0
+                        }
+                    }
+                    aggregated[mName].request_count += mData.requests || 0
+                    aggregated[mName].total_tokens += mData.tokens || 0
+                    aggregated[mName].estimated_cost_usd += mData.cost || 0
+                    aggregated[mName].input_tokens += mData.input_tokens || 0
+                    aggregated[mName].output_tokens += mData.output_tokens || 0
+                })
+            }
+        })
+
+        return Object.values(aggregated).sort((a, b) => b.request_count - a.request_count)
+    }, [modelUsage, filteredDailyStats, selectedApiKey])
+
     const totalRequests = filteredDailyStats.reduce((sum, d) => sum + (d.total_requests || 0), 0)
     const totalTokens = filteredDailyStats.reduce((sum, d) => sum + (d.total_tokens || 0), 0)
     const successCount = filteredDailyStats.reduce((sum, d) => sum + (d.success_count || 0), 0)
     const failureCount = filteredDailyStats.reduce((sum, d) => sum + (d.failure_count || 0), 0)
 
-    // Use sum of model usage for total cost to ensure consistency with breakdown table
-    // Fallback to daily stats sum if model usage is empty (e.g. legacy data)
     const totalCostFromBreakdown = filteredModelUsage.reduce((sum, m) => sum + (m.estimated_cost_usd || 0), 0)
     const totalCostFromDaily = filteredDailyStats.reduce((sum, d) => sum + (parseFloat(d.estimated_cost_usd) || 0), 0)
 
-    // Prefer breakdown sum if available and significant, otherwise use daily stats
     const totalCost = (filteredModelUsage.length > 0) ? totalCostFromBreakdown : totalCostFromDaily
 
     const daysCount = Math.max(1, filteredDailyStats.length || 1)
@@ -340,17 +398,25 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
 
     const formatCost = (cost) => '$' + cost.toFixed(2)
 
-    // Hourly data - now comes from App.jsx with accurate delta calculations
-    const hourlyData = hourlyStats || []
+    const formatEndpointName = (name) => {
+        if (!name) return 'Unknown'
+        const cleanName = name.replace(/^https?:\/\//, '')
+        const parts = cleanName.split('/')
+        return parts.length > 1 && parts[parts.length - 1] 
+            ? parts[parts.length - 1] 
+            : parts[0]
+    }
 
-    // Daily data
+    const hourlyData = selectedApiKey === 'all' ? (hourlyStats || []) : []
+
+
     const dailyChartData = useMemo(() => {
         return (filteredDailyStats || []).map(d => ({
             time: new Date(d.stat_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
             requests: d.total_requests,
             tokens: d.total_tokens,
             cost: parseFloat(d.estimated_cost_usd) || 0,
-            models: d.models || {} // Pass through breakdown
+            models: d.models || {}
         }))
     }, [filteredDailyStats])
 
@@ -527,6 +593,23 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                             lastUpdated ? `Updated: ${lastUpdated.toLocaleTimeString()}` : ''
                         )}
                     </span>
+                    
+                    <div className="api-key-selector">
+                        <select 
+                            value={selectedApiKey} 
+                            onChange={(e) => setSelectedApiKey(e.target.value)}
+                            className="api-key-select"
+                            disabled={uniqueApiKeys.length === 0}
+                        >
+                            <option value="all">All Keys ({uniqueApiKeys.length})</option>
+                            {uniqueApiKeys.map(key => (
+                                <option key={key} value={key}>
+                                    {formatEndpointName(key)}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+
                     {/* Date Range Selector */}
                     <div className="date-range-selector">
                         {DATE_RANGES.map(range => (

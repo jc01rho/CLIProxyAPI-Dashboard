@@ -8,8 +8,22 @@ import './CredentialStatsCard.css'
  *
  * Visual node-graph layout: center provider node connected to credential
  * cards via SVG bezier curves. Line thickness = request volume.
- * Click credential → opens dialog with full model breakdown.
+ * Desktop: click credential → inline detail panel on right side.
+ * Mobile: click credential → modal dialog.
  */
+
+function useIsDesktop(breakpoint = 900) {
+  const [isDesktop, setIsDesktop] = useState(
+    () => typeof window !== 'undefined' && window.innerWidth >= breakpoint
+  )
+  useEffect(() => {
+    const mql = window.matchMedia(`(min-width: ${breakpoint}px)`)
+    const handler = (e) => setIsDesktop(e.matches)
+    mql.addEventListener('change', handler)
+    return () => mql.removeEventListener('change', handler)
+  }, [breakpoint])
+  return isDesktop
+}
 
 const getSuccessColor = (rate) => {
   if (rate >= 95) return '#10b981'
@@ -261,7 +275,7 @@ function TopoCardContent({ cred, providerColor }) {
     <>
       <div className="cred-topo-card-top">
         <span className="cred-topo-card-name" title={displayName}>{truncated}</span>
-        <SuccessRing rate={cred.success_rate || 0} size={44} stroke={3.5} />
+        <SuccessRing rate={cred.success_rate || 0} size={38} stroke={3} />
       </div>
       <div className="cred-topo-card-row">
         <div className="cred-topo-card-metric">
@@ -414,6 +428,33 @@ function CredentialDetailContent({ cred }) {
   )
 }
 
+/** Inline detail panel for desktop — shown to the right of topology */
+function CredentialDetailPanel({ cred, onClose }) {
+  if (!cred) return null
+  const pc = getProviderDisplay(cred.provider)
+  const displayName = cred.email || cred.source || cred.label || getCredKey(cred)
+
+  return (
+    <div className="cred-detail-side" key={getCredKey(cred)}>
+      <div className="cred-detail-side-header">
+        <div className="cred-detail-side-title">
+          <span className="cred-detail-side-provider" style={{ background: getProviderHex(cred.provider) }}>
+            {pc.name.charAt(0)}
+          </span>
+          <div className="cred-detail-side-info">
+            <span className="cred-detail-side-name">{displayName}</span>
+            <span className="cred-detail-side-sub">{pc.name}</span>
+          </div>
+        </div>
+        <button className="cred-detail-side-close" onClick={onClose} aria-label="Close">&times;</button>
+      </div>
+      <div className="cred-detail-side-body">
+        <CredentialDetailContent cred={cred} />
+      </div>
+    </div>
+  )
+}
+
 /* ================================================================
    Main Exported Component
    ================================================================ */
@@ -423,6 +464,7 @@ export default function CredentialStatsCard({ onRowClick, data, isLoading, setup
   const [dialogCred, setDialogCred] = useState(null)
   const [sortConfig, setSortConfig] = useState({ key: 'total_requests', dir: 'desc' })
   const [expandedApiKey, setExpandedApiKey] = useState(null)
+  const isDesktop = useIsDesktop(900)
 
   const credentials = data?.credentials || []
   const apiKeys = data?.api_keys || []
@@ -577,16 +619,24 @@ export default function CredentialStatsCard({ onRowClick, data, isLoading, setup
       </div>
 
       {activeView === 'credentials' ? (
-        <div className="cred-monitor-body">
-          {providerGroups.map(([provider, group]) => (
-            <ProviderTopology
-              key={provider}
-              provider={provider}
-              group={group}
-              selectedCred={selectedCred}
-              onCredClick={handleCredClick}
+        <div className="cred-monitor-split">
+          <div className="cred-monitor-body">
+            {providerGroups.map(([provider, group]) => (
+              <ProviderTopology
+                key={provider}
+                provider={provider}
+                group={group}
+                selectedCred={selectedCred}
+                onCredClick={handleCredClick}
+              />
+            ))}
+          </div>
+          {isDesktop && dialogCred && (
+            <CredentialDetailPanel
+              cred={dialogCred}
+              onClose={() => { setDialogCred(null); setSelectedCred(null) }}
             />
-          ))}
+          )}
         </div>
       ) : (
         <div className="cred-monitor-body">
@@ -608,9 +658,9 @@ export default function CredentialStatsCard({ onRowClick, data, isLoading, setup
         <div className="cred-sync-footer">Last synced: {new Date(data.synced_at).toLocaleString()}</div>
       )}
 
-      {/* Detail Dialog */}
+      {/* Detail Dialog — mobile only */}
       <ChartDialog
-        isOpen={dialogCred !== null}
+        isOpen={dialogCred !== null && !isDesktop}
         onClose={() => { setDialogCred(null); setSelectedCred(null) }}
         title={dialogTitle}
       >

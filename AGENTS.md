@@ -1,9 +1,8 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-01-13
-**Commit:** bb9b992
+**Generated:** 2026-03-03
+**Commit:** 5813ecd
 **Branch:** main
-
 ## OVERVIEW
 
 CLIProxy Dashboard: Real-time API usage monitoring. Python collector polls CLIProxy every 5min, stores in Supabase; React frontend visualizes.

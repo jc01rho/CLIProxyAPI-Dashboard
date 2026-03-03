@@ -95,31 +95,150 @@ function App() {
     const [credentialLoading, setCredentialLoading] = useState(true)
     const [credentialSetupRequired, setCredentialSetupRequired] = useState(false)
 
-    // Fetch credential stats (not affected by date range)
-    const fetchCredentialStats = useCallback(async () => {
+    // Fetch credential stats filtered by date range
+    const fetchCredentialStats = useCallback(async (rangeId = dateRange) => {
         try {
             setCredentialLoading(true)
-            const { data: rows, error } = await supabase
-                .from('credential_usage_summary')
-                .select('*')
-                .eq('id', 1)
-                .single()
 
-            if (error) {
-                if (error.code === 'PGRST205' || error.message?.includes('relation') || error.message?.includes('does not exist') || error.message?.includes('Could not find')) {
-                    setCredentialSetupRequired(true)
+            const { startDate, endDate } = getDateBoundaries(rangeId)
+
+            // Try credential_daily_stats first (date-range aware)
+            let useDailyStats = false
+            try {
+                let query = supabase
+                    .from('credential_daily_stats')
+                    .select('credentials, api_keys, total_credentials, total_api_keys, stat_date')
+
+                if (startDate) {
+                    query = query.gte('stat_date', startDate)
                 }
-                throw error
+                if (endDate) {
+                    query = query.lt('stat_date', endDate)
+                }
+
+                const { data: dailyRows, error: dailyError } = await query
+
+                if (!dailyError && dailyRows && dailyRows.length > 0) {
+                    useDailyStats = true
+
+                    // Aggregate credentials across days
+                    const credMap = {}  // keyed by "auth_index||source"
+                    const akMap = {}    // keyed by "api_key_name"
+
+                    const CRED_NUM = ['total_requests', 'success_count', 'failure_count',
+                        'input_tokens', 'output_tokens', 'reasoning_tokens', 'cached_tokens', 'total_tokens']
+                    const AK_NUM = ['total_requests', 'total_tokens', 'success_count', 'failure_count',
+                        'input_tokens', 'output_tokens']
+                    const MODEL_NUM_CRED = ['requests', 'success', 'failure',
+                        'input_tokens', 'output_tokens', 'reasoning_tokens', 'cached_tokens', 'total_tokens']
+                    const MODEL_NUM_AK = ['requests', 'tokens', 'success', 'failure']
+
+                    for (const row of dailyRows) {
+                        // Merge credentials
+                        for (const c of (row.credentials || [])) {
+                            const key = `${c.auth_index || ''}||${c.source || ''}`
+                            if (!credMap[key]) {
+                                credMap[key] = { ...c, models: { ...(c.models || {}) } }
+                            } else {
+                                const ex = credMap[key]
+                                for (const f of CRED_NUM) {
+                                    ex[f] = (ex[f] || 0) + (c[f] || 0)
+                                }
+                                // Merge models
+                                for (const [mName, mData] of Object.entries(c.models || {})) {
+                                    if (!ex.models[mName]) {
+                                        ex.models[mName] = { ...mData }
+                                    } else {
+                                        for (const f of MODEL_NUM_CRED) {
+                                            ex.models[mName][f] = (ex.models[mName][f] || 0) + (mData[f] || 0)
+                                        }
+                                    }
+                                }
+                                // Union api_keys
+                                ex.api_keys = [...new Set([...(ex.api_keys || []), ...(c.api_keys || [])])].sort()
+                                // Update metadata
+                                for (const f of ['provider', 'email', 'label', 'status', 'account_type']) {
+                                    if (c[f]) ex[f] = c[f]
+                                }
+                            }
+                        }
+
+                        // Merge API keys
+                        for (const a of (row.api_keys || [])) {
+                            const key = a.api_key_name || ''
+                            if (!akMap[key]) {
+                                akMap[key] = { ...a, models: { ...(a.models || {}) } }
+                            } else {
+                                const ex = akMap[key]
+                                for (const f of AK_NUM) {
+                                    ex[f] = (ex[f] || 0) + (a[f] || 0)
+                                }
+                                for (const [mName, mData] of Object.entries(a.models || {})) {
+                                    if (!ex.models[mName]) {
+                                        ex.models[mName] = { ...mData }
+                                    } else {
+                                        for (const f of MODEL_NUM_AK) {
+                                            ex.models[mName][f] = (ex.models[mName][f] || 0) + (mData[f] || 0)
+                                        }
+                                    }
+                                }
+                                ex.credentials_used = [...new Set([...(ex.credentials_used || []), ...(a.credentials_used || [])])].sort()
+                            }
+                        }
+                    }
+
+                    // Recalculate success_rate for aggregated credentials
+                    const aggregatedCreds = Object.values(credMap).map(c => ({
+                        ...c,
+                        success_rate: c.total_requests > 0
+                            ? Math.round((c.success_count / c.total_requests) * 1000) / 10
+                            : 0
+                    })).sort((a, b) => b.total_requests - a.total_requests)
+
+                    const aggregatedAKs = Object.values(akMap).map(a => ({
+                        ...a,
+                        success_rate: a.total_requests > 0
+                            ? Math.round((a.success_count / a.total_requests) * 1000) / 10
+                            : 0
+                    })).sort((a, b) => b.total_requests - a.total_requests)
+
+                    setCredentialData({
+                        credentials: aggregatedCreds,
+                        api_keys: aggregatedAKs,
+                        total_credentials: aggregatedCreds.length,
+                        total_api_keys: aggregatedAKs.length,
+                    })
+                    setCredentialSetupRequired(false)
+                }
+            } catch (dailyErr) {
+                // credential_daily_stats table might not exist yet — fall through to summary
+                console.debug('credential_daily_stats not available, falling back to summary:', dailyErr.message)
             }
 
-            setCredentialData(rows)
-            setCredentialSetupRequired(false)
+            // Fallback: use credential_usage_summary (backward compat)
+            if (!useDailyStats) {
+                const { data: rows, error } = await supabase
+                    .from('credential_usage_summary')
+                    .select('*')
+                    .eq('id', 1)
+                    .single()
+
+                if (error) {
+                    if (error.code === 'PGRST205' || error.message?.includes('relation') || error.message?.includes('does not exist') || error.message?.includes('Could not find')) {
+                        setCredentialSetupRequired(true)
+                    }
+                    throw error
+                }
+
+                setCredentialData(rows)
+                setCredentialSetupRequired(false)
+            }
         } catch (err) {
             console.error('Error fetching credential stats:', err)
         } finally {
             setCredentialLoading(false)
         }
-    }, [])
+    }, [dateRange])
 
     const fetchData = useCallback(async (rangeId = dateRange, isInitial = false) => {
         try {
@@ -641,15 +760,11 @@ function App() {
         }
     }, [dateRange])
 
-    // Initial load - fetch credential stats once
-    useEffect(() => {
-        fetchCredentialStats()
-    }, [fetchCredentialStats])
-
-    // Refetch when dateRange changes
+    // Refetch when dateRange changes (both main data and credential stats)
     useEffect(() => {
         fetchData(dateRange)
-    }, [dateRange, fetchData])
+        fetchCredentialStats(dateRange)
+    }, [dateRange, fetchData, fetchCredentialStats])
 
     useEffect(() => {
         // Set up real-time subscription
@@ -659,6 +774,7 @@ function App() {
                 { event: 'INSERT', schema: 'public', table: 'usage_snapshots' },
                 () => {
                     fetchData(dateRange)
+                    fetchCredentialStats(dateRange)
                 }
             )
             .subscribe()
@@ -666,7 +782,7 @@ function App() {
         // Refresh every 5 minutes - also refresh credential stats
         const interval = setInterval(() => {
             fetchData(dateRange)
-            fetchCredentialStats()
+            fetchCredentialStats(dateRange)
         }, 5 * 60 * 1000)
 
         return () => {
@@ -724,6 +840,7 @@ function App() {
                 // If date range hasn't changed, useEffect won't run, so we must fetch manually
                 if (days === dateRange) {
                     await fetchData()
+                    await fetchCredentialStats(dateRange)
                 }
             } catch (e) {
                 console.error('Trigger error:', e)

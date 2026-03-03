@@ -8,25 +8,277 @@ Data flow:
 1. Fetch /v0/management/usage    → get details[] with source, auth_index, tokens, failed
 2. Fetch /v0/management/auth-files → map auth_index to email, provider, name, status
 3. Aggregate by credential (auth_index) and by API key
-4. Upsert to credential_usage_summary table (single-row, JSONB)
+4. Calculate deltas vs previous cumulative snapshot
+5. Merge deltas into credential_daily_stats (per-day)
+6. Upsert to credential_usage_summary table (single-row, backward compat)
 """
 
 import logging
 import requests
-from typing import Dict, List, Optional, Any
-from datetime import datetime, timezone
+from typing import Dict, List, Optional, Any, Tuple
+from datetime import datetime, timezone, timedelta, date
 from collections import defaultdict
+import json
 
 logger = logging.getLogger(__name__)
+
+# Numeric fields on credentials that support delta calculation
+CRED_NUMERIC_FIELDS = [
+    'total_requests', 'success_count', 'failure_count',
+    'input_tokens', 'output_tokens', 'reasoning_tokens',
+    'cached_tokens', 'total_tokens',
+]
+
+# Numeric fields on credential model entries
+CRED_MODEL_NUMERIC_FIELDS = [
+    'requests', 'success', 'failure',
+    'input_tokens', 'output_tokens', 'reasoning_tokens',
+    'cached_tokens', 'total_tokens',
+]
+
+# Numeric fields on API keys
+AK_NUMERIC_FIELDS = [
+    'total_requests', 'total_tokens',
+    'success_count', 'failure_count',
+    'input_tokens', 'output_tokens',
+]
+
+# Numeric fields on API key model entries
+AK_MODEL_NUMERIC_FIELDS = ['requests', 'tokens', 'success', 'failure']
+
+
+def _cred_key(c: Dict) -> str:
+    """Composite key for matching credentials across snapshots."""
+    return f"{c.get('auth_index', '')}||{c.get('source', '')}"
+
+
+def _ak_key(a: Dict) -> str:
+    """Key for matching API keys across snapshots."""
+    return a.get('api_key_name', '')
+
+
+def _calc_delta(new_val: int, old_val: int) -> int:
+    """Calculate delta with restart detection (negative = restart, use new value)."""
+    delta = new_val - old_val
+    return new_val if delta < 0 else delta
+
+
+def _calc_model_deltas(new_models: Dict, old_models: Dict) -> Dict:
+    """Calculate deltas for model-level stats within a credential or API key."""
+    result = {}
+    all_model_names = set(list(new_models.keys()) + list(old_models.keys()))
+
+    for model_name in all_model_names:
+        new_m = new_models.get(model_name, {})
+        old_m = old_models.get(model_name, {})
+
+        # Determine which numeric fields to use based on available keys
+        # Credential models have 'requests', API key models also have 'requests'
+        numeric_fields = CRED_MODEL_NUMERIC_FIELDS if 'input_tokens' in new_m or 'input_tokens' in old_m else AK_MODEL_NUMERIC_FIELDS
+
+        delta_m = {}
+        for field in numeric_fields:
+            new_v = new_m.get(field, 0) or 0
+            old_v = old_m.get(field, 0) or 0
+            delta_m[field] = _calc_delta(new_v, old_v)
+
+        # Only include if there's actual usage
+        if any(delta_m.get(f, 0) > 0 for f in numeric_fields):
+            result[model_name] = delta_m
+
+    return result
+
+
+def _calculate_credential_deltas(
+    new_creds: List[Dict], prev_creds: List[Dict]
+) -> List[Dict]:
+    """
+    Calculate deltas between new cumulative credentials and previous cumulative.
+    Returns list of delta credential dicts.
+    """
+    prev_map = {_cred_key(c): c for c in prev_creds}
+    deltas = []
+
+    for new_c in new_creds:
+        key = _cred_key(new_c)
+        old_c = prev_map.get(key, {})
+
+        delta = {
+            'auth_index': new_c.get('auth_index', ''),
+            'source': new_c.get('source', ''),
+            'provider': new_c.get('provider', 'unknown'),
+            'email': new_c.get('email', ''),
+            'label': new_c.get('label', ''),
+            'status': new_c.get('status', 'unknown'),
+            'account_type': new_c.get('account_type', ''),
+            'api_keys': new_c.get('api_keys', []),
+        }
+
+        # Calculate numeric deltas
+        for field in CRED_NUMERIC_FIELDS:
+            new_v = new_c.get(field, 0) or 0
+            old_v = old_c.get(field, 0) or 0
+            delta[field] = _calc_delta(new_v, old_v)
+
+        # Recalculate success_rate from delta values
+        if delta['total_requests'] > 0:
+            delta['success_rate'] = round(
+                (delta['success_count'] / delta['total_requests']) * 100, 1
+            )
+        else:
+            delta['success_rate'] = 0
+
+        # Calculate model deltas
+        delta['models'] = _calc_model_deltas(
+            new_c.get('models', {}), old_c.get('models', {})
+        )
+
+        # Only include if there's actual delta usage
+        if delta['total_requests'] > 0 or delta['total_tokens'] > 0:
+            deltas.append(delta)
+
+    return deltas
+
+
+def _calculate_api_key_deltas(
+    new_keys: List[Dict], prev_keys: List[Dict]
+) -> List[Dict]:
+    """
+    Calculate deltas between new cumulative API keys and previous cumulative.
+    Returns list of delta API key dicts.
+    """
+    prev_map = {_ak_key(a): a for a in prev_keys}
+    deltas = []
+
+    for new_a in new_keys:
+        key = _ak_key(new_a)
+        old_a = prev_map.get(key, {})
+
+        delta = {
+            'api_key_name': new_a.get('api_key_name', ''),
+            'credentials_used': new_a.get('credentials_used', []),
+        }
+
+        for field in AK_NUMERIC_FIELDS:
+            new_v = new_a.get(field, 0) or 0
+            old_v = old_a.get(field, 0) or 0
+            delta[field] = _calc_delta(new_v, old_v)
+
+        if delta['total_requests'] > 0:
+            delta['success_rate'] = round(
+                (delta['success_count'] / delta['total_requests']) * 100, 1
+            )
+        else:
+            delta['success_rate'] = 0
+
+        delta['models'] = _calc_model_deltas(
+            new_a.get('models', {}), old_a.get('models', {})
+        )
+
+        if delta['total_requests'] > 0 or delta['total_tokens'] > 0:
+            deltas.append(delta)
+
+    return deltas
+
+
+def _merge_daily_credentials(
+    existing_creds: List[Dict], delta_creds: List[Dict]
+) -> List[Dict]:
+    """
+    Merge delta credentials into existing daily credentials.
+    Matches by composite key, adds numeric fields, merges models.
+    """
+    existing_map = {_cred_key(c): c for c in existing_creds}
+
+    for delta in delta_creds:
+        key = _cred_key(delta)
+        if key in existing_map:
+            ex = existing_map[key]
+            # Sum numeric fields
+            for field in CRED_NUMERIC_FIELDS:
+                ex[field] = (ex.get(field, 0) or 0) + (delta.get(field, 0) or 0)
+            # Recalculate success_rate
+            if ex['total_requests'] > 0:
+                ex['success_rate'] = round(
+                    (ex['success_count'] / ex['total_requests']) * 100, 1
+                )
+            # Merge models
+            ex_models = ex.get('models', {})
+            for model_name, delta_m in delta.get('models', {}).items():
+                if model_name in ex_models:
+                    for f in CRED_MODEL_NUMERIC_FIELDS:
+                        ex_models[model_name][f] = (
+                            (ex_models[model_name].get(f, 0) or 0) +
+                            (delta_m.get(f, 0) or 0)
+                        )
+                else:
+                    ex_models[model_name] = dict(delta_m)
+            ex['models'] = ex_models
+            # Merge api_keys (union)
+            ex['api_keys'] = sorted(set(
+                ex.get('api_keys', []) + delta.get('api_keys', [])
+            ))
+            # Update metadata fields
+            for f in ['provider', 'email', 'label', 'status', 'account_type']:
+                if delta.get(f):
+                    ex[f] = delta[f]
+        else:
+            existing_map[key] = dict(delta)
+
+    result = list(existing_map.values())
+    result.sort(key=lambda x: x.get('total_requests', 0), reverse=True)
+    return result
+
+
+def _merge_daily_api_keys(
+    existing_keys: List[Dict], delta_keys: List[Dict]
+) -> List[Dict]:
+    """
+    Merge delta API keys into existing daily API keys.
+    """
+    existing_map = {_ak_key(a): a for a in existing_keys}
+
+    for delta in delta_keys:
+        key = _ak_key(delta)
+        if key in existing_map:
+            ex = existing_map[key]
+            for field in AK_NUMERIC_FIELDS:
+                ex[field] = (ex.get(field, 0) or 0) + (delta.get(field, 0) or 0)
+            if ex['total_requests'] > 0:
+                ex['success_rate'] = round(
+                    (ex['success_count'] / ex['total_requests']) * 100, 1
+                )
+            ex_models = ex.get('models', {})
+            for model_name, delta_m in delta.get('models', {}).items():
+                if model_name in ex_models:
+                    for f in AK_MODEL_NUMERIC_FIELDS:
+                        ex_models[model_name][f] = (
+                            (ex_models[model_name].get(f, 0) or 0) +
+                            (delta_m.get(f, 0) or 0)
+                        )
+                else:
+                    ex_models[model_name] = dict(delta_m)
+            ex['models'] = ex_models
+            ex['credentials_used'] = sorted(set(
+                ex.get('credentials_used', []) + delta.get('credentials_used', [])
+            ))
+        else:
+            existing_map[key] = dict(delta)
+
+    result = list(existing_map.values())
+    result.sort(key=lambda x: x.get('total_requests', 0), reverse=True)
+    return result
 
 
 class CredentialStatsSync:
     """Syncs per-credential usage statistics from CLIProxy."""
 
-    def __init__(self, cliproxy_url: str, management_key: str, supabase_client):
+    def __init__(self, cliproxy_url: str, management_key: str, supabase_client,
+                 app_timezone=None):
         self.cliproxy_url = cliproxy_url.rstrip('/')
         self.management_key = management_key
         self.supabase = supabase_client
+        self.app_timezone = app_timezone or timezone(timedelta(hours=7))
 
     def fetch_usage(self) -> Optional[Dict]:
         """Fetch usage data from CLIProxy."""
@@ -300,9 +552,55 @@ class CredentialStatsSync:
 
         return credential_stats, api_key_stats
 
+    def _read_previous_summary(self) -> Tuple[List[Dict], List[Dict]]:
+        """Read previous cumulative data from credential_usage_summary."""
+        try:
+            result = self.supabase.table('credential_usage_summary') \
+                .select('credentials, api_keys') \
+                .eq('id', 1) \
+                .single() \
+                .execute()
+            if result.data:
+                return (
+                    result.data.get('credentials', []) or [],
+                    result.data.get('api_keys', []) or [],
+                )
+        except Exception as e:
+            logger.debug(f"No previous summary found (first run?): {e}")
+        return [], []
+
+    def _read_today_daily(self, today_str: str) -> Tuple[List[Dict], List[Dict]]:
+        """Read existing today's row from credential_daily_stats."""
+        try:
+            result = self.supabase.table('credential_daily_stats') \
+                .select('credentials, api_keys') \
+                .eq('stat_date', today_str) \
+                .single() \
+                .execute()
+            if result.data:
+                return (
+                    result.data.get('credentials', []) or [],
+                    result.data.get('api_keys', []) or [],
+                )
+        except Exception:
+            pass
+        return [], []
+
+    def _upsert_daily_stats(self, today_str: str, credentials: List[Dict],
+                            api_keys: List[Dict]):
+        """Upsert merged daily stats for today."""
+        self.supabase.table('credential_daily_stats').upsert({
+            'stat_date': today_str,
+            'credentials': credentials,
+            'api_keys': api_keys,
+            'total_credentials': len(credentials),
+            'total_api_keys': len(api_keys),
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+        }, on_conflict='stat_date').execute()
+
     def sync(self) -> Dict[str, int]:
         """
-        Main sync: fetch, aggregate, store.
+        Main sync: fetch, aggregate, calculate deltas, store daily + summary.
         Returns stats dict.
         """
         stats = {'credentials': 0, 'api_keys': 0, 'error': False}
@@ -318,12 +616,47 @@ class CredentialStatsSync:
                 auth_files = []
                 logger.warning("Could not fetch auth files, proceeding without credential mapping")
 
+            # New cumulative stats from CLIProxy
             credential_stats, api_key_stats = self.aggregate_stats(usage_data, auth_files)
 
             stats['credentials'] = len(credential_stats)
             stats['api_keys'] = len(api_key_stats)
 
-            # Upsert to single-row summary table
+            # --- Delta calculation + daily stats ---
+            try:
+                # 1. Read previous cumulative data
+                prev_creds, prev_keys = self._read_previous_summary()
+
+                # 2. Calculate deltas
+                delta_creds = _calculate_credential_deltas(credential_stats, prev_creds)
+                delta_keys = _calculate_api_key_deltas(api_key_stats, prev_keys)
+
+                if delta_creds or delta_keys:
+                    # 3. Get today's date in app timezone
+                    today_str = datetime.now(self.app_timezone).strftime('%Y-%m-%d')
+
+                    # 4. Read existing today's daily row
+                    existing_creds, existing_keys = self._read_today_daily(today_str)
+
+                    # 5. Merge deltas into existing
+                    merged_creds = _merge_daily_credentials(existing_creds, delta_creds)
+                    merged_keys = _merge_daily_api_keys(existing_keys, delta_keys)
+
+                    # 6. Upsert daily stats
+                    self._upsert_daily_stats(today_str, merged_creds, merged_keys)
+
+                    logger.info(
+                        f"Credential daily stats updated for {today_str}: "
+                        f"{len(delta_creds)} credential deltas, {len(delta_keys)} API key deltas"
+                    )
+                else:
+                    logger.debug("No credential deltas detected (no new usage)")
+
+            except Exception as e:
+                # Daily stats failure should not block summary upsert
+                logger.warning(f"Failed to update credential daily stats: {e}", exc_info=True)
+
+            # --- Upsert summary (backward compat) ---
             self.supabase.table('credential_usage_summary').upsert({
                 'id': 1,
                 'credentials': credential_stats,
@@ -345,7 +678,11 @@ class CredentialStatsSync:
         return stats
 
 
-def sync_credential_stats(cliproxy_url: str, management_key: str, supabase_client) -> Dict:
+def sync_credential_stats(cliproxy_url: str, management_key: str,
+                          supabase_client, app_timezone=None) -> Dict:
     """Convenience function."""
-    syncer = CredentialStatsSync(cliproxy_url, management_key, supabase_client)
+    syncer = CredentialStatsSync(
+        cliproxy_url, management_key, supabase_client,
+        app_timezone=app_timezone
+    )
     return syncer.sync()

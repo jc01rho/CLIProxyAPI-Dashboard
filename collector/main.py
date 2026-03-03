@@ -117,7 +117,7 @@ def trigger_credential_stats_sync():
 
     def credential_stats_task():
         try:
-            stats = sync_credential_stats(CLIPROXY_URL, CLIPROXY_MANAGEMENT_KEY, supabase)
+            stats = sync_credential_stats(CLIPROXY_URL, CLIPROXY_MANAGEMENT_KEY, supabase, app_timezone=APP_TIMEZONE)
             logger.info(f"Credential stats sync completed: {stats}")
         except Exception as e:
             logger.error(f"Credential stats sync failed: {e}", exc_info=True)
@@ -580,7 +580,7 @@ def main():
 
     # Schedule credential usage stats sync (runs with usage collection)
     scheduler.add_job(
-        lambda: sync_credential_stats(CLIPROXY_URL, CLIPROXY_MANAGEMENT_KEY, supabase),
+        lambda: sync_credential_stats(CLIPROXY_URL, CLIPROXY_MANAGEMENT_KEY, supabase, app_timezone=APP_TIMEZONE),
         'interval',
         seconds=COLLECTOR_INTERVAL,
         id='credential_stats_sync',

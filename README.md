@@ -253,6 +253,13 @@ PostgREST       → PostgreSQL:5432 (reads)
 | Gemini 2.5 Flash | $0.15 | $0.60 |
 | Gemini 2.5 Pro | $1.25 | $10.00 |
 
+To update pricing, edit the `model_pricing` table directly:
+
+```bash
+docker compose exec postgres psql -U cliproxy -d cliproxy
+# UPDATE model_pricing SET input_price_per_million = 2.50 WHERE model_pattern = 'gpt-4o';
+```
+
 </details>
 
 ---

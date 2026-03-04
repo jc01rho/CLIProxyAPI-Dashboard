@@ -165,10 +165,10 @@ const ApiKeyLabel = ({ x, y, width, height, value, data, isDarkMode }) => {
 
 // Token type color constants (distinct colors, not opacity-based)
 const TOKEN_TYPES = [
-    { label: 'Input',     suffix: 'in',  color: '#6366f1', dataKey: 'input_tokens' },
-    { label: 'Output',    suffix: 'out', color: '#8b5cf6', dataKey: 'output_tokens' },
-    { label: 'Cached',    suffix: 'ca',  color: '#f59e0b', dataKey: 'cached_tokens' },
-    { label: 'Reasoning', suffix: 're',  color: '#10b981', dataKey: 'reasoning_tokens' },
+    { label: 'Input',     short: 'In',  suffix: 'in',  color: '#6366f1', dataKey: 'input_tokens' },
+    { label: 'Output',    short: 'Out', suffix: 'out', color: '#8b5cf6', dataKey: 'output_tokens' },
+    { label: 'Cached',    short: 'Ca',  suffix: 'ca',  color: '#f59e0b', dataKey: 'cached_tokens' },
+    { label: 'Reasoning', short: 'Re',  suffix: 're',  color: '#10b981', dataKey: 'reasoning_tokens' },
 ]
 
 // Trend configuration for the unified Usage Trends chart
@@ -863,17 +863,17 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                 </div>
                                 {/* Legend panel (right side) — same style as model legend */}
                                 <div className="chart-legend-panel chart-split-legend" style={{ display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '10px', overflowY: 'auto', maxHeight: '340px' }}>
-                                    {/* Column headers */}
+                                    {/* Column headers — fixed col widths match value rows */}
                                     <div style={{
                                         fontSize: '11px', fontWeight: 600,
                                         marginBottom: '4px', textTransform: 'uppercase',
                                         letterSpacing: '0.5px', display: 'grid',
-                                        gridTemplateColumns: '1fr auto auto auto auto',
-                                        gap: '6px', paddingRight: '4px'
+                                        gridTemplateColumns: '1fr 54px 54px 54px 54px',
+                                        gap: '4px', paddingRight: '4px'
                                     }}>
                                         <span style={{ color: isDarkMode ? '#94A3B8' : '#475569' }}>Model</span>
                                         {TOKEN_TYPES.map(t => (
-                                            <span key={t.suffix} style={{ textAlign: 'right', color: t.color, minWidth: 42 }}>{t.label}</span>
+                                            <span key={t.suffix} style={{ textAlign: 'right', color: t.color }}>{t.short}</span>
                                         ))}
                                     </div>
                                     {tokenTrendModels.map(model => {
@@ -881,8 +881,8 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         const md = filteredModelUsage.find(m => m.model_name === model) || {}
                                         return (
                                             <div key={model} style={{
-                                                display: 'grid', gridTemplateColumns: '1fr auto auto auto auto',
-                                                gap: '6px', alignItems: 'center',
+                                                display: 'grid', gridTemplateColumns: '1fr 54px 54px 54px 54px',
+                                                gap: '4px', alignItems: 'center',
                                                 padding: '6px 8px',
                                                 background: isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
                                                 borderRadius: '6px',
@@ -895,7 +895,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                     </span>
                                                 </div>
                                                 {TOKEN_TYPES.map(t => (
-                                                    <span key={t.suffix} style={{ fontSize: '11px', fontFamily: 'monospace', textAlign: 'right', color: t.color, fontWeight: 600, whiteSpace: 'nowrap', minWidth: 42 }}>
+                                                    <span key={t.suffix} style={{ fontSize: '11px', fontFamily: 'monospace', textAlign: 'right', color: t.color, fontWeight: 600, whiteSpace: 'nowrap', display: 'block' }}>
                                                         {formatNumber(md[t.dataKey] || 0)}
                                                     </span>
                                                 ))}

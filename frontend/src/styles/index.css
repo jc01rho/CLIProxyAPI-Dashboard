@@ -752,23 +752,38 @@ body {
   }
 }
 
-/* ===== Scrollbar - Fintech Style ===== */
+/* ===== Scrollbar - Subtle, hover to reveal ===== */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--color-bg-surface);
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: linear-gradient(180deg, var(--color-primary), var(--color-secondary));
-  border-radius: 3px;
+  background: transparent;
+  border-radius: 4px;
+  transition: background 0.2s;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: var(--color-primary);
+*:hover::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.2);
+}
+
+*:hover::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.45);
+}
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+*:hover {
+  scrollbar-color: rgba(148, 163, 184, 0.2) transparent;
 }
 
 /* Subtle scrollbar for legend panels */

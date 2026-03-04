@@ -83,11 +83,14 @@ DEFAULT_PRICING = {
     "_default": {"input": 0.15, "output": 0.60},
 }
 LLM_PRICES_URL = "https://www.llm-prices.com/current-v1.json"
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 
 # --- Globals ---
 db_client: Optional[PostgreSQLClient] = None
 remote_pricing_cache: Dict[str, Dict[str, float]] = {}
 remote_pricing_last_fetch: float = 0
+openrouter_pricing_cache: Dict[str, Dict[str, float]] = {}
+openrouter_pricing_last_fetch: float = 0
 
 # --- Flask App Setup ---
 flask_app = Flask(__name__)
@@ -178,6 +181,60 @@ def fetch_remote_pricing() -> Dict[str, Dict[str, float]]:
     return {}
 
 
+def fetch_openrouter_pricing() -> Dict[str, Dict[str, float]]:
+    """Fetch pricing from OpenRouter API.
+    
+    OpenRouter returns prices per-token, we convert to per-1M tokens.
+    Model IDs are in format 'provider/model-name' (e.g., 'moonshotai/kimi-k2.5').
+    We create mappings for both full ID and short name.
+    """
+    global openrouter_pricing_cache, openrouter_pricing_last_fetch
+    if openrouter_pricing_cache and (time.time() - openrouter_pricing_last_fetch) < 3600:
+        return openrouter_pricing_cache
+    try:
+        logger.info("Fetching pricing from OpenRouter...")
+        response = requests.get(OPENROUTER_MODELS_URL, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        pricing = {}
+        for model in data.get("data", []):
+            model_id = model.get("id", "")
+            model_pricing = model.get("pricing", {})
+            prompt_price = model_pricing.get("prompt")
+            completion_price = model_pricing.get("completion")
+            
+            if prompt_price is not None and completion_price is not None:
+                # OpenRouter prices are per-token, convert to per-1M tokens
+                input_per_m = float(prompt_price) * 1_000_000
+                output_per_m = float(completion_price) * 1_000_000
+                
+                # Store with short name (without provider prefix)
+                # e.g., 'moonshotai/kimi-k2.5' -> 'kimi-k2.5'
+                short_name = model_id.split("/")[-1].lower()
+                
+                pricing[short_name] = {
+                    "input": input_per_m,
+                    "output": output_per_m,
+                    "vendor": model_id.split("/")[0] if "/" in model_id else "unknown",
+                }
+                
+                # Also store full ID lowercase for exact matching
+                pricing[model_id.lower()] = {
+                    "input": input_per_m,
+                    "output": output_per_m,
+                    "vendor": model_id.split("/")[0] if "/" in model_id else "unknown",
+                }
+        
+        if pricing:
+            openrouter_pricing_cache = pricing
+            openrouter_pricing_last_fetch = time.time()
+            logger.info(f"Fetched {len(pricing)} model prices from OpenRouter")
+            return pricing
+    except Exception as e:
+        logger.warning(f"Could not fetch OpenRouter pricing: {e}")
+    return {}
+
+
 def init_db() -> PostgreSQLClient:
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL must be set")
@@ -202,11 +259,15 @@ def fetch_usage_data() -> Optional[Dict[str, Any]]:
 
 
 def get_model_pricing() -> Dict[str, Dict[str, float]]:
-    # (Implementation from before)
-    remote_pricing = fetch_remote_pricing()
-    if remote_pricing:
-        return {**DEFAULT_PRICING, **remote_pricing}
-    return DEFAULT_PRICING
+    """Get combined pricing from DEFAULT, llm-prices.com, and OpenRouter.
+    
+    Priority: DEFAULT_PRICING < llm-prices.com < OpenRouter
+    (Later sources override earlier ones)
+    """
+    llm_prices = fetch_remote_pricing()
+    openrouter_prices = fetch_openrouter_pricing()
+    # Merge: DEFAULT first, then llm-prices, then OpenRouter (highest priority)
+    return {**DEFAULT_PRICING, **llm_prices, **openrouter_prices}
 
 
 def find_pricing_for_model(

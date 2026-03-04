@@ -828,6 +828,9 @@ body {
   .chart-split {
     flex-direction: column;
   }
+  .chart-split-main {
+    width: 100%;
+  }
   .chart-split-legend {
     width: 100%;
     max-height: 220px;

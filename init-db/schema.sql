@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS model_usage (
     request_count INTEGER NOT NULL DEFAULT 0,
     input_tokens BIGINT NOT NULL DEFAULT 0,
     output_tokens BIGINT NOT NULL DEFAULT 0,
+    reasoning_tokens BIGINT NOT NULL DEFAULT 0,
+    cached_tokens BIGINT NOT NULL DEFAULT 0,
     total_tokens BIGINT NOT NULL DEFAULT 0,
     estimated_cost_usd DECIMAL(10, 6) DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

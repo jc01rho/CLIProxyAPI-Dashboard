@@ -322,19 +322,33 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
         })
     }, [hourlyChartData, dailyChartData, usageTrendTime, activeTopModels, usageTrendMetric])
 
-    // Token Type Breakdown data - input vs output per model
-    const tokenTypeData = useMemo(() => {
-        return (filteredModelUsage || [])
-            .filter(m => (m.input_tokens > 0 || m.output_tokens > 0))
+    // Token Type Stacked Column Chart data
+    // X axis: Input | Cached | Output | Reasoning
+    // Stacks: top N models by total tokens
+    const { tokenTypeStackedData, tokenTypeModels } = useMemo(() => {
+        const models = (filteredModelUsage || [])
+            .filter(m => (m.input_tokens > 0 || m.output_tokens > 0 || m.reasoning_tokens > 0 || m.cached_tokens > 0))
             .sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0))
-            .slice(0, 10)
-            .map(m => ({
-                model: m.model_name?.split('-').slice(-2).join('-') || m.model_name,
-                fullName: m.model_name,
-                input_tokens: m.input_tokens || 0,
-                output_tokens: m.output_tokens || 0,
-                total_tokens: m.total_tokens || 0,
-            }))
+            .slice(0, 8)
+
+        const modelNames = models.map(m => m.model_name)
+
+        const tokenTypes = [
+            { key: 'input_tokens',     label: 'Input' },
+            { key: 'cached_tokens',    label: 'Cached' },
+            { key: 'output_tokens',    label: 'Output' },
+            { key: 'reasoning_tokens', label: 'Reasoning' },
+        ]
+
+        const data = tokenTypes.map(({ key, label }) => {
+            const row = { tokenType: label }
+            for (const m of models) {
+                row[m.model_name] = m[key] || 0
+            }
+            return row
+        })
+
+        return { tokenTypeStackedData: data, tokenTypeModels: modelNames }
     }, [filteredModelUsage])
 
     // API Endpoint usage - uses granular endpointUsage passed from App.jsx
@@ -727,63 +741,86 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                 </div>
                             </>
                         ) : (
-                            /* Token Types: Input vs Output per model */
-                            tokenTypeData.length > 0 ? (
-                                <ResponsiveContainer width="100%" height={Math.max(280, tokenTypeData.length * 40)}>
-                                    <BarChart data={tokenTypeData} layout="vertical" margin={{ left: 10, right: 30 }}>
-                                        <defs>
-                                            <linearGradient id="gradInput" x1="0" y1="0" x2="1" y2="0">
-                                                <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.3} />
-                                                <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.9} />
-                                            </linearGradient>
-                                            <linearGradient id="gradOutput" x1="0" y1="0" x2="1" y2="0">
-                                                <stop offset="0%" stopColor="#f59e0b" stopOpacity={0.5} />
-                                                <stop offset="100%" stopColor="#f59e0b" stopOpacity={0.9} />
-                                            </linearGradient>
-                                        </defs>
-                                        <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'} horizontal={false} />
-                                        <XAxis type="number" stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={formatNumber} />
-                                        <YAxis type="category" dataKey="model" stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={{ fontSize: 11 }} width={120} axisLine={false} tickLine={false} interval={0} />
+                            /* Token Types: Stacked column chart — 4 token types × model stacks */
+                            <div style={{ minHeight: 320 }}>
+                                <ResponsiveContainer width="100%" height={300}>
+                                    <BarChart
+                                        data={tokenTypeStackedData}
+                                        margin={{ top: 10, right: 20, left: 10, bottom: 5 }}
+                                        barCategoryGap="30%"
+                                    >
+                                        <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'} vertical={false} />
+                                        <XAxis
+                                            dataKey="tokenType"
+                                            stroke={isDarkMode ? '#6e7681' : '#57606a'}
+                                            tick={{ fontSize: 12, fontWeight: 600 }}
+                                            axisLine={false}
+                                            tickLine={false}
+                                        />
+                                        <YAxis
+                                            stroke={isDarkMode ? '#6e7681' : '#57606a'}
+                                            tick={{ fontSize: 11 }}
+                                            axisLine={false}
+                                            tickLine={false}
+                                            tickFormatter={formatNumber}
+                                            width={55}
+                                        />
                                         <Tooltip
-                                            content={({ active, payload }) => {
+                                            content={({ active, payload, label }) => {
                                                 if (!active || !payload?.length) return null
-                                                const d = payload[0]?.payload
+                                                const total = payload.reduce((s, p) => s + (p.value || 0), 0)
                                                 return (
                                                     <div style={{
-                                                        background: isDarkMode ? 'rgba(15,23,42,0.95)' : 'rgba(255,255,255,0.98)',
-                                                        border: `1px solid ${isDarkMode ? 'rgba(245,158,11,0.3)' : 'rgba(245,158,11,0.4)'}`,
-                                                        borderRadius: 10, padding: '10px 14px',
-                                                        boxShadow: isDarkMode ? '0 8px 24px rgba(0,0,0,0.4)' : '0 8px 24px rgba(0,0,0,0.1)',
+                                                        background: isDarkMode ? 'rgba(15,23,42,0.97)' : 'rgba(255,255,255,0.98)',
+                                                        border: `1px solid ${isDarkMode ? 'rgba(99,102,241,0.3)' : 'rgba(99,102,241,0.2)'}`,
+                                                        borderRadius: 10, padding: '10px 14px', minWidth: 180,
+                                                        boxShadow: isDarkMode ? '0 8px 24px rgba(0,0,0,0.5)' : '0 8px 24px rgba(0,0,0,0.1)',
                                                     }}>
-                                                        <div style={{ fontWeight: 600, color: isDarkMode ? '#F8FAFC' : '#0F172A', marginBottom: 6, fontFamily: 'Space Grotesk' }}>{d?.fullName}</div>
-                                                        <div style={{ fontSize: 12, color: isDarkMode ? '#94A3B8' : '#475569' }}>
-                                                            <div><span style={{ color: '#3b82f6' }}>Input:</span> <strong style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A' }}>{formatNumber(d?.input_tokens)}</strong></div>
-                                                            <div><span style={{ color: '#f59e0b' }}>Output:</span> <strong style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A' }}>{formatNumber(d?.output_tokens)}</strong></div>
-                                                            <div style={{ borderTop: '1px solid rgba(148,163,184,0.2)', marginTop: 4, paddingTop: 4 }}>
-                                                                Ratio: <strong style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A' }}>{d?.input_tokens > 0 ? (d.output_tokens / d.input_tokens).toFixed(1) : '—'}x</strong> output/input
+                                                        <div style={{ fontWeight: 700, marginBottom: 8, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk' }}>
+                                                            {label} Tokens
+                                                        </div>
+                                                        {payload.slice().reverse().map(p => p.value > 0 && (
+                                                            <div key={p.dataKey} style={{ display: 'flex', justifyContent: 'space-between', gap: 16, fontSize: 12, marginBottom: 3 }}>
+                                                                <span style={{ color: p.fill, display: 'flex', alignItems: 'center', gap: 5 }}>
+                                                                    <span style={{ width: 8, height: 8, borderRadius: 2, background: p.fill, display: 'inline-block' }} />
+                                                                    {p.dataKey.length > 20 ? p.dataKey.slice(-16) + '…' : p.dataKey}
+                                                                </span>
+                                                                <strong style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A' }}>{formatNumber(p.value)}</strong>
                                                             </div>
+                                                        ))}
+                                                        <div style={{ borderTop: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)'}`, marginTop: 6, paddingTop: 6, display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                                                            <span style={{ color: isDarkMode ? '#94A3B8' : '#64748B' }}>Total</span>
+                                                            <strong style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A' }}>{formatNumber(total)}</strong>
                                                         </div>
                                                     </div>
                                                 )
                                             }}
-                                            cursor={false}
+                                            cursor={{ fill: isDarkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' }}
                                         />
                                         <Legend
-                                            verticalAlign="top"
-                                            height={30}
-                                            formatter={(value) => <span style={{ color: isDarkMode ? '#94A3B8' : '#475569', fontSize: 12 }}>{value}</span>}
+                                            verticalAlign="bottom"
+                                            height={36}
+                                            formatter={(value) => (
+                                                <span style={{ color: isDarkMode ? '#94A3B8' : '#475569', fontSize: 11 }}>
+                                                    {value.length > 18 ? '…' + value.slice(-14) : value}
+                                                </span>
+                                            )}
                                         />
-                                        <Bar dataKey="input_tokens" name="Input Tokens" fill="url(#gradInput)" stroke="#3b82f6" strokeWidth={1} stackId="1" radius={[0, 0, 0, 0]}
-                                            isAnimationActive={chartAnimated} animationDuration={1500} />
-                                        <Bar dataKey="output_tokens" name="Output Tokens" fill="url(#gradOutput)" stroke="#f59e0b" strokeWidth={1} stackId="1" radius={[0, 4, 4, 0]}
-                                            isAnimationActive={chartAnimated} animationDuration={1500} />
+                                        {tokenTypeModels.map((modelName, i) => (
+                                            <Bar
+                                                key={modelName}
+                                                dataKey={modelName}
+                                                stackId="a"
+                                                fill={getModelColor(modelName)}
+                                                radius={i === tokenTypeModels.length - 1 ? [4, 4, 0, 0] : [0, 0, 0, 0]}
+                                                isAnimationActive={chartAnimated}
+                                                animationDuration={1200}
+                                                animationBegin={i * 80}
+                                            />
+                                        ))}
                                     </BarChart>
                                 </ResponsiveContainer>
-                            ) : (
-                                <div className="empty-state" style={{ minHeight: 280, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                                    No token type breakdown data available
-                                </div>
-                            )
+                            </div>
                         )}
                     </div>
                 </div>

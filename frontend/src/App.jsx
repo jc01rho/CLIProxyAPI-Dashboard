@@ -265,7 +265,7 @@ function App() {
             // 2. Fetch ALL snapshots within date range (including model_usage for granular delta)
             let snapshotsQuery = supabase
                 .from('usage_snapshots')
-                .select('id, collected_at, total_requests, success_count, failure_count, total_tokens, model_usage(model_name, request_count, total_tokens, estimated_cost_usd)')
+                .select('id, collected_at, total_requests, success_count, failure_count, total_tokens, model_usage(model_name, request_count, total_tokens, estimated_cost_usd, input_tokens, output_tokens, reasoning_tokens, cached_tokens)')
                 .order('collected_at', { ascending: true })
 
             if (startTime) {
@@ -417,14 +417,10 @@ function App() {
                                         request_count: 0,
                                         total_tokens: 0,
                                         estimated_cost_usd: 0,
-                                        input_tokens: 0, // Not stored in breakdown currently, assume 0 or avg?
-                                        output_tokens: 0
-                                        // Note: breakdown JSON only stores 'tokens' (total).
-                                        // If we need input/output split, we need to update schema/collector.
-                                        // For now, charts use total_tokens mainly. Cost details table uses input/output.
-                                        // If input/output missing, table might show 0.
-                                        // Update: My collector update DID NOT save input/output split to breakdown.
-                                        // This is a regression for the table view if we switch fully.
+                                        input_tokens: 0,
+                                        output_tokens: 0,
+                                        reasoning_tokens: 0,
+                                        cached_tokens: 0,
                                     }
                                 }
                                 const m = aggregatedBreakdown.models[mName]
@@ -433,6 +429,8 @@ function App() {
                                 m.estimated_cost_usd += data.cost || 0
                                 m.input_tokens += data.input_tokens || 0
                                 m.output_tokens += data.output_tokens || 0
+                                m.reasoning_tokens += data.reasoning_tokens || 0
+                                m.cached_tokens += data.cached_tokens || 0
                             }
                         }
 
@@ -608,7 +606,7 @@ function App() {
                 // CRITICAL: Supabase defaults to 1000 rows. With many snapshots, this query can return thousands of rows.
                 // We MUST increase the limit.
                 const { data: usageRecords } = await supabase.from('model_usage')
-                    .select('snapshot_id, model_name, api_endpoint, request_count, input_tokens, output_tokens, total_tokens, estimated_cost_usd')
+                    .select('snapshot_id, model_name, api_endpoint, request_count, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, estimated_cost_usd')
                     .in('snapshot_id', uniqueSnapIds)
                     .limit(100000); // Increase limit to ensure we get all records
 
@@ -641,10 +639,10 @@ function App() {
                     const allKeys = new Set([...prevModelUsageMap.keys(), ...currentModelUsageMap.keys()]);
 
                     for (const key of allKeys) {
-                        const prev = prevModelUsageMap.get(key) || { request_count: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
-                        const curr = currentModelUsageMap.get(key) || { request_count: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
+                        const prev = prevModelUsageMap.get(key) || { request_count: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
+                        const curr = currentModelUsageMap.get(key) || { request_count: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
 
-                        let deltaReq = 0, deltaIn = 0, deltaOut = 0, deltaTotal = 0, deltaCost = 0;
+                        let deltaReq = 0, deltaIn = 0, deltaOut = 0, deltaReasoning = 0, deltaCached = 0, deltaTotal = 0, deltaCost = 0;
 
                         // Determine if a reset occurred for this specific model+endpoint key
                         // A reset is indicated if current counters are less than previous counters
@@ -656,6 +654,8 @@ function App() {
                             deltaReq = curr.request_count;
                             deltaIn = curr.input_tokens;
                             deltaOut = curr.output_tokens;
+                            deltaReasoning = curr.reasoning_tokens || 0;
+                            deltaCached = curr.cached_tokens || 0;
                             deltaTotal = curr.total_tokens;
                             deltaCost = parseFloat(curr.estimated_cost_usd || 0);
                         } else {
@@ -663,6 +663,8 @@ function App() {
                             deltaReq = curr.request_count - prev.request_count;
                             deltaIn = curr.input_tokens - prev.input_tokens;
                             deltaOut = curr.output_tokens - prev.output_tokens;
+                            deltaReasoning = (curr.reasoning_tokens || 0) - (prev.reasoning_tokens || 0);
+                            deltaCached = (curr.cached_tokens || 0) - (prev.cached_tokens || 0);
                             deltaTotal = curr.total_tokens - prev.total_tokens;
                             deltaCost = parseFloat(curr.estimated_cost_usd || 0) - parseFloat(prev.estimated_cost_usd || 0);
                         }
@@ -671,15 +673,17 @@ function App() {
                         if (deltaReq > 0 || deltaCost > 0) {
                             if (!totalByModel.has(key)) {
                                 totalByModel.set(key, {
-                                    model_name: curr.model_name || prev.model_name, // Use whichever is available
+                                    model_name: curr.model_name || prev.model_name,
                                     api_endpoint: curr.api_endpoint || prev.api_endpoint,
-                                    request_count: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, estimated_cost_usd: 0
+                                    request_count: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0, total_tokens: 0, estimated_cost_usd: 0
                                 });
                             }
                             const item = totalByModel.get(key);
                             item.request_count += deltaReq;
                             item.input_tokens += deltaIn;
                             item.output_tokens += deltaOut;
+                            item.reasoning_tokens += deltaReasoning;
+                            item.cached_tokens += deltaCached;
                             item.total_tokens += deltaTotal;
                             item.estimated_cost_usd += deltaCost;
                         }
@@ -699,10 +703,12 @@ function App() {
                     if (!modelMap.has(mName)) {
                         modelMap.set(mName, {
                             model_name: mName,
-                            api_endpoint: data.api_endpoint, // First endpoint found (will be overwritten if mult)
+                            api_endpoint: data.api_endpoint,
                             request_count: 0,
                             input_tokens: 0,
                             output_tokens: 0,
+                            reasoning_tokens: 0,
+                            cached_tokens: 0,
                             total_tokens: 0,
                             estimated_cost_usd: 0
                         })
@@ -711,6 +717,8 @@ function App() {
                     mExisting.request_count += data.request_count
                     mExisting.input_tokens += data.input_tokens
                     mExisting.output_tokens += data.output_tokens
+                    mExisting.reasoning_tokens += data.reasoning_tokens || 0
+                    mExisting.cached_tokens += data.cached_tokens || 0
                     mExisting.total_tokens += data.total_tokens
                     mExisting.estimated_cost_usd += data.estimated_cost_usd
                     // Note: api_endpoint aggregation for Model List isn't strictly needed as list doesn't show it,

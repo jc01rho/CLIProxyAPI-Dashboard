@@ -206,6 +206,13 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
         return () => clearTimeout(timer)
     }, [])
 
+    // Auto-reset to 'hour' granularity when switching to single-day ranges
+    useEffect(() => {
+        if (dateRange === 'today' || dateRange === 'yesterday') {
+            setUsageTrendTime('hour')
+        }
+    }, [dateRange])
+
     // Re-trigger chart animation when switching views
     useEffect(() => {
         setChartAnimated(false)
@@ -558,7 +565,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                 <button className={`tab ${usageTrendView === 'models' ? 'active' : ''}`} onClick={() => setUsageTrendView('models')}>Models</button>
                                 <button className={`tab ${usageTrendView === 'tokenTypes' ? 'active' : ''}`} onClick={() => setUsageTrendView('tokenTypes')}>Token Types</button>
                             </div>
-                            {usageTrendView === 'models' && (
+                            {usageTrendView === 'models' && !['today', 'yesterday'].includes(dateRange) && (
                                 <div className="chart-tabs">
                                     <button className={`tab ${usageTrendTime === 'hour' ? 'active' : ''}`} onClick={() => setUsageTrendTime('hour')}>Hour</button>
                                     <button className={`tab ${usageTrendTime === 'day' ? 'active' : ''}`} onClick={() => setUsageTrendTime('day')}>Day</button>
@@ -569,7 +576,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                     <div className="chart-body chart-body-dark" style={{ display: 'flex', gap: '20px' }}>
                         {usageTrendView === 'models' ? (
                             <>
-                                <ResponsiveContainer width="70%" height={320}>
+                                <ResponsiveContainer width="62%" height={320}>
                                     {modelTrendData.length > 0 ? (
                                         <AreaChart data={modelTrendData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                                             <defs>
@@ -662,7 +669,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                     )}
                                 </ResponsiveContainer>
                                 <div className="chart-legend-panel" style={{
-                                    width: '28%',
+                                    width: '36%',
                                     display: 'flex',
                                     flexDirection: 'column',
                                     gap: '8px',
@@ -677,28 +684,27 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         marginBottom: '4px',
                                         textTransform: 'uppercase',
                                         letterSpacing: '0.5px',
-                                        display: 'flex',
-                                        justifyContent: 'space-between',
-                                        paddingRight: '8px'
+                                        display: 'grid',
+                                        gridTemplateColumns: '1fr auto auto auto',
+                                        gap: '6px',
+                                        paddingRight: '4px'
                                     }}>
                                         <span>Model</span>
-                                        <span>{usageTrendMetric === 'cost' ? 'Cost' : usageTrendMetric === 'tokens' ? 'Tokens' : 'Requests'}</span>
+                                        <span style={{ textAlign: 'right' }}>Req</span>
+                                        <span style={{ textAlign: 'right' }}>Tokens</span>
+                                        <span style={{ textAlign: 'right', color: isDarkMode ? '#10b981' : '#059669' }}>Cost</span>
                                     </div>
                                     {activeTopModels.map((modelName) => {
                                         const color = getModelColor(modelName)
                                         const modelData = filteredModelUsage.find(m => m.model_name === modelName)
-                                        const value = usageTrendMetric === 'cost'
-                                            ? `$${(modelData?.estimated_cost_usd || 0).toFixed(2)}`
-                                            : usageTrendMetric === 'tokens'
-                                            ? formatNumber(modelData?.total_tokens || 0)
-                                            : formatNumber(modelData?.request_count || 0)
 
                                         return (
                                             <div key={modelName} onClick={() => openModelDrilldown(modelName)} style={{
-                                                display: 'flex',
+                                                display: 'grid',
+                                                gridTemplateColumns: '1fr auto auto auto',
+                                                gap: '6px',
                                                 alignItems: 'center',
-                                                gap: '10px',
-                                                padding: '6px 10px',
+                                                padding: '5px 8px',
                                                 background: isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
                                                 borderRadius: '6px',
                                                 border: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'}`,
@@ -713,16 +719,16 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                 e.currentTarget.style.background = isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)'
                                                 e.currentTarget.style.borderColor = isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'
                                             }}>
-                                                <span style={{
-                                                    width: '10px',
-                                                    height: '10px',
-                                                    borderRadius: '50%',
-                                                    background: color,
-                                                    boxShadow: `0 0 8px ${color}`,
-                                                    flexShrink: 0
-                                                }}></span>
-                                                <div style={{ flex: 1, minWidth: 0 }}>
-                                                    <div style={{
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                                                    <span style={{
+                                                        width: '8px',
+                                                        height: '8px',
+                                                        borderRadius: '50%',
+                                                        background: color,
+                                                        boxShadow: `0 0 6px ${color}`,
+                                                        flexShrink: 0
+                                                    }}></span>
+                                                    <span style={{
                                                         fontSize: '11px',
                                                         fontWeight: 500,
                                                         color: isDarkMode ? '#F8FAFC' : '#0F172A',
@@ -731,18 +737,16 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                         whiteSpace: 'nowrap'
                                                     }}>
                                                         {modelName}
-                                                    </div>
+                                                    </span>
                                                 </div>
-                                                <span style={{
-                                                    fontSize: '11px',
-                                                    fontWeight: 600,
-                                                    color: usageTrendMetric === 'cost'
-                                                        ? (isDarkMode ? '#10b981' : '#059669')
-                                                        : (isDarkMode ? '#F8FAFC' : '#0F172A'),
-                                                    fontFamily: 'monospace',
-                                                    flexShrink: 0
-                                                }}>
-                                                    {value}
+                                                <span style={{ fontSize: '10px', fontWeight: 600, color: isDarkMode ? '#CBD5E1' : '#334155', fontFamily: 'monospace', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                                    {formatNumber(modelData?.request_count || 0)}
+                                                </span>
+                                                <span style={{ fontSize: '10px', fontWeight: 600, color: isDarkMode ? '#CBD5E1' : '#334155', fontFamily: 'monospace', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                                    {formatNumber(modelData?.total_tokens || 0)}
+                                                </span>
+                                                <span style={{ fontSize: '10px', fontWeight: 600, color: isDarkMode ? '#10b981' : '#059669', fontFamily: 'monospace', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                                    ${(modelData?.estimated_cost_usd || 0).toFixed(2)}
                                                 </span>
                                             </div>
                                         )
@@ -751,138 +755,168 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                             </>
                         ) : (
                             /* Token Types: Clustered stacked column — X = time, 4 clusters per tick, stacks = models */
-                            <div style={{ minHeight: 320 }}>
-                                {/* Token type legend (opacity key) */}
-                                <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 10, paddingLeft: 4 }}>
-                                    {[
-                                        { label: 'Input', opacity: 1.0, suffix: 'in' },
-                                        { label: 'Output', opacity: 0.85, suffix: 'out' },
-                                        { label: 'Cached', opacity: 0.55, suffix: 'ca' },
-                                        { label: 'Reasoning', opacity: 0.40, suffix: 're' },
-                                    ].map(({ label, opacity, suffix }) => (
-                                        <span key={suffix} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: isDarkMode ? '#94A3B8' : '#64748B' }}>
-                                            <span style={{ width: 12, height: 12, borderRadius: 3, background: `rgba(99,102,241,${opacity})`, display: 'inline-block' }} />
-                                            {label}
-                                        </span>
-                                    ))}
-                                    <span style={{ marginLeft: 'auto', fontSize: 11, color: isDarkMode ? '#64748B' : '#94A3B8', fontStyle: 'italic' }}>
-                                        Colors = model · Opacity = token type
-                                    </span>
-                                </div>
-                                <ResponsiveContainer width="100%" height={300}>
-                                    <BarChart
-                                        data={tokenTrendData}
-                                        margin={{ top: 4, right: 20, left: 10, bottom: 5 }}
-                                        barCategoryGap="20%"
-                                        barGap={1}
-                                    >
-                                        <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'} vertical={false} />
-                                        <XAxis
-                                            dataKey="time"
-                                            stroke={isDarkMode ? '#6e7681' : '#57606a'}
-                                            tick={{ fontSize: 11 }}
-                                            axisLine={false}
-                                            tickLine={false}
-                                        />
-                                        <YAxis
-                                            stroke={isDarkMode ? '#6e7681' : '#57606a'}
-                                            tick={{ fontSize: 11 }}
-                                            axisLine={false}
-                                            tickLine={false}
-                                            tickFormatter={formatNumber}
-                                            width={55}
-                                        />
-                                        <Tooltip
-                                            content={({ active, payload, label }) => {
-                                                if (!active || !payload?.length) return null
-                                                // Group by model and token type
-                                                const byModel = {}
-                                                for (const p of payload) {
-                                                    if (!p.value) continue
-                                                    const [model, type] = p.dataKey.split('||')
-                                                    if (!byModel[model]) byModel[model] = {}
-                                                    byModel[model][type] = (byModel[model][type] || 0) + p.value
-                                                }
-                                                const typeLabels = { in: 'Input', out: 'Output', ca: 'Cached', re: 'Reasoning' }
-                                                const grandTotal = payload.reduce((s, p) => s + (p.value || 0), 0)
-                                                return (
-                                                    <div style={{
-                                                        background: isDarkMode ? 'rgba(15,23,42,0.97)' : 'rgba(255,255,255,0.98)',
-                                                        border: `1px solid ${isDarkMode ? 'rgba(99,102,241,0.3)' : 'rgba(99,102,241,0.2)'}`,
-                                                        borderRadius: 10, padding: '10px 14px', minWidth: 200,
-                                                        boxShadow: isDarkMode ? '0 8px 24px rgba(0,0,0,0.5)' : '0 8px 24px rgba(0,0,0,0.1)',
-                                                        maxHeight: 320, overflowY: 'auto'
-                                                    }}>
-                                                        <div style={{ fontWeight: 700, marginBottom: 8, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk' }}>
-                                                            {label}
-                                                        </div>
-                                                        {Object.entries(byModel).map(([model, types]) => (
-                                                            <div key={model} style={{ marginBottom: 6 }}>
-                                                                <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 3 }}>
-                                                                    <span style={{ width: 8, height: 8, borderRadius: 2, background: getModelColor(model), display: 'inline-block' }} />
-                                                                    <span style={{ fontSize: 11, fontWeight: 600, color: isDarkMode ? '#CBD5E1' : '#334155' }}>
-                                                                        {model.length > 22 ? '…' + model.slice(-18) : model}
-                                                                    </span>
-                                                                </div>
-                                                                {['in', 'out', 'ca', 're'].filter(t => types[t] > 0).map(t => (
-                                                                    <div key={t} style={{ display: 'flex', justifyContent: 'space-between', gap: 14, fontSize: 11, paddingLeft: 13, marginBottom: 1 }}>
-                                                                        <span style={{ color: isDarkMode ? '#94A3B8' : '#64748B' }}>{typeLabels[t]}</span>
-                                                                        <strong style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A' }}>{formatNumber(types[t])}</strong>
-                                                                    </div>
-                                                                ))}
-                                                            </div>
-                                                        ))}
-                                                        <div style={{ borderTop: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)'}`, marginTop: 6, paddingTop: 6, display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
-                                                            <span style={{ color: isDarkMode ? '#94A3B8' : '#64748B' }}>Total</span>
-                                                            <strong style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A' }}>{formatNumber(grandTotal)}</strong>
-                                                        </div>
-                                                    </div>
-                                                )
-                                            }}
-                                            cursor={{ fill: isDarkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' }}
-                                        />
-                                        {/* 4 clusters: Input (opacity 1.0), Output (0.85), Cached (0.55), Reasoning (0.40) */}
-                                        {tokenTrendModels.map((model, i) => (
-                                            <Bar key={`${model}-in`} dataKey={`${model}||in`} stackId="in"
-                                                fill={getModelColor(model)} fillOpacity={1.0}
-                                                radius={i === tokenTrendModels.length - 1 ? [3, 3, 0, 0] : [0, 0, 0, 0]}
-                                                isAnimationActive={chartAnimated} animationDuration={1000} animationBegin={i * 60}
-                                            />
-                                        ))}
-                                        {tokenTrendModels.map((model, i) => (
-                                            <Bar key={`${model}-out`} dataKey={`${model}||out`} stackId="out"
-                                                fill={getModelColor(model)} fillOpacity={0.85}
-                                                radius={i === tokenTrendModels.length - 1 ? [3, 3, 0, 0] : [0, 0, 0, 0]}
-                                                isAnimationActive={chartAnimated} animationDuration={1000} animationBegin={i * 60}
-                                            />
-                                        ))}
-                                        {tokenTrendModels.map((model, i) => (
-                                            <Bar key={`${model}-ca`} dataKey={`${model}||ca`} stackId="ca"
-                                                fill={getModelColor(model)} fillOpacity={0.55}
-                                                radius={i === tokenTrendModels.length - 1 ? [3, 3, 0, 0] : [0, 0, 0, 0]}
-                                                isAnimationActive={chartAnimated} animationDuration={1000} animationBegin={i * 60}
-                                            />
-                                        ))}
-                                        {tokenTrendModels.map((model, i) => (
-                                            <Bar key={`${model}-re`} dataKey={`${model}||re`} stackId="re"
-                                                fill={getModelColor(model)} fillOpacity={0.40}
-                                                radius={i === tokenTrendModels.length - 1 ? [3, 3, 0, 0] : [0, 0, 0, 0]}
-                                                isAnimationActive={chartAnimated} animationDuration={1000} animationBegin={i * 60}
-                                            />
-                                        ))}
-                                    </BarChart>
-                                </ResponsiveContainer>
-                                {/* Model color legend */}
-                                {tokenTrendModels.length > 0 && (
-                                    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'center', marginTop: 8 }}>
-                                        {tokenTrendModels.map(model => (
-                                            <span key={model} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: isDarkMode ? '#94A3B8' : '#475569' }}>
-                                                <span style={{ width: 10, height: 10, borderRadius: 2, background: getModelColor(model), display: 'inline-block' }} />
-                                                {model.length > 20 ? '…' + model.slice(-16) : model}
+                            <div style={{ display: 'flex', gap: '20px', minHeight: 320 }}>
+                                {/* Chart column */}
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    {/* Token type legend (opacity key) */}
+                                    <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 8, paddingLeft: 4 }}>
+                                        {[
+                                            { label: 'Input', opacity: 1.0, suffix: 'in' },
+                                            { label: 'Output', opacity: 0.85, suffix: 'out' },
+                                            { label: 'Cached', opacity: 0.55, suffix: 'ca' },
+                                            { label: 'Reasoning', opacity: 0.40, suffix: 're' },
+                                        ].map(({ label, opacity, suffix }) => (
+                                            <span key={suffix} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: isDarkMode ? '#94A3B8' : '#64748B' }}>
+                                                <span style={{ width: 10, height: 10, borderRadius: 2, background: `rgba(99,102,241,${opacity})`, display: 'inline-block' }} />
+                                                {label}
                                             </span>
                                         ))}
                                     </div>
-                                )}
+                                    <ResponsiveContainer width="100%" height={300}>
+                                        <BarChart
+                                            data={tokenTrendData}
+                                            margin={{ top: 4, right: 10, left: 10, bottom: 5 }}
+                                            barCategoryGap="20%"
+                                            barGap={1}
+                                        >
+                                            <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'} vertical={false} />
+                                            <XAxis
+                                                dataKey="time"
+                                                stroke={isDarkMode ? '#6e7681' : '#57606a'}
+                                                tick={{ fontSize: 11 }}
+                                                axisLine={false}
+                                                tickLine={false}
+                                            />
+                                            <YAxis
+                                                stroke={isDarkMode ? '#6e7681' : '#57606a'}
+                                                tick={{ fontSize: 11 }}
+                                                axisLine={false}
+                                                tickLine={false}
+                                                tickFormatter={formatNumber}
+                                                width={55}
+                                            />
+                                            <Tooltip
+                                                content={({ active, payload, label }) => {
+                                                    if (!active || !payload?.length) return null
+                                                    const byModel = {}
+                                                    for (const p of payload) {
+                                                        if (!p.value) continue
+                                                        const [model, type] = p.dataKey.split('||')
+                                                        if (!byModel[model]) byModel[model] = {}
+                                                        byModel[model][type] = (byModel[model][type] || 0) + p.value
+                                                    }
+                                                    const typeLabels = { in: 'Input', out: 'Output', ca: 'Cached', re: 'Reasoning' }
+                                                    const grandTotal = payload.reduce((s, p) => s + (p.value || 0), 0)
+                                                    return (
+                                                        <div style={{
+                                                            background: isDarkMode ? 'rgba(15,23,42,0.97)' : 'rgba(255,255,255,0.98)',
+                                                            border: `1px solid ${isDarkMode ? 'rgba(99,102,241,0.3)' : 'rgba(99,102,241,0.2)'}`,
+                                                            borderRadius: 10, padding: '10px 14px', minWidth: 200,
+                                                            boxShadow: isDarkMode ? '0 8px 24px rgba(0,0,0,0.5)' : '0 8px 24px rgba(0,0,0,0.1)',
+                                                            maxHeight: 320, overflowY: 'auto'
+                                                        }}>
+                                                            <div style={{ fontWeight: 700, marginBottom: 8, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk' }}>
+                                                                {label}
+                                                            </div>
+                                                            {Object.entries(byModel).map(([model, types]) => (
+                                                                <div key={model} style={{ marginBottom: 6 }}>
+                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 3 }}>
+                                                                        <span style={{ width: 8, height: 8, borderRadius: 2, background: getModelColor(model), display: 'inline-block' }} />
+                                                                        <span style={{ fontSize: 11, fontWeight: 600, color: isDarkMode ? '#CBD5E1' : '#334155' }}>
+                                                                            {model.length > 22 ? '…' + model.slice(-18) : model}
+                                                                        </span>
+                                                                    </div>
+                                                                    {['in', 'out', 'ca', 're'].filter(t => types[t] > 0).map(t => (
+                                                                        <div key={t} style={{ display: 'flex', justifyContent: 'space-between', gap: 14, fontSize: 11, paddingLeft: 13, marginBottom: 1 }}>
+                                                                            <span style={{ color: isDarkMode ? '#94A3B8' : '#64748B' }}>{typeLabels[t]}</span>
+                                                                            <strong style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A' }}>{formatNumber(types[t])}</strong>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            ))}
+                                                            <div style={{ borderTop: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)'}`, marginTop: 6, paddingTop: 6, display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                                                                <span style={{ color: isDarkMode ? '#94A3B8' : '#64748B' }}>Total</span>
+                                                                <strong style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A' }}>{formatNumber(grandTotal)}</strong>
+                                                            </div>
+                                                        </div>
+                                                    )
+                                                }}
+                                                cursor={{ fill: isDarkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' }}
+                                            />
+                                            {/* 4 clusters: Input (opacity 1.0), Output (0.85), Cached (0.55), Reasoning (0.40) */}
+                                            {tokenTrendModels.map((model, i) => (
+                                                <Bar key={`${model}-in`} dataKey={`${model}||in`} stackId="in"
+                                                    fill={getModelColor(model)} fillOpacity={1.0}
+                                                    radius={i === tokenTrendModels.length - 1 ? [3, 3, 0, 0] : [0, 0, 0, 0]}
+                                                    isAnimationActive={chartAnimated} animationDuration={1000} animationBegin={i * 60}
+                                                />
+                                            ))}
+                                            {tokenTrendModels.map((model, i) => (
+                                                <Bar key={`${model}-out`} dataKey={`${model}||out`} stackId="out"
+                                                    fill={getModelColor(model)} fillOpacity={0.85}
+                                                    radius={i === tokenTrendModels.length - 1 ? [3, 3, 0, 0] : [0, 0, 0, 0]}
+                                                    isAnimationActive={chartAnimated} animationDuration={1000} animationBegin={i * 60}
+                                                />
+                                            ))}
+                                            {tokenTrendModels.map((model, i) => (
+                                                <Bar key={`${model}-ca`} dataKey={`${model}||ca`} stackId="ca"
+                                                    fill={getModelColor(model)} fillOpacity={0.55}
+                                                    radius={i === tokenTrendModels.length - 1 ? [3, 3, 0, 0] : [0, 0, 0, 0]}
+                                                    isAnimationActive={chartAnimated} animationDuration={1000} animationBegin={i * 60}
+                                                />
+                                            ))}
+                                            {tokenTrendModels.map((model, i) => (
+                                                <Bar key={`${model}-re`} dataKey={`${model}||re`} stackId="re"
+                                                    fill={getModelColor(model)} fillOpacity={0.40}
+                                                    radius={i === tokenTrendModels.length - 1 ? [3, 3, 0, 0] : [0, 0, 0, 0]}
+                                                    isAnimationActive={chartAnimated} animationDuration={1000} animationBegin={i * 60}
+                                                />
+                                            ))}
+                                        </BarChart>
+                                    </ResponsiveContainer>
+                                </div>
+                                {/* Legend panel (right side) */}
+                                <div style={{ width: '28%', display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '30px', overflowY: 'auto', maxHeight: '340px' }}>
+                                    <div style={{
+                                        fontSize: '11px', fontWeight: 600,
+                                        color: isDarkMode ? '#94A3B8' : '#475569',
+                                        marginBottom: '4px', textTransform: 'uppercase',
+                                        letterSpacing: '0.5px', display: 'grid',
+                                        gridTemplateColumns: '1fr auto auto auto auto',
+                                        gap: '4px', paddingRight: '4px'
+                                    }}>
+                                        <span>Model</span>
+                                        <span style={{ textAlign: 'right', fontSize: 9 }}>In</span>
+                                        <span style={{ textAlign: 'right', fontSize: 9 }}>Out</span>
+                                        <span style={{ textAlign: 'right', fontSize: 9 }}>Ca</span>
+                                        <span style={{ textAlign: 'right', fontSize: 9 }}>Re</span>
+                                    </div>
+                                    {tokenTrendModels.map(model => {
+                                        const color = getModelColor(model)
+                                        const md = filteredModelUsage.find(m => m.model_name === model) || {}
+                                        return (
+                                            <div key={model} style={{
+                                                display: 'grid', gridTemplateColumns: '1fr auto auto auto auto',
+                                                gap: '4px', alignItems: 'center',
+                                                padding: '5px 6px',
+                                                background: isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
+                                                borderRadius: '6px',
+                                                border: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'}`,
+                                            }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
+                                                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, flexShrink: 0 }} />
+                                                    <span style={{ fontSize: 10, fontWeight: 500, color: isDarkMode ? '#F8FAFC' : '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                        {model.length > 14 ? '…' + model.slice(-11) : model}
+                                                    </span>
+                                                </div>
+                                                <span style={{ fontSize: 9, fontFamily: 'monospace', textAlign: 'right', color: isDarkMode ? '#CBD5E1' : '#334155', opacity: 1.0, whiteSpace: 'nowrap' }}>{formatNumber(md.input_tokens || 0)}</span>
+                                                <span style={{ fontSize: 9, fontFamily: 'monospace', textAlign: 'right', color: isDarkMode ? '#CBD5E1' : '#334155', opacity: 0.85, whiteSpace: 'nowrap' }}>{formatNumber(md.output_tokens || 0)}</span>
+                                                <span style={{ fontSize: 9, fontFamily: 'monospace', textAlign: 'right', color: isDarkMode ? '#CBD5E1' : '#334155', opacity: 0.7, whiteSpace: 'nowrap' }}>{formatNumber(md.cached_tokens || 0)}</span>
+                                                <span style={{ fontSize: 9, fontFamily: 'monospace', textAlign: 'right', color: isDarkMode ? '#CBD5E1' : '#334155', opacity: 0.55, whiteSpace: 'nowrap' }}>{formatNumber(md.reasoning_tokens || 0)}</span>
+                                            </div>
+                                        )
+                                    })}
+                                </div>
                             </div>
                         )}
                     </div>

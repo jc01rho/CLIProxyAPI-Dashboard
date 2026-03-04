@@ -677,7 +677,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         </AreaChart>
                                     )}
                                 </ResponsiveContainer>
-                                </div>{/* chart-split-main */}
+                                </div>
                                 <div className="chart-legend-panel chart-split-legend" style={{
                                     display: 'flex',
                                     flexDirection: 'column',
@@ -761,7 +761,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         )
                                     })}
                                 </div>
-                            </div>{/* chart-split */}
+                            </div>
                         ) : (
                             /* Token Types: Clustered stacked column — X = time, 4 clusters per tick, stacks = models */
                             <div className="chart-split" style={{ minHeight: 320 }}>
@@ -959,7 +959,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                             <Tooltip content={<CustomTooltip isDarkMode={isDarkMode} forceCurrency={true} />} />
                                         </PieChart>
                                     </ResponsiveContainer>
-                                    </div>{/* chart-split-main */}
+                                    </div>
                                     <div className="chart-legend-panel chart-split-legend" style={{
                                         display: 'flex',
                                         flexDirection: 'column',
@@ -1048,7 +1048,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                             </div>
                                         ))}
                                     </div>
-                                </div>{/* chart-split */}
+                                </div>
                             ) : (
                                 <div className="empty-state">No cost data</div>
                             )}

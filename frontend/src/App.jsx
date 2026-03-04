@@ -767,26 +767,13 @@ function App() {
     }, [dateRange, fetchData, fetchCredentialStats])
 
     useEffect(() => {
-        // Set up real-time subscription
-        const channel = supabase
-            .channel('usage_changes')
-            .on('postgres_changes',
-                { event: 'INSERT', schema: 'public', table: 'usage_snapshots' },
-                () => {
-                    fetchData(dateRange)
-                    fetchCredentialStats(dateRange)
-                }
-            )
-            .subscribe()
-
-        // Refresh every 5 minutes - also refresh credential stats
+        // Refresh every 5 minutes
         const interval = setInterval(() => {
             fetchData(dateRange)
             fetchCredentialStats(dateRange)
         }, 5 * 60 * 1000)
 
         return () => {
-            supabase.removeChannel(channel)
             clearInterval(interval)
         }
     }, [dateRange, fetchData, fetchCredentialStats])

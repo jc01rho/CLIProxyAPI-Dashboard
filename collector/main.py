@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 CLIProxy Usage Collector
-Polls the CLIProxy Management API and stores usage data in Supabase
+Polls the CLIProxy Management API and stores usage data in PostgreSQL
 """
 
 import os
@@ -16,7 +16,7 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, jsonify, Blueprint
 from flask_cors import CORS
-from supabase import create_client, Client
+from db import PostgreSQLClient
 from credential_stats_sync import sync_credential_stats
 from waitress import serve
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -39,8 +39,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration from environment
-SUPABASE_URL = os.getenv('SUPABASE_URL', '')
-SUPABASE_SECRET_KEY = os.getenv('SUPABASE_SECRET_KEY', '')
+DATABASE_URL = os.getenv('DATABASE_URL', '')
 CLIPROXY_URL = os.getenv('CLIPROXY_URL', 'http://localhost:8317')
 CLIPROXY_MANAGEMENT_KEY = os.getenv('CLIPROXY_MANAGEMENT_KEY', '')
 COLLECTOR_INTERVAL = int(os.getenv('COLLECTOR_INTERVAL_SECONDS', '300'))
@@ -87,7 +86,7 @@ DEFAULT_PRICING = {
 LLM_PRICES_URL = "https://www.llm-prices.com/current-v1.json"
 
 # --- Globals ---
-supabase: Optional[Client] = None
+db_client: Optional[PostgreSQLClient] = None
 remote_pricing_cache: Dict[str, Dict[str, float]] = {}
 remote_pricing_last_fetch: float = 0
 
@@ -117,7 +116,7 @@ def trigger_credential_stats_sync():
 
     def credential_stats_task():
         try:
-            stats = sync_credential_stats(CLIPROXY_URL, CLIPROXY_MANAGEMENT_KEY, supabase, app_timezone=APP_TIMEZONE)
+            stats = sync_credential_stats(CLIPROXY_URL, CLIPROXY_MANAGEMENT_KEY, db_client, app_timezone=APP_TIMEZONE)
             logger.info(f"Credential stats sync completed: {stats}")
         except Exception as e:
             logger.error(f"Credential stats sync failed: {e}", exc_info=True)
@@ -136,7 +135,7 @@ def run_full_sync_once():
     else:
         logger.warning("No data received from CLIProxy.")
 
-# --- Core Logic Functions (fetch_remote_pricing, init_supabase, etc.) ---
+# --- Core Logic Functions (fetch_remote_pricing, init_db, etc.) ---
 # These functions remain largely the same as before.
 def fetch_remote_pricing() -> Dict[str, Dict[str, float]]:
     # (Implementation from before)
@@ -165,10 +164,10 @@ def fetch_remote_pricing() -> Dict[str, Dict[str, float]]:
         logger.warning(f"Could not fetch remote pricing: {e}")
     return {}
 
-def init_supabase() -> Client:
-    if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
-        raise ValueError("SUPABASE_URL and SUPABASE_SECRET_KEY must be set")
-    return create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
+def init_db() -> PostgreSQLClient:
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL must be set")
+    return PostgreSQLClient(DATABASE_URL)
 
 def fetch_usage_data() -> Optional[Dict[str, Any]]:
     # (Implementation from before)
@@ -204,8 +203,8 @@ def calculate_cost(input_tokens: int, output_tokens: int, pricing: Dict[str, flo
     return ((input_tokens / 1_000_000) * pricing['input']) + ((output_tokens / 1_000_000) * pricing['output'])
 
 def store_usage_data(data: Dict[str, Any]) -> bool:
-    """Store usage data in Supabase database with proper daily delta calculation."""
-    if not supabase or not data or 'usage' not in data:
+    """Store usage data in PostgreSQL database with proper daily delta calculation."""
+    if not db_client or not data or 'usage' not in data:
         return False
     usage = data['usage']
     pricing = get_model_pricing()
@@ -226,7 +225,7 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
             'total_tokens': current_tokens
         }
         # Track cumulative cost (sum of costs from all snapshots so far)
-        last_cost_resp = supabase.table('usage_snapshots') \
+        last_cost_resp = db_client.table('usage_snapshots') \
             .select('cumulative_cost_usd') \
             .order('collected_at', desc=True) \
             .limit(1) \
@@ -234,7 +233,7 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
         last_cost_total = last_cost_resp.data[0].get('cumulative_cost_usd', 0) if last_cost_resp.data else 0
         snapshot_data['cumulative_cost_usd'] = last_cost_total  # placeholder, updated after cost calc
 
-        snapshot_result = supabase.table('usage_snapshots').insert(snapshot_data).execute()
+        snapshot_result = db_client.table('usage_snapshots').insert(snapshot_data).execute()
         snapshot_id = snapshot_result.data[0]['id']
         
         # Process model-level data
@@ -259,11 +258,11 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                 })
         
         if model_records:
-            supabase.table('model_usage').insert(model_records).execute()
+            db_client.table('model_usage').insert(model_records).execute()
 
         # Update snapshot cumulative cost
         cumulative_cost = last_cost_total + total_cost
-        supabase.table('usage_snapshots').update({'cumulative_cost_usd': cumulative_cost}).eq('id', snapshot_id).execute()
+        db_client.table('usage_snapshots').update({'cumulative_cost_usd': cumulative_cost}).eq('id', snapshot_id).execute()
 
         # === Calculate daily delta stats (Incremental Approach) ===
         # Robust against restarts: Calculate delta since LAST snapshot and add to daily_stats
@@ -273,7 +272,7 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
         # 1. Get the previous snapshot (just before the one we just inserted)
         # We inserted the new one, so we want the one with collected_at < current collected_at
         # Or simpler: get the 2nd latest snapshot (since we just inserted the latest)
-        prev_snap_resp = supabase.table('usage_snapshots') \
+        prev_snap_resp = db_client.table('usage_snapshots') \
             .select('id, total_requests, success_count, failure_count, total_tokens, cumulative_cost_usd') \
             .order('collected_at', desc=True) \
             .limit(2) \
@@ -314,7 +313,7 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
             inc_cost = total_cost
 
         # 2. Get existing daily_stats for today
-        daily_stats_resp = supabase.table('daily_stats').select('*').eq('stat_date', today_iso).execute()
+        daily_stats_resp = db_client.table('daily_stats').select('*').eq('stat_date', today_iso).execute()
         existing_daily = daily_stats_resp.data[0] if daily_stats_resp.data else {
             'total_requests': 0, 'success_count': 0, 'failure_count': 0, 'total_tokens': 0, 'estimated_cost_usd': 0,
             'breakdown': {'models': {}, 'endpoints': {}}
@@ -326,7 +325,7 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
         if prev_snap:
             # ... (global delta calculation kept as is) ...
             # Calculate granular deltas for breakdown
-            prev_usage_resp = supabase.table('model_usage').select('*').eq('snapshot_id', prev_snap['id']).execute()
+            prev_usage_resp = db_client.table('model_usage').select('*').eq('snapshot_id', prev_snap['id']).execute()
             prev_usage_map = {}
             for r in prev_usage_resp.data:
                 # Key must handle potential None for api_endpoint (though unlikely if schema enforces)
@@ -547,7 +546,7 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
             'breakdown': existing_breakdown # Save the updated breakdown
         }
 
-        supabase.table('daily_stats').upsert(daily_data, on_conflict='stat_date').execute()
+        db_client.table('daily_stats').upsert(daily_data, on_conflict='stat_date').execute()
 
         logger.info(f"Stored snapshot {snapshot_id}. Incremental: {inc_requests} req. Daily Total: {daily_data['total_requests']}")
         return True
@@ -558,15 +557,15 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
 # --- Main Application ---
 def main():
     """Main collector startup."""
-    global supabase
+    global db_client
     logger.info("Starting CLIProxy Usage Collector")
 
-    # Initialize Supabase
+    # Initialize PostgreSQL
     try:
-        supabase = init_supabase()
-        logger.info("Supabase client initialized.")
+        db_client = init_db()
+        logger.info("PostgreSQL client initialized.")
     except Exception as e:
-        logger.critical(f"CRITICAL: Failed to initialize Supabase: {e}", exc_info=True)
+        logger.critical(f"CRITICAL: Failed to initialize PostgreSQL: {e}", exc_info=True)
         return
 
     # Register the API blueprint
@@ -580,7 +579,7 @@ def main():
 
     # Schedule credential usage stats sync (runs with usage collection)
     scheduler.add_job(
-        lambda: sync_credential_stats(CLIPROXY_URL, CLIPROXY_MANAGEMENT_KEY, supabase, app_timezone=APP_TIMEZONE),
+        lambda: sync_credential_stats(CLIPROXY_URL, CLIPROXY_MANAGEMENT_KEY, db_client, app_timezone=APP_TIMEZONE),
         'interval',
         seconds=COLLECTOR_INTERVAL,
         id='credential_stats_sync',

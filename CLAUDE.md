@@ -4,27 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-CLIProxy Dashboard is a real-time monitoring system that tracks API usage from CLIProxy (an AI API proxy). It consists of two main services:
+CLIProxy Dashboard is a real-time monitoring system that tracks API usage from CLIProxy (an AI API proxy). It consists of:
 
-- **Collector** (Python): Polls the CLIProxy Management API every 5 minutes, processes usage data, calculates costs, manages rate limits, and stores everything in Supabase
-- **Frontend** (React): Visualizes usage analytics with charts, cost breakdowns, and rate limit tracking
+- **Collector** (Python/Flask): Polls the CLIProxy Management API every 5 minutes, processes usage data, calculates costs, and stores to PostgreSQL via psycopg2
+- **Frontend** (React/Nginx): Visualizes usage analytics with charts, cost breakdowns, and credential tracking
+- **PostgreSQL**: Self-hosted database, auto-initialized from `init-db/schema.sql` on first boot
+- **PostgREST**: REST API layer for frontend reads (anonymous, SELECT-only via `web_anon` role)
 
 **Data Flow:**
 ```
-CLIProxy API → Collector (Python/Flask) → Supabase (PostgreSQL) → React Dashboard
+CLIProxy API → Collector (Python/Flask) → PostgreSQL:5432
+Browser → Nginx:8417 → /rest/v1/* → PostgREST:3000 → PostgreSQL (reads)
+                      → /api/collector/* → collector:5001 (writes + triggers)
 ```
 
 ## Common Commands
 
 ### Development
 
-**Frontend:**
+**Frontend (requires postgres + postgrest running in Docker):**
 ```bash
+docker compose up -d postgres postgrest   # Start DB services first
 cd frontend
 npm install
-npm run dev          # Start dev server on localhost:5173
-npm run build        # Build for production
-npm run preview      # Preview production build
+npm run dev          # Start Vite dev server on localhost:5173
 ```
 
 **Collector (local testing):**
@@ -33,14 +36,13 @@ cd collector
 python -m venv venv
 source venv/bin/activate  # or `venv\Scripts\activate` on Windows
 pip install -r requirements.txt
-python main.py       # Requires .env file with valid credentials
+python main.py       # Requires DATABASE_URL env var
 ```
 
 ### Docker Operations
 
-**Build and start:**
+**Start all services:**
 ```bash
-docker compose build
 docker compose up -d
 ```
 
@@ -49,25 +51,18 @@ docker compose up -d
 docker compose logs -f                    # All services
 docker compose logs -f collector          # Collector only
 docker compose logs -f frontend           # Frontend only
+docker compose logs -f postgres           # PostgreSQL only
 ```
 
 **Check health:**
 ```bash
 docker compose ps
-docker ps --filter "name=collector" --format "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}"
 ```
 
 **Restart services:**
 ```bash
 docker compose restart collector
 docker compose restart frontend
-```
-
-**Rebuild after code changes:**
-```bash
-docker compose down
-docker compose build --no-cache
-docker compose up -d
 ```
 
 **Access dashboard:**
@@ -77,115 +72,106 @@ http://localhost:8417
 
 ## Architecture
 
-### Database Schema (Supabase/PostgreSQL)
+### Database Schema (PostgreSQL self-hosted)
+
+Schema auto-applied from `init-db/schema.sql` on first postgres container boot.
 
 **Core Tables:**
-- `usage_snapshots`: Raw snapshots collected every 5 minutes with total requests, success/failure counts, tokens
-- `model_usage`: Per-model breakdown of each snapshot (linked via snapshot_id FK), includes token counts and estimated cost
-- `daily_stats`: Daily aggregated statistics (upserted daily), used for efficient date range queries
-- `model_pricing`: Pricing configuration (USD per 1M tokens), supports pattern matching for model names
+- `usage_snapshots`: Raw snapshots collected every 5 minutes
+- `model_usage`: Per-model breakdown of each snapshot (FK → usage_snapshots.id CASCADE DELETE)
+- `daily_stats`: Daily aggregated statistics (upserted daily)
+- `model_pricing`: Pricing config (USD per 1M tokens), supports wildcard pattern matching
+- `credential_usage_summary`: OAuth credential status (singleton row, id=1)
+- `credential_daily_stats`: Daily credential usage breakdown
 
-**Key Relationships:**
-- `model_usage.snapshot_id` → `usage_snapshots.id` (CASCADE DELETE)
+**PostgREST Access:**
+- `web_anon` role has SELECT-only on all tables
+- PostgREST uses `web_anon` when no Authorization header present
+- nginx and Vite proxy both strip `Authorization` and `apikey` headers → PostgREST always uses anonymous role
 
-### Collector Architecture (collector/main.py)
+### Collector Architecture (collector/main.py + collector/db.py)
 
 **Core Components:**
-1. **Flask API Server** (port 5001):
-   - Health check endpoint: `/api/collector/health`
-   - Manual trigger endpoint: `/api/collector/trigger`
-   - Runs on Waitress WSGI server for production stability
+1. **Flask API Server** (port 5001, Waitress WSGI):
+   - `/api/collector/health` — Health check
+   - `/api/collector/trigger` — Manual sync trigger
 
 2. **Background Scheduler** (APScheduler):
    - Polls CLIProxy API every `COLLECTOR_INTERVAL_SECONDS` (default: 300s)
-   - Calculates usage deltas by comparing current vs previous snapshots
-   - Stores snapshots, model usage, and updates daily_stats
+   - Calculates usage deltas, stores snapshots + daily_stats
+
+3. **PostgreSQL Client** (`collector/db.py`):
+   - `PostgreSQLClient` wraps `psycopg2.pool.ThreadedConnectionPool`
+   - Mimics supabase-js Python SDK interface (`.table().select().eq().execute()`)
+   - Handles JSONB column auto-wrapping via `psycopg2.extras.Json`
+   - INSERT uses `RETURNING *` to get auto-generated IDs
 
 **Critical Implementation Details:**
-- **Delta Calculation**: The collector stores cumulative snapshots from CLIProxy but calculates **daily deltas** by subtracting previous day's final snapshot from current snapshot. This handles CLIProxy restarts gracefully.
-- **Timezone Handling**: Uses `TIMEZONE_OFFSET_HOURS` environment variable (default: 7 for UTC+7). All date boundaries are calculated in local time then converted to UTC for database storage.
-- **Restart Detection**: When CLIProxy restarts, usage counters reset to 0. The collector detects this (new value < old value) and treats the new snapshot as the delta instead of calculating (new - old).
+- **Delta Calculation**: Cumulative snapshots from CLIProxy → daily deltas by subtracting previous snapshot
+- **Restart Detection**: If new value < old value, treat new value as delta (handles CLIProxy restarts)
+- **Timezone Handling**: `TIMEZONE_OFFSET_HOURS` env var (default: 7 for UTC+7); all date boundaries calculated in local time, stored as UTC
 
 ### Frontend Architecture (frontend/src/)
 
 **Main Components:**
-- `App.jsx`: Main application shell, handles date range selection and data fetching from Supabase
-- `Dashboard.jsx`: Main dashboard component with all visualization cards
-- `Icons.jsx`: Reusable SVG icon components
-
-**State Management:**
-- Uses React hooks (useState, useEffect, useCallback)
-- No external state library - all state is local
-- Real-time updates via Supabase subscriptions could be added but currently uses manual refresh
+- `App.jsx`: Date range selection, data fetching via supabase-js → PostgREST
+- `Dashboard.jsx`: All visualization cards
+- `lib/supabase.js`: PostgREST client — uses `window.location.origin` as URL, `'anon'` as key (JWT never sent)
 
 **Date Range Logic** (App.jsx):
-- Supports: Today, Yesterday, 7 Days, 30 Days, This Year
-- **Today/Yesterday**: Queries `daily_stats` for exact date match, shows **delta** for that day
-- **Multi-day ranges**: Aggregates across multiple `daily_stats` rows, shows **total**
-- Converts local midnight to UTC for timestamp queries to match collector's storage format
+- Today/Yesterday → query `daily_stats` exact date, show **delta**
+- Multi-day ranges → aggregate multiple `daily_stats` rows, show **total**
 
 **Key Libraries:**
-- Recharts for all visualizations (line charts, bar charts, pie charts)
-- @supabase/supabase-js for database queries
-- React 18 with Vite for fast development
+- `@supabase/supabase-js` — PostgREST queries (FK embedding via `model_usage(...)`)
+- `recharts` — Charts
+- React 18 + Vite
 
 ## Environment Configuration
 
-All services use environment variables from `.env` (see `.env.example`):
-
 **Required:**
-- `SUPABASE_URL`: Supabase project URL
-- `SUPABASE_SECRET_KEY`: Service role key (collector only, for write access)
-- `SUPABASE_PUBLISHABLE_KEY`: Anon public key (frontend only, for read access)
-- `CLIPROXY_URL`: CLIProxy Management API URL (use `host.docker.internal:PORT` from Docker)
-- `CLIPROXY_MANAGEMENT_KEY`: Secret key for CLIProxy Management API
+- `DB_PASSWORD`: PostgreSQL password
+- `CLIPROXY_URL`: CLIProxy Management API URL (`host.docker.internal:PORT` from Docker)
+- `CLIPROXY_MANAGEMENT_KEY`: CLIProxy management secret
 
 **Optional:**
 - `COLLECTOR_INTERVAL_SECONDS`: Polling interval (default: 300)
-- `TIMEZONE_OFFSET_HOURS`: Timezone offset from UTC (default: 7)
-
-**Frontend Build-time Variables:**
-- Vite injects `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` at build time via docker-compose.yml args
-- The collector URL is intentionally empty in production (frontend queries Supabase directly, not the collector)
+- `TIMEZONE_OFFSET_HOURS`: UTC offset (default: 7)
 
 ## Docker Configuration
 
 **Services:**
-- `collector`: Python Flask app on internal port 5001 (not exposed externally)
-- `frontend`: Nginx serving static React build on port 8417
+- `postgres`: PostgreSQL 16, auto-initialized from `init-db/schema.sql`, volume `postgres_data`
+- `postgrest`: PostgREST v12.2.3, reads from postgres, anonymous role `web_anon`
+- `collector`: Python Flask, writes to postgres via psycopg2, port 5001 (internal only)
+- `frontend`: Nginx on port 8417, proxies `/rest/v1/` → postgrest, `/api/collector/` → collector
 
-**Important Details:**
-- Both services use `host.docker.internal:host-gateway` to access CLIProxy running on host machine
-- Health check on collector verifies Flask server is responding before frontend starts
-- Logging configured with 10MB max size, 3 file rotation
-- Network: `cliproxy-network` bridge network for inter-service communication
+Images are published to GHCR (`ghcr.io/leolionart/cliproxy-*`) via GitHub Actions. Use `docker compose pull` to update.
 
 ## Cost Calculation
 
-Cost estimation uses pattern matching against `model_pricing` table:
-- Model name from usage data is matched against `model_pattern` (supports wildcards)
+- Model name matched against `model_pattern` in `model_pricing` (wildcard)
 - Cost = (input_tokens / 1M) × input_price + (output_tokens / 1M) × output_price
-- Default pricing defined in `MODEL_PRICING_DEFAULTS` in collector/main.py (automatically inserted on first run)
+- `MODEL_PRICING_DEFAULTS` in `collector/main.py` seeded on first run
 
-**To Update Pricing:**
-1. Edit pricing values in Supabase `model_pricing` table directly, or
-2. Update `MODEL_PRICING_DEFAULTS` in collector/main.py and restart collector
+**To update pricing:** Edit `model_pricing` table directly via psql or update `MODEL_PRICING_DEFAULTS` and restart collector.
 
 ## Troubleshooting Notes
 
 **Collector Can't Connect to CLIProxy:**
-- Verify CLIProxy has `remote-management.allow-remote: true` in config
+- Verify CLIProxy has `remote-management.allow-remote: true`
 - Check `CLIPROXY_MANAGEMENT_KEY` matches CLIProxy's `secret`
-- Ensure CLIProxy is accessible from Docker network (use `host.docker.internal`)
+- Use `host.docker.internal` (mapped to host gateway in docker-compose)
 
 **Dashboard Shows No Data:**
 - Wait 5 minutes for first collection cycle
-- Check collector logs: `docker compose logs -f collector`
-- Verify Supabase tables were created (see README.md SQL schema)
-- Check browser console for Supabase connection errors
+- Check: `docker compose logs -f collector`
+- Ensure all services are `healthy`: `docker compose ps`
+
+**PostgREST JWT Errors:**
+- Both nginx and Vite proxy strip `Authorization`/`apikey` headers
+- If seeing JWT errors, check those proxy configs are correct
 
 **Date Range Showing Wrong Data:**
-- Verify `TIMEZONE_OFFSET_HOURS` matches your actual timezone
-- Check that `daily_stats` table has entries for the date range
-- Today/Yesterday use daily deltas; longer ranges show cumulative totals
-
+- Verify `TIMEZONE_OFFSET_HOURS` matches your timezone
+- `daily_stats` must have entries for the date range

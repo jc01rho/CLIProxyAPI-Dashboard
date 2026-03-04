@@ -122,3 +122,6 @@ Thumbs.db
 
 # Playwright MCP
 .playwright-mcp/
+
+# MCP local config
+.mcp.json

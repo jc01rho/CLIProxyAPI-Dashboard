@@ -331,26 +331,38 @@ function App() {
                         const allModelNames = new Set([...prevModels.keys(), ...currModels.keys()])
 
                         for (const name of allModelNames) {
-                            const p = prevModels.get(name) || { request_count: 0, total_tokens: 0, estimated_cost_usd: 0 }
-                            const c = currModels.get(name) || { request_count: 0, total_tokens: 0, estimated_cost_usd: 0 }
+                            const p = prevModels.get(name) || { request_count: 0, total_tokens: 0, estimated_cost_usd: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0 }
+                            const c = currModels.get(name) || { request_count: 0, total_tokens: 0, estimated_cost_usd: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0 }
 
                             // Calculate delta for this model
                             // Handle restarts (curr < prev) -> assume curr is the delta (approx)
                             let dReq = c.request_count - p.request_count
                             let dTok = c.total_tokens - p.total_tokens
                             let dCost = (c.estimated_cost_usd || 0) - (p.estimated_cost_usd || 0)
+                            let dIn = (c.input_tokens || 0) - (p.input_tokens || 0)
+                            let dOut = (c.output_tokens || 0) - (p.output_tokens || 0)
+                            let dReasoning = (c.reasoning_tokens || 0) - (p.reasoning_tokens || 0)
+                            let dCached = (c.cached_tokens || 0) - (p.cached_tokens || 0)
 
                             if (dReq < 0 || dTok < 0 || dCost < 0) {
                                 dReq = c.request_count
                                 dTok = c.total_tokens
                                 dCost = c.estimated_cost_usd || 0
+                                dIn = c.input_tokens || 0
+                                dOut = c.output_tokens || 0
+                                dReasoning = c.reasoning_tokens || 0
+                                dCached = c.cached_tokens || 0
                             }
 
                             if (dReq > 0 || dTok > 0 || dCost > 0) {
-                                if (!hourlyMap[hourKey].models[name]) hourlyMap[hourKey].models[name] = { requests: 0, tokens: 0, cost: 0 }
+                                if (!hourlyMap[hourKey].models[name]) hourlyMap[hourKey].models[name] = { requests: 0, tokens: 0, cost: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0 }
                                 hourlyMap[hourKey].models[name].requests += dReq
                                 hourlyMap[hourKey].models[name].tokens += dTok
                                 hourlyMap[hourKey].models[name].cost += dCost
+                                hourlyMap[hourKey].models[name].input_tokens += Math.max(0, dIn)
+                                hourlyMap[hourKey].models[name].output_tokens += Math.max(0, dOut)
+                                hourlyMap[hourKey].models[name].reasoning_tokens += Math.max(0, dReasoning)
+                                hourlyMap[hourKey].models[name].cached_tokens += Math.max(0, dCached)
                             }
                         }
                     }

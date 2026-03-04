@@ -442,7 +442,7 @@ body {
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border: var(--glass-border);
   border-radius: var(--radius-lg);
-  overflow: hidden;
+  overflow: visible;
   animation: slideUp 0.5s ease forwards;
   position: relative;
 }
@@ -824,7 +824,7 @@ body {
 .chart-split-main {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .chart-split-legend {
@@ -1906,11 +1906,13 @@ body {
 /* ===== Improved Chart Card Hover ===== */
 .chart-card {
   transition: border-color 0.25s ease, box-shadow 0.25s ease;
+  z-index: 1;
 }
 
 .chart-card:hover {
   border-color: rgba(245, 158, 11, 0.25);
   box-shadow: 0 0 20px rgba(245, 158, 11, 0.06);
+  z-index: 10;
 }
 
 /* ===== Stat Card Icon Hover ===== */

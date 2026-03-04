@@ -105,7 +105,7 @@ const CustomTooltip = ({ active, payload, label, isDarkMode, forceCurrency }) =>
                     }}></span>
                     <span>{p.name}:</span>
                     <span style={{ fontWeight: 600, color: isDarkMode ? '#F8FAFC' : '#0F172A' }}>
-                        {typeof p.value === 'number' && (forceCurrency || p.name?.toLowerCase().includes('cost') || p.dataKey === 'estimated_cost_usd') ? `$${p.value.toFixed(4)}` : p.value?.toLocaleString()}
+                        {typeof p.value === 'number' && (forceCurrency || p.name?.toLowerCase().includes('cost') || p.dataKey === 'estimated_cost_usd') ? (p.value < 1 ? `$${p.value.toFixed(2)}` : `$${Math.round(p.value).toLocaleString('en-US')}`) : p.value?.toLocaleString()}
                     </span>
                 </div>
             ))}
@@ -123,7 +123,7 @@ const CustomTooltip = ({ active, payload, label, isDarkMode, forceCurrency }) =>
                                 {mName}
                             </span>
                             <span style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'monospace', fontSize: 10 }}>
-                                ${mData.cost?.toFixed(2) || '0.00'}
+                                ${mData.cost ? (mData.cost < 1 ? '$' + mData.cost.toFixed(2) : '$' + Math.round(mData.cost).toLocaleString('en-US')) : '$0'}
                             </span>
                         </div>
                     ))}
@@ -157,7 +157,7 @@ const ApiKeyLabel = ({ x, y, width, height, value, data, isDarkMode }) => {
                 textAnchor="start"
                 dominantBaseline="middle"
             >
-                {value.toLocaleString()} req | ${item.cost?.toFixed(2) || '0.00'}
+                {value.toLocaleString()} req | ${(item.cost || 0) < 1 ? (item.cost || 0).toFixed(2) : Math.round(item.cost || 0).toLocaleString('en-US')}
             </text>
         </g>
     )
@@ -255,12 +255,21 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
     const tpm = totalTokens > 0 ? Math.round(totalTokens / (daysCount * 24 * 60)) : 0
 
     const formatNumber = (num) => {
-        if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M'
-        if (num >= 1000) return (num / 1000).toFixed(2) + 'K'
+        if (!num && num !== 0) return '0'
+        return Math.round(num).toLocaleString('en-US')
+    }
+
+    const formatNumberShort = (num) => {
+        if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M'
+        if (num >= 1000) return (num / 1000).toFixed(1) + 'K'
         return num.toString()
     }
 
-    const formatCost = (cost) => '$' + cost.toFixed(2)
+    const formatCost = (cost) => {
+        if (!cost) return '$0'
+        if (cost < 1) return '$' + cost.toFixed(2)
+        return '$' + Math.round(cost).toLocaleString('en-US')
+    }
 
     // Hourly data - with computed cost field
     const hourlyData = hourlyStats || []
@@ -457,7 +466,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                 { key: 'apiKey', label: 'API Key' },
                 { key: 'requests', label: 'Requests', render: v => formatNumber(v) },
                 { key: 'tokens', label: 'Tokens', render: v => formatNumber(v) },
-                { key: 'cost', label: 'Cost', render: v => `$${v.toFixed(4)}` },
+                { key: 'cost', label: 'Cost', render: v => formatCost(v) },
             ],
             rows: apiKeyRows,
         })
@@ -594,7 +603,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                 tick={{ fontSize: 11 }}
                                                 axisLine={false}
                                                 tickLine={false}
-                                                tickFormatter={formatNumber}
+                                                tickFormatter={formatNumberShort}
                                             />
                                             <Tooltip
                                                 content={({ active, payload, label }) => {
@@ -619,7 +628,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                                 </div>
                                                                 <div style={{ fontSize: 11 }}>
                                                                     <span style={{ color: '#f59e0b' }}>Cost</span>
-                                                                    <div style={{ fontWeight: 700, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk' }}>${(point?._totalCost || 0).toFixed(2)}</div>
+                                                                    <div style={{ fontWeight: 700, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk' }}>{formatCost(point?._totalCost || 0)}</div>
                                                                 </div>
                                                                 <div style={{ fontSize: 11 }}>
                                                                     <span style={{ color: '#3b82f6' }}>Reqs</span>
@@ -638,6 +647,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                         </div>
                                                     )
                                                 }}
+                                                allowEscapeViewBox={{ x: false, y: true }}
                                             />
                                             {activeTopModels.map((modelName) => {
                                                 const color = getModelColor(modelName)
@@ -681,8 +691,8 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         textTransform: 'uppercase',
                                         letterSpacing: '0.5px',
                                         display: 'grid',
-                                        gridTemplateColumns: '1fr auto auto auto',
-                                        gap: '6px',
+                                        gridTemplateColumns: '1fr 46px 46px 52px',
+                                        gap: '4px',
                                         paddingRight: '4px'
                                     }}>
                                         <span>Model</span>
@@ -697,8 +707,8 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         return (
                                             <div key={modelName} onClick={() => openModelDrilldown(modelName)} style={{
                                                 display: 'grid',
-                                                gridTemplateColumns: '1fr auto auto auto',
-                                                gap: '6px',
+                                                gridTemplateColumns: '1fr 46px 46px 52px',
+                                                gap: '4px',
                                                 alignItems: 'center',
                                                 padding: '5px 8px',
                                                 background: isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
@@ -736,13 +746,13 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                     </span>
                                                 </div>
                                                 <span style={{ fontSize: '10px', fontWeight: 600, color: isDarkMode ? '#CBD5E1' : '#334155', fontFamily: 'monospace', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                                    {formatNumber(modelData?.request_count || 0)}
+                                                    {formatNumberShort(modelData?.request_count || 0)}
                                                 </span>
                                                 <span style={{ fontSize: '10px', fontWeight: 600, color: isDarkMode ? '#CBD5E1' : '#334155', fontFamily: 'monospace', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                                    {formatNumber(modelData?.total_tokens || 0)}
+                                                    {formatNumberShort(modelData?.total_tokens || 0)}
                                                 </span>
                                                 <span style={{ fontSize: '10px', fontWeight: 600, color: isDarkMode ? '#10b981' : '#059669', fontFamily: 'monospace', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                                    ${(modelData?.estimated_cost_usd || 0).toFixed(2)}
+                                                    {formatCost(modelData?.estimated_cost_usd || 0)}
                                                 </span>
                                             </div>
                                         )
@@ -783,7 +793,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                 tick={{ fontSize: 11 }}
                                                 axisLine={false}
                                                 tickLine={false}
-                                                tickFormatter={formatNumber}
+                                                tickFormatter={formatNumberShort}
                                                 width={55}
                                             />
                                             <Tooltip
@@ -833,6 +843,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                     )
                                                 }}
                                                 cursor={{ fill: isDarkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' }}
+                                                allowEscapeViewBox={{ x: false, y: true }}
                                             />
                                             {/* Bars: color = token type (distinct), stacked by model (opacity gradient) */}
                                             {TOKEN_TYPES.map(({ suffix, color }) =>
@@ -867,13 +878,25 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         const color = getModelColor(model)
                                         const md = filteredModelUsage.find(m => m.model_name === model) || {}
                                         return (
-                                            <div key={model} style={{
+                                            <div key={model}
+                                                onClick={() => openModelDrilldown(model)}
+                                                onMouseEnter={(e) => {
+                                                    e.currentTarget.style.background = isDarkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'
+                                                    e.currentTarget.style.borderColor = color
+                                                }}
+                                                onMouseLeave={(e) => {
+                                                    e.currentTarget.style.background = isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)'
+                                                    e.currentTarget.style.borderColor = isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'
+                                                }}
+                                                style={{
                                                 display: 'grid', gridTemplateColumns: '1fr 46px 46px 46px 46px',
                                                 gap: '4px', alignItems: 'center',
                                                 padding: '6px 8px',
                                                 background: isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
                                                 borderRadius: '6px',
                                                 border: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'}`,
+                                                cursor: 'pointer',
+                                                transition: 'all 0.2s ease'
                                             }}>
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                                                     <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, boxShadow: `0 0 6px ${color}`, flexShrink: 0 }} />
@@ -883,7 +906,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                 </div>
                                                 {TOKEN_TYPES.map(t => (
                                                     <span key={t.suffix} style={{ fontSize: '11px', fontFamily: 'monospace', textAlign: 'right', color: t.color, fontWeight: 600, whiteSpace: 'nowrap', display: 'block' }}>
-                                                        {formatNumber(md[t.dataKey] || 0)}
+                                                        {formatNumberShort(md[t.dataKey] || 0)}
                                                     </span>
                                                 ))}
                                             </div>
@@ -1021,7 +1044,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                         color: isDarkMode ? '#10b981' : '#059669',
                                                         fontFamily: 'monospace'
                                                     }}>
-                                                        ${(model.estimated_cost_usd || 0).toFixed(2)}
+                                                        {formatCost(model.estimated_cost_usd || 0)}
                                                     </span>
                                                     <span style={{
                                                         fontSize: '10px',

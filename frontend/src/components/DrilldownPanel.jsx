@@ -1,9 +1,8 @@
 import { getModelColor } from '../lib/brandColors'
 
 const formatNumber = (num) => {
-    if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M'
-    if (num >= 1000) return (num / 1000).toFixed(1) + 'K'
-    return num.toString()
+    if (!num && num !== 0) return '0'
+    return Math.round(num).toLocaleString('en-US')
 }
 
 /**
@@ -74,7 +73,7 @@ export default function DrilldownPanel({ data, columns, rows }) {
                             </td>
                             <td>{formatNumber(m.requests)}</td>
                             <td>{formatNumber(m.tokens)}</td>
-                            <td>${m.cost.toFixed(4)}</td>
+                            <td>${m.cost < 1 ? m.cost.toFixed(2) : Math.round(m.cost).toLocaleString('en-US')}</td>
                         </tr>
                     ))}
                 </tbody>

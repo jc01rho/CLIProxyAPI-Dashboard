@@ -353,7 +353,6 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  transition: all 0.3s ease;
   position: relative;
   overflow: hidden;
 }
@@ -368,11 +367,7 @@ body {
   background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
 }
 
-.stat-card:hover {
-  border-color: var(--color-primary);
-  box-shadow: 0 0 24px var(--color-glow);
-  transform: translateY(-2px);
-}
+
 
 .stat-header {
   display: flex;
@@ -1907,11 +1902,6 @@ body {
 
 /* ===== Stat Card Icon Hover ===== */
 .stat-card .stat-icon {
-  transition: transform 0.2s ease;
-}
-
-.stat-card:hover .stat-icon {
-  transform: scale(1.15);
 }
 
 /* ===== Crosshair on chart areas ===== */

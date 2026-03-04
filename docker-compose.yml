@@ -12,11 +12,11 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./init-db:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cliproxy -d cliproxy"]
+      test: ["CMD-SHELL", "pg_isready -h localhost -U cliproxy -d cliproxy"]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 10s
+      retries: 10
+      start_period: 30s
     restart: unless-stopped
 
   # ── REST API layer (read-only, anonymous) ───────────────────

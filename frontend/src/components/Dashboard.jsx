@@ -1,13 +1,31 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useRef, cloneElement } from 'react'
 import {
     AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
-    XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
+    XAxis, YAxis, CartesianGrid, Tooltip, Legend
 } from 'recharts'
 import { BarGraph, PieGraph, DollarSign, Moon, Sun, Refresh } from './Icons'
 import CredentialStatsCard from './CredentialStatsCard'
 import ChartDialog from './ChartDialog'
 import DrilldownPanel from './DrilldownPanel'
 import { getModelColor } from '../lib/brandColors'
+
+// Measures container width via ResizeObserver — works on all browsers/OS
+const AutoWidthChart = ({ height, children, style }) => {
+    const ref = useRef(null)
+    const [width, setWidth] = useState(0)
+    useEffect(() => {
+        if (!ref.current) return
+        setWidth(ref.current.getBoundingClientRect().width)
+        const ro = new ResizeObserver(([e]) => setWidth(Math.floor(e.contentRect.width)))
+        ro.observe(ref.current)
+        return () => ro.disconnect()
+    }, [])
+    return (
+        <div ref={ref} style={{ width: '100%', height, ...style }}>
+            {width > 0 && cloneElement(children, { width, height })}
+        </div>
+    )
+}
 
 // Date Range Options - using identifiers for precise boundary logic
 const DATE_RANGES = [
@@ -37,8 +55,7 @@ const StatCard = ({ label, value, meta, icon, sparklineData, dataKey, stroke }) 
             <div className="stat-value">{value}</div>
             <div className="stat-meta" dangerouslySetInnerHTML={{ __html: meta }}></div>
             <div className="stat-sparkline">
-                <div style={{ width: '100%', height: 35 }}>
-                <ResponsiveContainer width="100%" height="100%" debounce={50}>
+                <AutoWidthChart height={35}>
                     <AreaChart data={sparklineData}>
                         <defs>
                             <linearGradient id={`gradient-${dataKey}-${stroke.replace('#', '')}`} x1="0" y1="0" x2="0" y2="1">
@@ -56,8 +73,7 @@ const StatCard = ({ label, value, meta, icon, sparklineData, dataKey, stroke }) 
                             animationDuration={1500}
                         />
                     </AreaChart>
-                </ResponsiveContainer>
-                </div>
+                </AutoWidthChart>
             </div>
         </div>
     )
@@ -583,8 +599,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                         {usageTrendView === 'models' ? (
                             <div className="chart-split">
                                 <div className="chart-split-main">
-                                <div style={{ width: '100%', height: 320 }}>
-                                <ResponsiveContainer width="100%" height="100%" debounce={50}>
+                                <AutoWidthChart height={320}>
                                     {modelTrendData.length > 0 ? (
                                         <AreaChart data={modelTrendData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                                             <defs>
@@ -676,8 +691,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                             <text x="50%" y="50%" textAnchor="middle" fill={isDarkMode ? '#64748B' : '#94A3B8'} fontSize={13}>No model data</text>
                                         </AreaChart>
                                     )}
-                                </ResponsiveContainer>
-                                </div>
+                                </AutoWidthChart>
                                 </div>
                                 <div className="chart-legend-panel chart-split-legend" style={{
                                     display: 'flex',
@@ -778,7 +792,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         ))}
                                     </div>
                                     <div style={{ width: '100%', height: 300 }}>
-                                    <ResponsiveContainer width="100%" height="100%" debounce={50}>
+                                    <AutoWidthChart height={300}>
                                         <BarChart
                                             data={tokenTrendData}
                                             margin={{ top: 4, right: 10, left: 10, bottom: 5 }}
@@ -862,7 +876,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                 ))
                                             )}
                                         </BarChart>
-                                    </ResponsiveContainer>
+                                    </AutoWidthChart>
                                     </div>
                                 </div>
                                 {/* Legend panel (right side) — same style as model legend */}
@@ -940,8 +954,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                             {costBreakdown.length > 0 ? (
                                 <div className="chart-split">
                                     <div className="chart-split-main">
-                                    <div style={{ width: '100%', height: 300 }}>
-                                    <ResponsiveContainer width="100%" height="100%" debounce={50}>
+                                    <AutoWidthChart height={300}>
                                         <PieChart onClick={() => {
                                             if (costBreakdown.length > 0) {
                                                 const models = {}
@@ -975,8 +988,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                             </Pie>
                                             <Tooltip content={<CustomTooltip isDarkMode={isDarkMode} forceCurrency={true} />} />
                                         </PieChart>
-                                    </ResponsiveContainer>
-                                    </div>
+                                    </AutoWidthChart>
                                     </div>
                                     <div className="chart-legend-panel chart-split-legend" style={{
                                         display: 'flex',
@@ -1145,8 +1157,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                     </div>
                     <div className="chart-body chart-body-dark">
                         {endpointUsage.length > 0 ? (
-                            <div style={{ width: '100%', height: Math.max(200, endpointUsage.length * 45) }}>
-                            <ResponsiveContainer width="100%" height="100%" debounce={50}>
+                            <AutoWidthChart height={Math.max(200, endpointUsage.length * 45)}>
                                 <BarChart data={endpointUsage} layout="vertical" margin={{ left: 10, right: 150 }} onClick={(data) => {
                                     if (data?.activePayload?.[0]?.payload?.models) {
                                         const point = data.activePayload[0].payload
@@ -1185,8 +1196,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         label={(props) => <ApiKeyLabel {...props} data={endpointUsage[props.index]} isDarkMode={isDarkMode} />}
                                     />
                                 </BarChart>
-                            </ResponsiveContainer>
-                            </div>
+                            </AutoWidthChart>
                         ) : (
                             <div className="empty-state">No endpoint data</div>
                         )}

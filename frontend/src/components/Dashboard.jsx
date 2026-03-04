@@ -1,83 +1,30 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useRef, cloneElement } from 'react'
 import {
-    AreaChart, Area, BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
-    XAxis, YAxis, Tooltip, ResponsiveContainer
+    AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
+    XAxis, YAxis, CartesianGrid, Tooltip, Legend
 } from 'recharts'
-import { BarGraph, PieGraph, DollarSign, Zap, Clock, Moon, Sun, Refresh } from './Icons'
-import RateLimitCard from './RateLimitCard'
-import UsageHeatmap from './UsageHeatmap'
-import FailureRateCard from './FailureRateCard'
+import { BarGraph, PieGraph, DollarSign, Moon, Sun, Refresh } from './Icons'
+import CredentialStatsCard from './CredentialStatsCard'
+import ChartDialog from './ChartDialog'
+import DrilldownPanel from './DrilldownPanel'
+import { getModelColor } from '../lib/brandColors'
 
-
-const COLORS = ['#8b5cf6', '#3b82f6', '#06b6d4', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#6366f1']
-
-// Brand colors for AI providers (optimized for contrast and recognition)
-const BRAND_COLORS = {
-    // OpenAI - Green (official brand color)
-    'openai': '#10a37f',
-    'gpt': '#10a37f',
-    'o1': '#10a37f',
-    'o3': '#10a37f',
-    'chatgpt': '#10a37f',
-
-    // Anthropic - Orange/Copper (official brand color)
-    'anthropic': '#d97757',
-    'claude': '#d97757',
-
-    // Google - Multi-color but primarily Blue for Gemini
-    'google': '#4285f4',
-    'gemini': '#4285f4',
-    'palm': '#34a853',
-    'bard': '#fbbc04',
-
-    // DeepSeek - Purple
-    'deepseek': '#8b5cf6',
-
-    // Alibaba/Qwen - Orange
-    'qwen': '#ff6a00',
-    'alibaba': '#ff6a00',
-
-    // Meta - Blue
-    'meta': '#0668e1',
-    'llama': '#0668e1',
-
-    // Mistral - Dark Purple/Indigo
-    'mistral': '#6366f1',
-
-    // xAI/Grok - Dark slate
-    'grok': '#64748b',
-    'xai': '#64748b',
-
-    // Cohere - Teal
-    'cohere': '#14b8a6',
-
-    // AI21 - Purple
-    'ai21': '#a855f7',
-    'jurassic': '#a855f7',
-
-    // Fallback
-    'unknown': '#94a3b8'
-}
-
-// Intelligent color mapping based on model provider branding
-const getModelColor = (modelName) => {
-    if (!modelName) return BRAND_COLORS.unknown
-
-    const modelLower = modelName.toLowerCase()
-
-    // Check each brand keyword
-    for (const [keyword, color] of Object.entries(BRAND_COLORS)) {
-        if (modelLower.includes(keyword)) {
-            return color
-        }
-    }
-
-    // Fallback to hash-based color for unknown models (for consistency)
-    let hash = 0
-    for (let i = 0; i < modelName.length; i++) {
-        hash = modelName.charCodeAt(i) + ((hash << 5) - hash)
-    }
-    return COLORS[Math.abs(hash) % COLORS.length]
+// Measures container width via ResizeObserver — works on all browsers/OS
+const AutoWidthChart = ({ height, children, style }) => {
+    const ref = useRef(null)
+    const [width, setWidth] = useState(0)
+    useEffect(() => {
+        if (!ref.current) return
+        setWidth(ref.current.getBoundingClientRect().width)
+        const ro = new ResizeObserver(([e]) => setWidth(Math.floor(e.contentRect.width)))
+        ro.observe(ref.current)
+        return () => ro.disconnect()
+    }, [])
+    return (
+        <div ref={ref} style={{ width: '100%', height, ...style }}>
+            {width > 0 && cloneElement(children, { width, height })}
+        </div>
+    )
 }
 
 // Date Range Options - using identifiers for precise boundary logic
@@ -108,7 +55,7 @@ const StatCard = ({ label, value, meta, icon, sparklineData, dataKey, stroke }) 
             <div className="stat-value">{value}</div>
             <div className="stat-meta" dangerouslySetInnerHTML={{ __html: meta }}></div>
             <div className="stat-sparkline">
-                <ResponsiveContainer width="100%" height={35}>
+                <AutoWidthChart height={35}>
                     <AreaChart data={sparklineData}>
                         <defs>
                             <linearGradient id={`gradient-${dataKey}-${stroke.replace('#', '')}`} x1="0" y1="0" x2="0" y2="1">
@@ -126,7 +73,7 @@ const StatCard = ({ label, value, meta, icon, sparklineData, dataKey, stroke }) 
                             animationDuration={1500}
                         />
                     </AreaChart>
-                </ResponsiveContainer>
+                </AutoWidthChart>
             </div>
         </div>
     )
@@ -176,7 +123,7 @@ const CustomTooltip = ({ active, payload, label, isDarkMode, forceCurrency }) =>
                     }}></span>
                     <span>{p.name}:</span>
                     <span style={{ fontWeight: 600, color: isDarkMode ? '#F8FAFC' : '#0F172A' }}>
-                        {typeof p.value === 'number' && (forceCurrency || p.name?.toLowerCase().includes('cost') || p.dataKey === 'estimated_cost_usd') ? `$${p.value.toFixed(4)}` : p.value?.toLocaleString()}
+                        {typeof p.value === 'number' && (forceCurrency || p.name?.toLowerCase().includes('cost') || p.dataKey === 'estimated_cost_usd') ? (p.value < 1 ? `$${p.value.toFixed(2)}` : `$${Math.round(p.value).toLocaleString('en-US')}`) : p.value?.toLocaleString()}
                     </span>
                 </div>
             ))}
@@ -193,16 +140,9 @@ const CustomTooltip = ({ active, payload, label, isDarkMode, forceCurrency }) =>
                             <span style={{ color: isDarkMode ? '#CBD5E1' : '#334155', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 140 }}>
                                 {mName}
                             </span>
-                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                                {(mData.input_tokens || mData.output_tokens) > 0 && (
-                                    <span style={{ color: isDarkMode ? '#94A3B8' : '#64748B', fontFamily: 'monospace', fontSize: 9 }}>
-                                        {(mData.input_tokens || 0).toLocaleString()}/{(mData.output_tokens || 0).toLocaleString()}
-                                    </span>
-                                )}
-                                <span style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'monospace', fontSize: 10, minWidth: 45, textAlign: 'right' }}>
-                                    ${mData.cost?.toFixed(2) || '0.00'}
-                                </span>
-                            </div>
+                            <span style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'monospace', fontSize: 10 }}>
+                                ${mData.cost ? (mData.cost < 1 ? '$' + mData.cost.toFixed(2) : '$' + Math.round(mData.cost).toLocaleString('en-US')) : '$0'}
+                            </span>
                         </div>
                     ))}
                     {Object.keys(data.models).length > 5 && (
@@ -212,40 +152,17 @@ const CustomTooltip = ({ active, payload, label, isDarkMode, forceCurrency }) =>
                     )}
                 </div>
             )}
-
-            {/* Token Summary for API Keys */}
-            {(data.input_tokens || data.output_tokens || data.total_tokens) && (
-                <div style={{ marginTop: 8, borderTop: `1px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.2)' : 'rgba(71, 85, 105, 0.1)'}`, paddingTop: 8 }}>
-                    <div style={{ fontSize: 10, color: isDarkMode ? '#94A3B8' : '#64748B', marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>Tokens</div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 2 }}>
-                        <span style={{ color: isDarkMode ? '#CBD5E1' : '#334155' }}>Input</span>
-                        <span style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'monospace' }}>{(data.input_tokens || 0).toLocaleString()}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 2 }}>
-                        <span style={{ color: isDarkMode ? '#CBD5E1' : '#334155' }}>Output</span>
-                        <span style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'monospace' }}>{(data.output_tokens || 0).toLocaleString()}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}>
-                        <span style={{ color: isDarkMode ? '#CBD5E1' : '#334155', fontWeight: 500 }}>Total</span>
-                        <span style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'monospace', fontWeight: 600 }}>{((data.input_tokens || 0) + (data.output_tokens || 0)).toLocaleString()}</span>
-                    </div>
-                </div>
-            )}
         </div>
     )
 }
 
-// Custom Label for API Keys chart to show requests, tokens and cost
+// Custom Label for API Keys chart to show requests and cost
 const ApiKeyLabel = ({ x, y, width, height, value, data, isDarkMode }) => {
     const item = data
     if (!item) return null
 
     const labelX = x + width + 10
     const labelY = y + height / 2
-
-    // Calculate total tokens (prefer total_tokens, fallback to input+output)
-    const totalTokens = item.total_tokens || (item.input_tokens || 0) + (item.output_tokens || 0)
-    const tokensText = totalTokens > 0 ? `${totalTokens.toLocaleString()} tok | ` : ''
 
     return (
         <g>
@@ -258,23 +175,42 @@ const ApiKeyLabel = ({ x, y, width, height, value, data, isDarkMode }) => {
                 textAnchor="start"
                 dominantBaseline="middle"
             >
-                {value.toLocaleString()} req | {tokensText}${item.cost?.toFixed(2) || '0.00'}
+                {value.toLocaleString()} req | ${(item.cost || 0) < 1 ? (item.cost || 0).toFixed(2) : Math.round(item.cost || 0).toLocaleString('en-US')}
             </text>
         </g>
     )
 }
 
-function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefreshing, lastUpdated, dateRange, onDateRangeChange, endpointUsage: rawEndpointUsage, onSignOut }) {
+// Token type color constants (distinct colors, not opacity-based)
+const TOKEN_TYPES = [
+    { label: 'Input',     short: 'In',  suffix: 'in',  color: '#6366f1', dataKey: 'input_tokens' },
+    { label: 'Output',    short: 'Out', suffix: 'out', color: '#8b5cf6', dataKey: 'output_tokens' },
+    { label: 'Cached',    short: 'Ca',  suffix: 'ca',  color: '#f59e0b', dataKey: 'cached_tokens' },
+    { label: 'Reasoning', short: 'Re',  suffix: 're',  color: '#10b981', dataKey: 'reasoning_tokens' },
+]
+
+// Trend configuration for the unified Usage Trends chart
+const TREND_CONFIG = {
+    requests: { stroke: '#3b82f6', name: 'Requests' },
+    tokens: { stroke: '#10b981', name: 'Tokens' },
+    cost: { stroke: '#f59e0b', name: 'Cost' },
+}
+
+function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefreshing, lastUpdated, dateRange, onDateRangeChange, endpointUsage: rawEndpointUsage, credentialData, credentialLoading, credentialSetupRequired }) {
     // Auto-select time range based on dateRange: hour for today/yesterday, day for longer ranges
     const defaultTimeRange = (dateRange === 'today' || dateRange === 'yesterday') ? 'hour' : 'day'
 
-    const [selectedApiKey, setSelectedApiKey] = useState('all')
-    const [requestTimeRange, setRequestTimeRange] = useState(defaultTimeRange)
-    const [tokenTimeRange, setTokenTimeRange] = useState(defaultTimeRange)
+    // Unified usage trend controls
+    const [usageTrendView, setUsageTrendView] = useState('models')
+    const [usageTrendTime, setUsageTrendTime] = useState(defaultTimeRange)
+
+    // Cost analysis view toggle
+    const [costView, setCostView] = useState('chart')
+
     const [chartAnimated, setChartAnimated] = useState(false)
     const [tableSort, setTableSort] = useState({ column: 'estimated_cost_usd', direction: 'desc' })
-    const [endpointSort, setEndpointSort] = useState('requests') // 'requests' or 'cost'
-    const [modelSort, setModelSort] = useState('requests') // 'requests' or 'cost'
+    const [endpointSort, setEndpointSort] = useState('requests')
+    const [drilldownData, setDrilldownData] = useState(null)
     const [isDarkMode, setIsDarkMode] = useState(() => {
         if (typeof window !== 'undefined') {
             const saved = localStorage.getItem('theme')
@@ -284,31 +220,30 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
         return true
     })
 
+    // Auto-switch time range when dateRange changes
     useEffect(() => {
         const newTimeRange = (dateRange === 'today' || dateRange === 'yesterday') ? 'hour' : 'day'
-        const effectiveTimeRange = selectedApiKey !== 'all' ? 'day' : newTimeRange
-        
-        setRequestTimeRange(effectiveTimeRange)
-        setTokenTimeRange(effectiveTimeRange)
-    }, [dateRange, selectedApiKey])
-
-    useEffect(() => {
-        if (selectedApiKey !== 'all') {
-            setRequestTimeRange('day')
-            setTokenTimeRange('day')
-        }
-    }, [selectedApiKey])
+        setUsageTrendTime(newTimeRange)
+    }, [dateRange])
 
     useEffect(() => {
         const timer = setTimeout(() => setChartAnimated(true), 300)
         return () => clearTimeout(timer)
     }, [])
 
+    // Auto-reset to 'hour' granularity when switching to single-day ranges
+    useEffect(() => {
+        if (dateRange === 'today' || dateRange === 'yesterday') {
+            setUsageTrendTime('hour')
+        }
+    }, [dateRange])
+
+    // Re-trigger chart animation when switching views
     useEffect(() => {
         setChartAnimated(false)
         const timer = setTimeout(() => setChartAnimated(true), 50)
         return () => clearTimeout(timer)
-    }, [requestTimeRange, tokenTimeRange])
+    }, [usageTrendTime, usageTrendView, costView])
 
     const toggleTheme = () => {
         setIsDarkMode(prev => {
@@ -318,74 +253,19 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
         })
     }
 
-    const uniqueApiKeys = useMemo(() => {
-        if (!rawEndpointUsage) return []
-        return rawEndpointUsage
-            .map(u => u.api_endpoint)
-            .filter((v, i, a) => v && a.indexOf(v) === i)
-            .sort()
-    }, [rawEndpointUsage])
+    // Use data directly from props (already filtered by API)
+    const filteredDailyStats = dailyStats || []
+    const filteredModelUsage = modelUsage || []
 
-    const filteredDailyStats = useMemo(() => {
-        const baseStats = dailyStats || []
-        if (selectedApiKey === 'all') return baseStats
-
-        return baseStats.map(d => {
-            const epData = d.breakdown?.endpoints?.[selectedApiKey] || {}
-            
-            return {
-                ...d,
-                total_requests: epData.requests || 0,
-                estimated_cost_usd: epData.cost || 0,
-                total_tokens: epData.tokens || epData.total_tokens || 0,
-                input_tokens: epData.input_tokens || 0,
-                output_tokens: epData.output_tokens || 0,
-                success_count: 0,
-                failure_count: 0,
-                models: epData.models || {}
-            }
-        })
-    }, [dailyStats, selectedApiKey])
-
-    const filteredModelUsage = useMemo(() => {
-        const baseUsage = modelUsage || []
-        if (selectedApiKey === 'all') return baseUsage
-
-        const aggregated = {}
-        
-        filteredDailyStats.forEach(day => {
-            if (day.models) {
-                Object.entries(day.models).forEach(([mName, mData]) => {
-                    if (!aggregated[mName]) {
-                        aggregated[mName] = { 
-                            model_name: mName, 
-                            request_count: 0, 
-                            total_tokens: 0, 
-                            estimated_cost_usd: 0,
-                            input_tokens: 0,
-                            output_tokens: 0
-                        }
-                    }
-                    aggregated[mName].request_count += mData.requests || 0
-                    aggregated[mName].total_tokens += mData.tokens || 0
-                    aggregated[mName].estimated_cost_usd += mData.cost || 0
-                    aggregated[mName].input_tokens += mData.input_tokens || 0
-                    aggregated[mName].output_tokens += mData.output_tokens || 0
-                })
-            }
-        })
-
-        return Object.values(aggregated).sort((a, b) => b.request_count - a.request_count)
-    }, [modelUsage, filteredDailyStats, selectedApiKey])
-
+    // Calculate totals from filtered daily stats (properly filtered by date range)
     const totalRequests = filteredDailyStats.reduce((sum, d) => sum + (d.total_requests || 0), 0)
     const totalTokens = filteredDailyStats.reduce((sum, d) => sum + (d.total_tokens || 0), 0)
     const successCount = filteredDailyStats.reduce((sum, d) => sum + (d.success_count || 0), 0)
     const failureCount = filteredDailyStats.reduce((sum, d) => sum + (d.failure_count || 0), 0)
 
+    // Use sum of model usage for total cost to ensure consistency with breakdown table
     const totalCostFromBreakdown = filteredModelUsage.reduce((sum, m) => sum + (m.estimated_cost_usd || 0), 0)
     const totalCostFromDaily = filteredDailyStats.reduce((sum, d) => sum + (parseFloat(d.estimated_cost_usd) || 0), 0)
-
     const totalCost = (filteredModelUsage.length > 0) ? totalCostFromBreakdown : totalCostFromDaily
 
     const daysCount = Math.max(1, filteredDailyStats.length || 1)
@@ -393,25 +273,32 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
     const tpm = totalTokens > 0 ? Math.round(totalTokens / (daysCount * 24 * 60)) : 0
 
     const formatNumber = (num) => {
-        if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M'
-        if (num >= 1000) return (num / 1000).toFixed(2) + 'K'
+        if (!num && num !== 0) return '0'
+        return Math.round(num).toLocaleString('en-US')
+    }
+
+    const formatNumberShort = (num) => {
+        if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M'
+        if (num >= 1000) return (num / 1000).toFixed(1) + 'K'
         return num.toString()
     }
 
-    const formatCost = (cost) => '$' + cost.toFixed(2)
-
-    const formatEndpointName = (name) => {
-        if (!name) return 'Unknown'
-        const cleanName = name.replace(/^https?:\/\//, '')
-        const parts = cleanName.split('/')
-        return parts.length > 1 && parts[parts.length - 1] 
-            ? parts[parts.length - 1] 
-            : parts[0]
+    const formatCost = (cost) => {
+        if (!cost) return '$0'
+        if (cost < 1) return '$' + cost.toFixed(2)
+        return '$' + Math.round(cost).toLocaleString('en-US')
     }
 
-    const hourlyData = selectedApiKey === 'all' ? (hourlyStats || []) : []
+    // Hourly data - with computed cost field
+    const hourlyData = hourlyStats || []
+    const hourlyChartData = useMemo(() => {
+        return hourlyData.map(h => ({
+            ...h,
+            cost: Object.values(h.models || {}).reduce((sum, m) => sum + (m.cost || 0), 0)
+        }))
+    }, [hourlyData])
 
-
+    // Daily data
     const dailyChartData = useMemo(() => {
         return (filteredDailyStats || []).map(d => ({
             time: new Date(d.stat_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
@@ -437,63 +324,76 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
             .map(m => m.model_name)
     }, [filteredModelUsage])
 
-    // Get active top models based on sort dimension
+    // Top models sorted by requests (chart always shows requests)
     const activeTopModels = useMemo(() => {
-        if (modelSort === 'cost') {
-            return [...filteredModelUsage]
-                .sort((a, b) => (b.estimated_cost_usd || 0) - (a.estimated_cost_usd || 0))
-                .slice(0, 5)
-                .map(m => m.model_name)
-        }
-        if (modelSort === 'tokens') return topTokenModels
-        return topRequestModels
-    }, [filteredModelUsage, modelSort, topRequestModels, topTokenModels])
+        return [...filteredModelUsage]
+            .sort((a, b) => (b.request_count || 0) - (a.request_count || 0))
+            .slice(0, 5)
+            .map(m => m.model_name)
+    }, [filteredModelUsage])
 
-    // Prepare data for Stacked Area Chart (Model Trends)
+    // Prepare data for Stacked Area Chart (By Model view)
     const modelTrendData = useMemo(() => {
-        const sourceData = (requestTimeRange === 'hour' ? hourlyData : dailyChartData)
+        const sourceData = usageTrendTime === 'hour' ? hourlyChartData : dailyChartData
 
         return sourceData.map(point => {
-            const newPoint = { time: point.time }
-            // Flatten models
+            const newPoint = {
+                time: point.time,
+                _totalTokens: point.tokens || 0,
+                _totalCost: point.cost || 0,
+                _totalRequests: point.requests || 0,
+            }
             activeTopModels.forEach(modelName => {
                 const modelData = point.models?.[modelName]
                 let val = 0
 
                 if (modelData) {
-                    if (modelSort === 'cost') val = modelData.cost || modelData.estimated_cost_usd || 0
-                    else if (modelSort === 'tokens') val = modelData.tokens || modelData.total_tokens || 0
-                    else val = modelData.requests || modelData.request_count || 0
-                }
+                        val = modelData.requests || modelData.request_count || 0
+                    }
 
                 newPoint[modelName] = val
             })
             return newPoint
         })
-    }, [hourlyData, dailyChartData, requestTimeRange, activeTopModels, modelSort])
+    }, [hourlyChartData, dailyChartData, usageTrendTime, activeTopModels])
 
-    // Model distribution - uses filtered model usage data
-    const stackedModelData = useMemo(() => {
-        if (!filteredModelUsage.length) return []
+    // Token Type Time-Series: clustered stacked by time, 4 groups per point, stacks = models
+    // Hourly for today/yesterday, daily for multi-day ranges
+    const { tokenTrendData, tokenTrendModels } = useMemo(() => {
+        const isHourly = ['today', 'yesterday'].includes(dateRange)
+        const sourceData = isHourly ? hourlyStats : dailyStats
 
-        const modelCounts = {}
-        for (const model of filteredModelUsage) {
-            const name = model.model_name
-            if (!modelCounts[name]) {
-                modelCounts[name] = { requests: 0, tokens: 0, cost: 0 }
+        // Find top models that have any token data in this range
+        const modelTotals = {}
+        for (const point of (sourceData || [])) {
+            for (const [name, d] of Object.entries(point.models || {})) {
+                const total = (d.input_tokens || 0) + (d.output_tokens || 0) +
+                              (d.reasoning_tokens || 0) + (d.cached_tokens || 0)
+                if (total > 0) modelTotals[name] = (modelTotals[name] || 0) + total
             }
-            modelCounts[name].requests += model.request_count || 0
-            modelCounts[name].tokens += model.total_tokens || 0
-            modelCounts[name].cost += model.estimated_cost_usd || 0
         }
+        const topModels = Object.entries(modelTotals)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 6)
+            .map(([name]) => name)
 
-        const data = Object.entries(modelCounts)
-            .map(([name, values]) => ({ model: name, ...values }))
-        if (modelSort === 'cost') {
-            return data.sort((a, b) => (b.cost || 0) - (a.cost || 0))
-        }
-        return data.sort((a, b) => b.requests - a.requests)
-    }, [filteredModelUsage, modelSort])
+        const data = (sourceData || []).map(point => {
+            const timeLabel = isHourly
+                ? point.time
+                : (point.stat_date || '').slice(5) // YYYY-MM-DD → MM-DD
+            const row = { time: timeLabel }
+            for (const model of topModels) {
+                const d = point.models?.[model] || {}
+                row[`${model}||in`]  = d.input_tokens || 0
+                row[`${model}||ca`]  = d.cached_tokens || 0
+                row[`${model}||out`] = d.output_tokens || 0
+                row[`${model}||re`]  = d.reasoning_tokens || 0
+            }
+            return row
+        })
+
+        return { tokenTrendData: data, tokenTrendModels: topModels }
+    }, [hourlyStats, dailyStats, dateRange])
 
     // API Endpoint usage - uses granular endpointUsage passed from App.jsx
     const endpointUsage = useMemo(() => {
@@ -511,7 +411,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                     requests: m.request_count || 0,
                     tokens: m.total_tokens || 0,
                     cost: m.estimated_cost_usd || 0,
-                    ...m // Include other props like model_name
+                    ...m
                 }
             })
 
@@ -521,7 +421,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
         return normalized.sort((a, b) => (b.requests || 0) - (a.requests || 0))
     }, [rawEndpointUsage, endpointSort])
 
-    const sparklineData = hourlyData.slice(-12)
+    const sparklineData = hourlyChartData.slice(-12)
     const costSparkline = dailyChartData.length >= 2 ? dailyChartData : [...Array(7)].map((_, i) => ({ cost: i === 6 ? totalCost : totalCost * (i * 0.1) }))
 
     // Cost breakdown with sorting
@@ -529,15 +429,13 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
         const data = (filteredModelUsage || []).map((m) => ({
             ...m,
             percentage: totalCost > 0 ? ((m.estimated_cost_usd || 0) / totalCost * 100).toFixed(0) : '0',
-            color: getModelColor(m.model_name)  // Use consistent color based on model name
+            color: getModelColor(m.model_name)
         }))
 
-        // Sort based on tableSort
         return data.sort((a, b) => {
             let aVal = a[tableSort.column]
             let bVal = b[tableSort.column]
 
-            // Handle string vs number
             if (typeof aVal === 'string') {
                 aVal = aVal.toLowerCase()
                 bVal = bVal.toLowerCase()
@@ -562,6 +460,38 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
         if (tableSort.column !== column) return <span className="sort-icon">↕</span>
         return <span className="sort-icon active">{tableSort.direction === 'asc' ? '↑' : '↓'}</span>
     }
+
+    // Drilldown: show per-API-key breakdown for a given model
+    const openModelDrilldown = (modelName) => {
+        const apiKeyRows = endpointUsage
+            .filter(ep => ep.models?.[modelName])
+            .map(ep => {
+                const md = ep.models[modelName]
+                return {
+                    _key: ep.endpoint,
+                    apiKey: ep.endpoint,
+                    requests: md.requests || md.request_count || 0,
+                    tokens: md.tokens || md.total_tokens || 0,
+                    cost: md.cost || md.estimated_cost_usd || 0,
+                }
+            })
+            .sort((a, b) => b.requests - a.requests)
+        setDrilldownData({
+            label: modelName,
+            title: `${modelName} — Per API Key`,
+            chartType: 'modelApiKeys',
+            columns: [
+                { key: 'apiKey', label: 'API Key' },
+                { key: 'requests', label: 'Requests', render: v => formatNumber(v) },
+                { key: 'tokens', label: 'Tokens', render: v => formatNumber(v) },
+                { key: 'cost', label: 'Cost', render: v => formatCost(v) },
+            ],
+            rows: apiKeyRows,
+        })
+    }
+
+    // Current trend visual config
+    const currentTrend = TREND_CONFIG['requests']
 
     // Loading state
     if (loading) {
@@ -595,23 +525,6 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                             lastUpdated ? `Updated: ${lastUpdated.toLocaleTimeString()}` : ''
                         )}
                     </span>
-                    
-                    <div className="api-key-selector">
-                        <select 
-                            value={selectedApiKey} 
-                            onChange={(e) => setSelectedApiKey(e.target.value)}
-                            className="api-key-select"
-                            disabled={uniqueApiKeys.length === 0}
-                        >
-                            <option value="all">All Keys ({uniqueApiKeys.length})</option>
-                            {uniqueApiKeys.map(key => (
-                                <option key={key} value={key}>
-                                    {formatEndpointName(key)}
-                                </option>
-                            ))}
-                        </select>
-                    </div>
-
                     {/* Date Range Selector */}
                     <div className="date-range-selector">
                         {DATE_RANGES.map(range => (
@@ -630,37 +543,15 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                     <button className="theme-toggle" onClick={toggleTheme} title="Toggle theme">
                         {isDarkMode ? <Sun /> : <Moon />}
                     </button>
-                    {onSignOut && (
-                        <button className="logout-btn" onClick={onSignOut} title="Sign out" style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '6px',
-                            padding: '8px 12px',
-                            borderRadius: '8px',
-                            border: 'none',
-                            background: isDarkMode ? 'rgba(239, 68, 68, 0.1)' : 'rgba(239, 68, 68, 0.1)',
-                            color: '#ef4444',
-                            fontSize: '13px',
-                            fontWeight: '500',
-                            cursor: 'pointer',
-                            transition: 'background 0.2s'
-                        }}>
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" width="16" height="16">
-                                <path fillRule="evenodd" d="M3 4.25A2.25 2.25 0 015.25 2h5.5A2.25 2.25 0 0113 4.25v2a.75.75 0 01-1.5 0v-2a.75.75 0 00-.75-.75h-5.5a.75.75 0 00-.75.75v11.5c0 .414.336.75.75.75h5.5a.75.75 0 00.75-.75v-2a.75.75 0 011.5 0v2A2.25 2.25 0 0110.75 18h-5.5A2.25 2.25 0 013 15.75V4.25z" clipRule="evenodd" />
-                                <path fillRule="evenodd" d="M19 10a.75.75 0 00-.75-.75H8.704l1.048-.943a.75.75 0 10-1.004-1.114l-2.5 2.25a.75.75 0 000 1.114l2.5 2.25a.75.75 0 101.004-1.114l-1.048-.943h9.546A.75.75 0 0019 10z" clipRule="evenodd" />
-                            </svg>
-                            Logout
-                        </button>
-                    )}
                 </div>
             </header>
 
-            {/* Stats Cards */}
+            {/* Stats Cards - 3 consolidated cards */}
             <div className="stats-grid">
                 <StatCard
                     label="TOTAL REQUESTS"
                     value={formatNumber(totalRequests)}
-                    meta={`<span class="success">Success: ${successCount}</span> · <span class="failure">Failed: ${failureCount}</span>`}
+                    meta={`<span class="success">${formatNumber(successCount)} success</span> · <span class="failure">${formatNumber(failureCount)} failed</span> · RPM ${rpm}`}
                     icon={<BarGraph />}
                     sparklineData={sparklineData}
                     dataKey="requests"
@@ -676,24 +567,6 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                     stroke="#f59e0b"
                 />
                 <StatCard
-                    label="RPM"
-                    value={rpm}
-                    meta={`Requests: ${totalRequests}`}
-                    icon={<Zap />}
-                    sparklineData={sparklineData}
-                    dataKey="requests"
-                    stroke="#10b981"
-                />
-                <StatCard
-                    label="TPM"
-                    value={formatNumber(tpm)}
-                    meta={`Tokens: ${formatNumber(totalTokens)}`}
-                    icon={<Clock />}
-                    sparklineData={sparklineData}
-                    dataKey="tokens"
-                    stroke="#8b5cf6"
-                />
-                <StatCard
                     label="TOTAL COST"
                     value={<span className="cost-value">{formatCost(totalCost)}</span>}
                     meta="Estimated"
@@ -704,171 +577,600 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                 />
             </div>
 
-            {/* Rate Limits Prediction */}
-            <RateLimitCard usageData={stats?.raw_data} isDarkMode={isDarkMode} />
-
-            {/* Charts Row 1 */}
-            <div className="charts-row">
-                <div className="chart-card chart-large">
-                    <div className="chart-header">
-                        <h3>Request Trends</h3>
-                        <div className="chart-tabs">
-                            <button className={`tab ${requestTimeRange === 'hour' ? 'active' : ''}`} onClick={() => setRequestTimeRange('hour')}>Hour</button>
-                            <button className={`tab ${requestTimeRange === 'day' ? 'active' : ''}`} onClick={() => setRequestTimeRange('day')}>Day</button>
-                        </div>
-                    </div>
-                    <div className="chart-body">
-                        <ResponsiveContainer width="100%" height={220}>
-                            <AreaChart data={requestTimeRange === 'hour' ? hourlyData : dailyChartData}>
-                                <defs>
-                                    <linearGradient id="requestGradient" x1="0" y1="0" x2="0" y2="1">
-                                        <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.3} />
-                                        <stop offset="100%" stopColor="#3b82f6" stopOpacity={0} />
-                                    </linearGradient>
-                                </defs>
-                                <XAxis dataKey="time" stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={{ fontSize: 12 }} axisLine={false} tickLine={false} />
-                                <YAxis stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={{ fontSize: 12 }} axisLine={false} tickLine={false} />
-                                <Tooltip content={<CustomTooltip isDarkMode={isDarkMode} />} />
-                                <Area
-                                    type="monotone"
-                                    dataKey="requests"
-                                    name="Requests"
-                                    stroke="#3b82f6"
-                                    fill="url(#requestGradient)"
-                                    strokeWidth={2}
-                                    isAnimationActive={chartAnimated}
-                                    animationDuration={2000}
-                                />
-                            </AreaChart>
-                        </ResponsiveContainer>
-                    </div>
-                </div>
-
-                <div className="chart-card chart-small">
-                    <div className="chart-header">
-                        <h3>💰 Cost Breakdown</h3>
-                    </div>
-                    <div className="chart-body pie-container">
-                        {costBreakdown.length > 0 ? (
-                            <ResponsiveContainer width="100%" height={200}>
-                                <PieChart>
-                                    <Pie
-                                        data={costBreakdown}
-                                        dataKey="estimated_cost_usd"
-                                        nameKey="model_name"
-                                        cx="50%"
-                                        cy="50%"
-                                        outerRadius={70}
-                                        innerRadius={40}
-                                        label={({ percentage }) => `${percentage}%`}
-                                        labelLine={false}
-                                        isAnimationActive={chartAnimated}
-                                        animationDuration={1500}
-                                    >
-                                        {costBreakdown.map((entry, index) => (
-                                            <Cell key={`cell-${index}`} fill={entry.color} />
-                                        ))}
-                                    </Pie>
-                                    <Tooltip content={<CustomTooltip isDarkMode={isDarkMode} forceCurrency={true} />} />
-                                </PieChart>
-                            </ResponsiveContainer>
-                        ) : (
-                            <div className="empty-state">No cost data</div>
-                        )}
-                    </div>
-                </div>
-            </div>
-
-            {/* Token Usage Trends */}
+            {/* ===== Usage Trends (By Model × Metric × Time | Token Types) ===== */}
             <div className="charts-row">
                 <div className="chart-card chart-full">
                     <div className="chart-header">
-                        <h3>Token Usage Trends</h3>
-                        <div className="chart-tabs">
-                            <button className={`tab ${tokenTimeRange === 'hour' ? 'active' : ''}`} onClick={() => setTokenTimeRange('hour')}>Hour</button>
-                            <button className={`tab ${tokenTimeRange === 'day' ? 'active' : ''}`} onClick={() => setTokenTimeRange('day')}>Day</button>
+                        <h3>Usage Trends</h3>
+                        <div className="chart-controls">
+                            <div className="chart-tabs">
+                                <button className={`tab ${usageTrendView === 'models' ? 'active' : ''}`} onClick={() => setUsageTrendView('models')}>Models</button>
+                                <button className={`tab ${usageTrendView === 'tokenTypes' ? 'active' : ''}`} onClick={() => setUsageTrendView('tokenTypes')}>Token Types</button>
+                            </div>
+                            {usageTrendView === 'models' && !['today', 'yesterday'].includes(dateRange) && (
+                                <div className="chart-tabs">
+                                    <button className={`tab ${usageTrendTime === 'hour' ? 'active' : ''}`} onClick={() => setUsageTrendTime('hour')}>Hour</button>
+                                    <button className={`tab ${usageTrendTime === 'day' ? 'active' : ''}`} onClick={() => setUsageTrendTime('day')}>Day</button>
+                                </div>
+                            )}
                         </div>
                     </div>
-                    <div className="chart-body">
-                        <ResponsiveContainer width="100%" height={200}>
-                            <AreaChart data={tokenTimeRange === 'hour' ? hourlyData : dailyChartData}>
-                                <defs>
-                                    <linearGradient id="tokenGradient" x1="0" y1="0" x2="0" y2="1">
-                                        <stop offset="0%" stopColor="#10b981" stopOpacity={0.4} />
-                                        <stop offset="100%" stopColor="#10b981" stopOpacity={0} />
-                                    </linearGradient>
-                                </defs>
-                                <XAxis dataKey="time" stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={{ fontSize: 12 }} axisLine={false} tickLine={false} />
-                                <YAxis stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={{ fontSize: 12 }} axisLine={false} tickLine={false} tickFormatter={formatNumber} />
-                                <Tooltip content={<CustomTooltip isDarkMode={isDarkMode} />} />
-                                <Area
-                                    type="monotone"
-                                    dataKey="tokens"
-                                    name="Tokens"
-                                    stroke="#10b981"
-                                    fill="url(#tokenGradient)"
-                                    strokeWidth={2}
-                                    isAnimationActive={chartAnimated}
-                                    animationDuration={2000}
-                                />
-                            </AreaChart>
-                        </ResponsiveContainer>
+                    <div className="chart-body chart-body-dark">
+                        {usageTrendView === 'models' ? (
+                            <div className="chart-split">
+                                <div className="chart-split-main">
+                                <AutoWidthChart height={320}>
+                                    {modelTrendData.length > 0 ? (
+                                        <AreaChart data={modelTrendData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                                            <defs>
+                                                {activeTopModels.map((modelName) => {
+                                                    const color = getModelColor(modelName)
+                                                    const safeId = modelName.replace(/[^a-zA-Z0-9]/g, '_')
+                                                    return (
+                                                        <linearGradient key={safeId} id={`gradModel_${safeId}`} x1="0" y1="0" x2="0" y2="1">
+                                                            <stop offset="0%" stopColor={color} stopOpacity={0.5} />
+                                                            <stop offset="100%" stopColor={color} stopOpacity={0.03} />
+                                                        </linearGradient>
+                                                    )
+                                                })}
+                                            </defs>
+                                            <CartesianGrid strokeDasharray="4 4" stroke={isDarkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'} />
+                                            <XAxis dataKey="time" stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+                                            <YAxis
+                                                stroke={isDarkMode ? '#6e7681' : '#57606a'}
+                                                tick={{ fontSize: 11 }}
+                                                axisLine={false}
+                                                tickLine={false}
+                                                tickFormatter={formatNumberShort}
+                                            />
+                                            <Tooltip
+                                                content={({ active, payload, label }) => {
+                                                    if (!active || !payload?.length) return null
+                                                    const point = payload[0]?.payload
+                                                    const modelEntries = payload.filter(p => !p.dataKey.startsWith('_'))
+                                                    return (
+                                                        <div style={{
+                                                            background: isDarkMode ? 'rgba(15,23,42,0.95)' : 'rgba(255,255,255,0.98)',
+                                                            border: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}`,
+                                                            borderRadius: 10,
+                                                            padding: '10px 14px',
+                                                            boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
+                                                            backdropFilter: 'blur(12px)',
+                                                            maxWidth: 280,
+                                                        }}>
+                                                            <div style={{ fontWeight: 600, marginBottom: 8, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk' }}>{label}</div>
+                                                            <div style={{ display: 'flex', gap: 12, marginBottom: 8, paddingBottom: 8, borderBottom: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'}` }}>
+                                                                <div style={{ fontSize: 11 }}>
+                                                                    <span style={{ color: '#06b6d4' }}>Tokens</span>
+                                                                    <div style={{ fontWeight: 700, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk' }}>{formatNumber(point?._totalTokens || 0)}</div>
+                                                                </div>
+                                                                <div style={{ fontSize: 11 }}>
+                                                                    <span style={{ color: '#f59e0b' }}>Cost</span>
+                                                                    <div style={{ fontWeight: 700, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk' }}>{formatCost(point?._totalCost || 0)}</div>
+                                                                </div>
+                                                                <div style={{ fontSize: 11 }}>
+                                                                    <span style={{ color: '#3b82f6' }}>Reqs</span>
+                                                                    <div style={{ fontWeight: 700, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk' }}>{formatNumber(point?._totalRequests || 0)}</div>
+                                                                </div>
+                                                            </div>
+                                                            {modelEntries.map((p, i) => (
+                                                                <div key={i} style={{ fontSize: 12, display: 'flex', gap: 8, alignItems: 'center', marginBottom: 3 }}>
+                                                                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: p.color, boxShadow: `0 0 6px ${p.color}`, flexShrink: 0 }}></span>
+                                                                    <span style={{ color: isDarkMode ? '#94A3B8' : '#475569', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
+                                                                    <span style={{ fontWeight: 600, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk', whiteSpace: 'nowrap' }}>
+                                                                        {formatNumber(p.value)}
+                                                                    </span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )
+                                                }}
+                                                allowEscapeViewBox={{ x: false, y: true }}
+                                            />
+                                            {activeTopModels.map((modelName) => {
+                                                const color = getModelColor(modelName)
+                                                const safeId = modelName.replace(/[^a-zA-Z0-9]/g, '_')
+                                                return (
+                                                    <Area
+                                                        key={modelName}
+                                                        type="monotone"
+                                                        dataKey={modelName}
+                                                        stroke={color}
+                                                        fill={`url(#gradModel_${safeId})`}
+                                                        strokeWidth={2}
+                                                        dot={false}
+                                                        activeDot={{ r: 4, strokeWidth: 2 }}
+                                                        isAnimationActive={chartAnimated}
+                                                        animationDuration={1500}
+                                                    />
+                                                )
+                                            })}
+                                        </AreaChart>
+                                    ) : (
+                                        <AreaChart data={[]}>
+                                            <text x="50%" y="50%" textAnchor="middle" fill={isDarkMode ? '#64748B' : '#94A3B8'} fontSize={13}>No model data</text>
+                                        </AreaChart>
+                                    )}
+                                </AutoWidthChart>
+                                </div>
+                                <div className="chart-legend-panel chart-split-legend" style={{
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '8px',
+                                    paddingTop: '10px',
+                                    overflowY: 'auto',
+                                    maxHeight: '320px'
+                                }}>
+                                    <div style={{
+                                        fontSize: '11px',
+                                        fontWeight: 600,
+                                        color: isDarkMode ? '#94A3B8' : '#475569',
+                                        marginBottom: '4px',
+                                        textTransform: 'uppercase',
+                                        letterSpacing: '0.5px',
+                                        display: 'grid',
+                                        gridTemplateColumns: '1fr 46px 46px 52px',
+                                        gap: '4px',
+                                        paddingRight: '4px'
+                                    }}>
+                                        <span>Model</span>
+                                        <span style={{ textAlign: 'right' }}>Req</span>
+                                        <span style={{ textAlign: 'right' }}>Tokens</span>
+                                        <span style={{ textAlign: 'right', color: isDarkMode ? '#10b981' : '#059669' }}>Cost</span>
+                                    </div>
+                                    {activeTopModels.map((modelName) => {
+                                        const color = getModelColor(modelName)
+                                        const modelData = filteredModelUsage.find(m => m.model_name === modelName)
+
+                                        return (
+                                            <div key={modelName} onClick={() => openModelDrilldown(modelName)} style={{
+                                                display: 'grid',
+                                                gridTemplateColumns: '1fr 46px 46px 52px',
+                                                gap: '4px',
+                                                alignItems: 'center',
+                                                padding: '5px 8px',
+                                                background: isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
+                                                borderRadius: '6px',
+                                                border: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'}`,
+                                                cursor: 'pointer',
+                                                transition: 'all 0.2s ease'
+                                            }}
+                                            onMouseEnter={(e) => {
+                                                e.currentTarget.style.background = isDarkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'
+                                                e.currentTarget.style.borderColor = color
+                                            }}
+                                            onMouseLeave={(e) => {
+                                                e.currentTarget.style.background = isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)'
+                                                e.currentTarget.style.borderColor = isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'
+                                            }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                                                    <span style={{
+                                                        width: '8px',
+                                                        height: '8px',
+                                                        borderRadius: '50%',
+                                                        background: color,
+                                                        boxShadow: `0 0 6px ${color}`,
+                                                        flexShrink: 0
+                                                    }}></span>
+                                                    <span style={{
+                                                        fontSize: '11px',
+                                                        fontWeight: 500,
+                                                        color: isDarkMode ? '#F8FAFC' : '#0F172A',
+                                                        overflow: 'hidden',
+                                                        textOverflow: 'ellipsis',
+                                                        whiteSpace: 'nowrap'
+                                                    }}>
+                                                        {modelName}
+                                                    </span>
+                                                </div>
+                                                <span style={{ fontSize: '10px', fontWeight: 600, color: isDarkMode ? '#CBD5E1' : '#334155', fontFamily: 'monospace', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                                    {formatNumberShort(modelData?.request_count || 0)}
+                                                </span>
+                                                <span style={{ fontSize: '10px', fontWeight: 600, color: isDarkMode ? '#CBD5E1' : '#334155', fontFamily: 'monospace', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                                    {formatNumberShort(modelData?.total_tokens || 0)}
+                                                </span>
+                                                <span style={{ fontSize: '10px', fontWeight: 600, color: isDarkMode ? '#10b981' : '#059669', fontFamily: 'monospace', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                                    {formatCost(modelData?.estimated_cost_usd || 0)}
+                                                </span>
+                                            </div>
+                                        )
+                                    })}
+                                </div>
+                            </div>
+                        ) : (
+                            /* Token Types: Clustered stacked column — X = time, 4 clusters per tick, stacks = models */
+                            <div className="chart-split" style={{ minHeight: 320 }}>
+                                {/* Chart column */}
+                                <div className="chart-split-main">
+                                    {/* Token type legend (opacity key) */}
+                                    <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 8, paddingLeft: 4 }}>
+                                        {TOKEN_TYPES.map(({ label, color, suffix }) => (
+                                            <span key={suffix} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color }}>
+                                                <span style={{ width: 10, height: 10, borderRadius: 2, background: color, display: 'inline-block' }} />
+                                                {label}
+                                            </span>
+                                        ))}
+                                    </div>
+                                    <div style={{ width: '100%', height: 300 }}>
+                                    <AutoWidthChart height={300}>
+                                        <BarChart
+                                            data={tokenTrendData}
+                                            margin={{ top: 4, right: 10, left: 10, bottom: 5 }}
+                                            barCategoryGap="20%"
+                                            barGap={1}
+                                        >
+                                            <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'} vertical={false} />
+                                            <XAxis
+                                                dataKey="time"
+                                                stroke={isDarkMode ? '#6e7681' : '#57606a'}
+                                                tick={{ fontSize: 11 }}
+                                                axisLine={false}
+                                                tickLine={false}
+                                            />
+                                            <YAxis
+                                                stroke={isDarkMode ? '#6e7681' : '#57606a'}
+                                                tick={{ fontSize: 11 }}
+                                                axisLine={false}
+                                                tickLine={false}
+                                                tickFormatter={formatNumberShort}
+                                                width={55}
+                                            />
+                                            <Tooltip
+                                                content={({ active, payload, label }) => {
+                                                    if (!active || !payload?.length) return null
+                                                    const byModel = {}
+                                                    for (const p of payload) {
+                                                        if (!p.value) continue
+                                                        const [model, type] = p.dataKey.split('||')
+                                                        if (!byModel[model]) byModel[model] = {}
+                                                        byModel[model][type] = (byModel[model][type] || 0) + p.value
+                                                    }
+                                                    const typeLabels = { in: 'Input', out: 'Output', ca: 'Cached', re: 'Reasoning' }
+                                                    const grandTotal = payload.reduce((s, p) => s + (p.value || 0), 0)
+                                                    return (
+                                                        <div style={{
+                                                            background: isDarkMode ? 'rgba(15,23,42,0.97)' : 'rgba(255,255,255,0.98)',
+                                                            border: `1px solid ${isDarkMode ? 'rgba(99,102,241,0.3)' : 'rgba(99,102,241,0.2)'}`,
+                                                            borderRadius: 10, padding: '10px 14px', minWidth: 200,
+                                                            boxShadow: isDarkMode ? '0 8px 24px rgba(0,0,0,0.5)' : '0 8px 24px rgba(0,0,0,0.1)',
+                                                            maxHeight: 320, overflowY: 'auto'
+                                                        }}>
+                                                            <div style={{ fontWeight: 700, marginBottom: 8, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk' }}>
+                                                                {label}
+                                                            </div>
+                                                            {Object.entries(byModel).map(([model, types]) => (
+                                                                <div key={model} style={{ marginBottom: 6 }}>
+                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 3 }}>
+                                                                        <span style={{ width: 8, height: 8, borderRadius: 2, background: getModelColor(model), display: 'inline-block' }} />
+                                                                        <span style={{ fontSize: 11, fontWeight: 600, color: isDarkMode ? '#CBD5E1' : '#334155' }}>
+                                                                            {model.length > 22 ? '…' + model.slice(-18) : model}
+                                                                        </span>
+                                                                    </div>
+                                                                    {['in', 'out', 'ca', 're'].filter(t => types[t] > 0).map(t => (
+                                                                        <div key={t} style={{ display: 'flex', justifyContent: 'space-between', gap: 14, fontSize: 11, paddingLeft: 13, marginBottom: 1 }}>
+                                                                            <span style={{ color: isDarkMode ? '#94A3B8' : '#64748B' }}>{typeLabels[t]}</span>
+                                                                            <strong style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A' }}>{formatNumber(types[t])}</strong>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            ))}
+                                                            <div style={{ borderTop: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)'}`, marginTop: 6, paddingTop: 6, display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                                                                <span style={{ color: isDarkMode ? '#94A3B8' : '#64748B' }}>Total</span>
+                                                                <strong style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A' }}>{formatNumber(grandTotal)}</strong>
+                                                            </div>
+                                                        </div>
+                                                    )
+                                                }}
+                                                cursor={{ fill: isDarkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' }}
+                                                allowEscapeViewBox={{ x: false, y: true }}
+                                            />
+                                            {/* Bars: color = token type (distinct), stacked by model (opacity gradient) */}
+                                            {TOKEN_TYPES.map(({ suffix, color }) =>
+                                                tokenTrendModels.map((model, i) => (
+                                                    <Bar key={`${model}-${suffix}`} dataKey={`${model}||${suffix}`} stackId={suffix}
+                                                        fill={color}
+                                                        fillOpacity={1 - (i * 0.12)}
+                                                        radius={i === tokenTrendModels.length - 1 ? [3, 3, 0, 0] : [0, 0, 0, 0]}
+                                                        isAnimationActive={chartAnimated} animationDuration={1000} animationBegin={i * 60}
+                                                    />
+                                                ))
+                                            )}
+                                        </BarChart>
+                                    </AutoWidthChart>
+                                    </div>
+                                </div>
+                                {/* Legend panel (right side) — same style as model legend */}
+                                <div className="chart-legend-panel chart-split-legend" style={{ display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '10px', overflowY: 'auto', maxHeight: '340px' }}>
+                                    {/* Column headers — fixed col widths match value rows */}
+                                    <div style={{
+                                        fontSize: '11px', fontWeight: 600,
+                                        marginBottom: '4px', textTransform: 'uppercase',
+                                        letterSpacing: '0.5px', display: 'grid',
+                                        gridTemplateColumns: '1fr 46px 46px 46px 46px',
+                                        gap: '4px', paddingRight: '4px'
+                                    }}>
+                                        <span style={{ color: isDarkMode ? '#94A3B8' : '#475569' }}>Model</span>
+                                        {TOKEN_TYPES.map(t => (
+                                            <span key={t.suffix} style={{ textAlign: 'right', color: t.color }}>{t.short}</span>
+                                        ))}
+                                    </div>
+                                    {tokenTrendModels.map(model => {
+                                        const color = getModelColor(model)
+                                        const md = filteredModelUsage.find(m => m.model_name === model) || {}
+                                        return (
+                                            <div key={model}
+                                                onClick={() => openModelDrilldown(model)}
+                                                onMouseEnter={(e) => {
+                                                    e.currentTarget.style.background = isDarkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'
+                                                    e.currentTarget.style.borderColor = color
+                                                }}
+                                                onMouseLeave={(e) => {
+                                                    e.currentTarget.style.background = isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)'
+                                                    e.currentTarget.style.borderColor = isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'
+                                                }}
+                                                style={{
+                                                display: 'grid', gridTemplateColumns: '1fr 46px 46px 46px 46px',
+                                                gap: '4px', alignItems: 'center',
+                                                padding: '6px 8px',
+                                                background: isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
+                                                borderRadius: '6px',
+                                                border: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'}`,
+                                                cursor: 'pointer',
+                                                transition: 'all 0.2s ease'
+                                            }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                                                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, boxShadow: `0 0 6px ${color}`, flexShrink: 0 }} />
+                                                    <span style={{ fontSize: '11px', fontWeight: 500, color: isDarkMode ? '#F8FAFC' : '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                        {model}
+                                                    </span>
+                                                </div>
+                                                {TOKEN_TYPES.map(t => (
+                                                    <span key={t.suffix} style={{ fontSize: '11px', fontFamily: 'monospace', textAlign: 'right', color: t.color, fontWeight: 600, whiteSpace: 'nowrap', display: 'block' }}>
+                                                        {formatNumberShort(md[t.dataKey] || 0)}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        )
+                                    })}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             </div>
 
-            {/* Model Usage & API Endpoints */}
+            {/* ===== Cost Analysis (unified: Pie Chart + Details Table) ===== */}
             <div className="charts-row">
-                <div className="chart-card chart-half">
+                <div className="chart-card chart-full">
                     <div className="chart-header">
-                        <h3>📊 Model Usage (Top 5 Trends)</h3>
+                        <h3>Cost Analysis</h3>
                         <div className="chart-tabs">
-                            <button className={`tab ${modelSort === 'requests' ? 'active' : ''}`} onClick={() => setModelSort('requests')}>Reqs</button>
-                            <button className={`tab ${modelSort === 'tokens' ? 'active' : ''}`} onClick={() => setModelSort('tokens')}>Toks</button>
-                            <button className={`tab ${modelSort === 'cost' ? 'active' : ''}`} onClick={() => setModelSort('cost')}>Cost</button>
+                            <button className={`tab ${costView === 'chart' ? 'active' : ''}`} onClick={() => setCostView('chart')}>Chart</button>
+                            <button className={`tab ${costView === 'details' ? 'active' : ''}`} onClick={() => setCostView('details')}>Details</button>
                         </div>
                     </div>
-                    <div className="chart-body">
-                        {modelTrendData.length > 0 ? (
-                            <ResponsiveContainer width="100%" height={220}>
-                                <AreaChart data={modelTrendData}>
-                                    <XAxis dataKey="time" stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={{ fontSize: 12 }} axisLine={false} tickLine={false} />
-                                    <YAxis stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={{ fontSize: 12 }} axisLine={false} tickLine={false} tickFormatter={modelSort === 'cost' ? (val) => `$${val}` : formatNumber} />
-                                    <Tooltip content={<CustomTooltip isDarkMode={isDarkMode} forceCurrency={modelSort === 'cost'} />} />
-                                    {activeTopModels.map((modelName, index) => (
-                                        <Area
-                                            key={modelName}
-                                            type="monotone"
-                                            dataKey={modelName}
-                                            stackId="1"
-                                            stroke={getModelColor(modelName)}
-                                            fill={getModelColor(modelName)}
-                                            fillOpacity={0.6}
-                                            strokeWidth={1}
-                                            isAnimationActive={chartAnimated}
-                                            animationDuration={1500}
-                                        />
-                                    ))}
-                                </AreaChart>
-                            </ResponsiveContainer>
-                        ) : (
-                            <div className="empty-state">No model data</div>
-                        )}
-                    </div>
+                    {costView === 'chart' ? (
+                        <div className="chart-body chart-body-dark pie-container" style={{ minHeight: 300 }}>
+                            {costBreakdown.length > 0 ? (
+                                <div className="chart-split">
+                                    <div className="chart-split-main">
+                                    <AutoWidthChart height={300}>
+                                        <PieChart onClick={() => {
+                                            if (costBreakdown.length > 0) {
+                                                const models = {}
+                                                costBreakdown.forEach(m => {
+                                                    models[m.model_name] = {
+                                                        requests: m.request_count,
+                                                        tokens: m.total_tokens,
+                                                        cost: m.estimated_cost_usd
+                                                    }
+                                                })
+                                                setDrilldownData({ label: 'All Models', data: { models }, chartType: 'cost', title: 'Cost Breakdown — All Models' })
+                                            }
+                                        }}>
+                                            <Pie
+                                                data={costBreakdown}
+                                                dataKey="estimated_cost_usd"
+                                                nameKey="model_name"
+                                                cx="50%"
+                                                cy="50%"
+                                                outerRadius={110}
+                                                innerRadius={65}
+                                                label={false}
+                                                stroke={isDarkMode ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.6)'}
+                                                strokeWidth={2}
+                                                isAnimationActive={chartAnimated}
+                                                animationDuration={1500}
+                                            >
+                                                {costBreakdown.map((entry, index) => (
+                                                    <Cell key={`cell-${index}`} fill={entry.color} fillOpacity={0.85} />
+                                                ))}
+                                            </Pie>
+                                            <Tooltip content={<CustomTooltip isDarkMode={isDarkMode} forceCurrency={true} />} />
+                                        </PieChart>
+                                    </AutoWidthChart>
+                                    </div>
+                                    <div className="chart-legend-panel chart-split-legend" style={{
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        gap: '6px',
+                                        paddingTop: '10px',
+                                        overflowY: 'auto',
+                                        maxHeight: '300px'
+                                    }}>
+                                        <div style={{
+                                            fontSize: '11px',
+                                            fontWeight: 600,
+                                            color: isDarkMode ? '#94A3B8' : '#475569',
+                                            marginBottom: '4px',
+                                            textTransform: 'uppercase',
+                                            letterSpacing: '0.5px',
+                                            display: 'flex',
+                                            justifyContent: 'space-between',
+                                            paddingRight: '8px'
+                                        }}>
+                                            <span>Model</span>
+                                            <span>Cost / %</span>
+                                        </div>
+                                        {costBreakdown.map((model, index) => (
+                                            <div key={index} onClick={() => openModelDrilldown(model.model_name)} style={{
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '10px',
+                                                padding: '6px 10px',
+                                                background: isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
+                                                borderRadius: '6px',
+                                                border: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'}`,
+                                                cursor: 'pointer',
+                                                transition: 'all 0.2s ease'
+                                            }}
+                                            onMouseEnter={(e) => {
+                                                e.currentTarget.style.background = isDarkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'
+                                                e.currentTarget.style.borderColor = model.color
+                                            }}
+                                            onMouseLeave={(e) => {
+                                                e.currentTarget.style.background = isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)'
+                                                e.currentTarget.style.borderColor = isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'
+                                            }}>
+                                                <span style={{
+                                                    width: '10px',
+                                                    height: '10px',
+                                                    borderRadius: '50%',
+                                                    background: model.color,
+                                                    boxShadow: `0 0 8px ${model.color}`,
+                                                    flexShrink: 0
+                                                }}></span>
+                                                <div style={{ flex: 1, minWidth: 0 }}>
+                                                    <div style={{
+                                                        fontSize: '11px',
+                                                        fontWeight: 500,
+                                                        color: isDarkMode ? '#F8FAFC' : '#0F172A',
+                                                        overflow: 'hidden',
+                                                        textOverflow: 'ellipsis',
+                                                        whiteSpace: 'nowrap'
+                                                    }}>
+                                                        {model.model_name}
+                                                    </div>
+                                                </div>
+                                                <div style={{
+                                                    display: 'flex',
+                                                    gap: '8px',
+                                                    alignItems: 'center',
+                                                    flexShrink: 0
+                                                }}>
+                                                    <span style={{
+                                                        fontSize: '11px',
+                                                        fontWeight: 600,
+                                                        color: isDarkMode ? '#10b981' : '#059669',
+                                                        fontFamily: 'monospace'
+                                                    }}>
+                                                        {formatCost(model.estimated_cost_usd || 0)}
+                                                    </span>
+                                                    <span style={{
+                                                        fontSize: '10px',
+                                                        color: isDarkMode ? '#64748B' : '#94A3B8',
+                                                        minWidth: '32px',
+                                                        textAlign: 'right'
+                                                    }}>
+                                                        {model.percentage}%
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="empty-state">No cost data</div>
+                            )}
+                        </div>
+                    ) : (
+                        <div className="table-wrapper">
+                            <table className="data-table">
+                                <thead>
+                                    <tr>
+                                        <th onClick={() => handleSort('model_name')} className="sortable">
+                                            Model <SortIcon column="model_name" />
+                                        </th>
+                                        <th onClick={() => handleSort('request_count')} className="sortable">
+                                            Requests <SortIcon column="request_count" />
+                                        </th>
+                                        <th onClick={() => handleSort('input_tokens')} className="sortable">
+                                            Input Tokens <SortIcon column="input_tokens" />
+                                        </th>
+                                        <th onClick={() => handleSort('output_tokens')} className="sortable">
+                                            Output Tokens <SortIcon column="output_tokens" />
+                                        </th>
+                                        <th onClick={() => handleSort('total_tokens')} className="sortable">
+                                            Total Tokens <SortIcon column="total_tokens" />
+                                        </th>
+                                        <th onClick={() => handleSort('estimated_cost_usd')} className="sortable">
+                                            Cost <SortIcon column="estimated_cost_usd" />
+                                        </th>
+                                        <th onClick={() => handleSort('percentage')} className="sortable">
+                                            % <SortIcon column="percentage" />
+                                        </th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {costBreakdown.length > 0 ? costBreakdown.map((m, i) => (
+                                        <tr key={i} className="clickable-row" onClick={() => openModelDrilldown(m.model_name)}>
+                                            <td><span className="color-dot" style={{ background: m.color }}></span>{m.model_name}</td>
+                                            <td>{formatNumber(m.request_count)}</td>
+                                            <td>{formatNumber(m.input_tokens)}</td>
+                                            <td>{formatNumber(m.output_tokens)}</td>
+                                            <td>{formatNumber(m.total_tokens)}</td>
+                                            <td className="cost">{formatCost(m.estimated_cost_usd || 0)}</td>
+                                            <td>{m.percentage}%</td>
+                                        </tr>
+                                    )) : (
+                                        <tr><td colSpan="7" className="empty">No data</td></tr>
+                                    )}
+                                </tbody>
+                                {costBreakdown.length > 0 && (
+                                    <tfoot>
+                                        <tr>
+                                            <td><strong>Total</strong></td>
+                                            <td><strong>{formatNumber((filteredModelUsage || []).reduce((s, m) => s + m.request_count, 0))}</strong></td>
+                                            <td><strong>{formatNumber((filteredModelUsage || []).reduce((s, m) => s + m.input_tokens, 0))}</strong></td>
+                                            <td><strong>{formatNumber((filteredModelUsage || []).reduce((s, m) => s + m.output_tokens, 0))}</strong></td>
+                                            <td><strong>{formatNumber((filteredModelUsage || []).reduce((s, m) => s + m.total_tokens, 0))}</strong></td>
+                                            <td className="cost"><strong>{formatCost(totalCost)}</strong></td>
+                                            <td><strong>100%</strong></td>
+                                        </tr>
+                                    </tfoot>
+                                )}
+                            </table>
+                        </div>
+                    )}
                 </div>
+            </div>
 
-                <div className="chart-card chart-half">
+            {/* ===== API Keys ===== */}
+            <div className="charts-row">
+                <div className="chart-card chart-full">
                     <div className="chart-header">
-                        <h3>🔑 API Keys ({endpointUsage.length})</h3>
+                        <h3>API Keys ({endpointUsage.length})</h3>
                         <div className="chart-tabs">
                             <button className={`tab ${endpointSort === 'requests' ? 'active' : ''}`} onClick={() => setEndpointSort('requests')}>Requests</button>
                             <button className={`tab ${endpointSort === 'cost' ? 'active' : ''}`} onClick={() => setEndpointSort('cost')}>Cost</button>
                         </div>
                     </div>
-                    <div className="chart-body">
+                    <div className="chart-body chart-body-dark">
                         {endpointUsage.length > 0 ? (
-                            <ResponsiveContainer width="100%" height={Math.max(200, endpointUsage.length * 45)}>
-                                <BarChart data={endpointUsage} layout="vertical" margin={{ left: 10, right: 150 }}>
+                            <AutoWidthChart height={Math.max(200, endpointUsage.length * 45)}>
+                                <BarChart data={endpointUsage} layout="vertical" margin={{ left: 10, right: 150 }} onClick={(data) => {
+                                    if (data?.activePayload?.[0]?.payload?.models) {
+                                        const point = data.activePayload[0].payload
+                                        setDrilldownData({ label: point.endpoint, data: point, chartType: 'apikeys' })
+                                    }
+                                }}>
+                                    <defs>
+                                        <linearGradient id="gradApiKeys" x1="0" y1="0" x2="1" y2="0">
+                                            <stop offset="0%" stopColor="#8b5cf6" stopOpacity={0.3} />
+                                            <stop offset="100%" stopColor="#8b5cf6" stopOpacity={0.9} />
+                                        </linearGradient>
+                                    </defs>
+                                    <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'} horizontal={false} />
                                     <XAxis type="number" stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={{ fontSize: 12 }} axisLine={false} tickLine={false} />
                                     <YAxis
                                         type="category"
@@ -884,7 +1186,9 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                     <Bar
                                         dataKey={endpointSort === 'cost' ? 'cost' : 'requests'}
                                         name={endpointSort === 'cost' ? 'Cost ($)' : 'Requests'}
-                                        fill="#8b5cf6"
+                                        fill="url(#gradApiKeys)"
+                                        stroke="#8b5cf6"
+                                        strokeWidth={1}
                                         radius={[0, 4, 4, 0]}
                                         isAnimationActive={chartAnimated}
                                         animationDuration={1500}
@@ -892,7 +1196,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         label={(props) => <ApiKeyLabel {...props} data={endpointUsage[props.index]} isDarkMode={isDarkMode} />}
                                     />
                                 </BarChart>
-                            </ResponsiveContainer>
+                            </AutoWidthChart>
                         ) : (
                             <div className="empty-state">No endpoint data</div>
                         )}
@@ -900,75 +1204,59 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                 </div>
             </div>
 
-            {/* Cost Details Table */}
-            <div className="chart-card">
-                <div className="chart-header">
-                    <h3>💵 Cost Details by Model</h3>
-                </div>
-                <div className="table-wrapper">
-                    <table className="data-table">
-                        <thead>
-                            <tr>
-                                <th onClick={() => handleSort('model_name')} className="sortable">
-                                    Model <SortIcon column="model_name" />
-                                </th>
-                                <th onClick={() => handleSort('request_count')} className="sortable">
-                                    Requests <SortIcon column="request_count" />
-                                </th>
-                                <th onClick={() => handleSort('input_tokens')} className="sortable">
-                                    Input Tokens <SortIcon column="input_tokens" />
-                                </th>
-                                <th onClick={() => handleSort('output_tokens')} className="sortable">
-                                    Output Tokens <SortIcon column="output_tokens" />
-                                </th>
-                                <th onClick={() => handleSort('total_tokens')} className="sortable">
-                                    Total Tokens <SortIcon column="total_tokens" />
-                                </th>
-                                <th onClick={() => handleSort('estimated_cost_usd')} className="sortable">
-                                    Cost <SortIcon column="estimated_cost_usd" />
-                                </th>
-                                <th onClick={() => handleSort('percentage')} className="sortable">
-                                    % <SortIcon column="percentage" />
-                                </th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {costBreakdown.length > 0 ? costBreakdown.map((m, i) => (
-                                <tr key={i}>
-                                    <td><span className="color-dot" style={{ background: m.color }}></span>{m.model_name}</td>
-                                    <td>{formatNumber(m.request_count)}</td>
-                                    <td>{formatNumber(m.input_tokens)}</td>
-                                    <td>{formatNumber(m.output_tokens)}</td>
-                                    <td>{formatNumber(m.total_tokens)}</td>
-                                    <td className="cost">{formatCost(m.estimated_cost_usd || 0)}</td>
-                                    <td>{m.percentage}%</td>
-                                </tr>
-                            )) : (
-                                <tr><td colSpan="7" className="empty">No data</td></tr>
-                            )}
-                        </tbody>
-                        {costBreakdown.length > 0 && (
-                            <tfoot>
-                                <tr>
-                                    <td><strong>Total</strong></td>
-                                    <td><strong>{formatNumber((filteredModelUsage || []).reduce((s, m) => s + m.request_count, 0))}</strong></td>
-                                    <td><strong>{formatNumber((filteredModelUsage || []).reduce((s, m) => s + m.input_tokens, 0))}</strong></td>
-                                    <td><strong>{formatNumber((filteredModelUsage || []).reduce((s, m) => s + m.output_tokens, 0))}</strong></td>
-                                    <td><strong>{formatNumber((filteredModelUsage || []).reduce((s, m) => s + m.total_tokens, 0))}</strong></td>
-                                    <td className="cost"><strong>{formatCost(totalCost)}</strong></td>
-                                    <td><strong>100%</strong></td>
-                                </tr>
-                            </tfoot>
-                        )}
-                    </table>
-                </div>
+            {/* Credential Stats - Usage rates and limits per credential */}
+            <div className="charts-row">
+                <CredentialStatsCard
+                    isDarkMode={isDarkMode}
+                    data={credentialData}
+                    isLoading={credentialLoading}
+                    setupRequired={credentialSetupRequired}
+                    onRowClick={(item, type) => {
+                    if (!item?.models || Object.keys(item.models).length === 0) return
+                    const label = type === 'api_key' ? item.api_key_name : (item.email || item.source || 'Unknown')
+                    const modelRows = Object.entries(item.models)
+                        .map(([name, m]) => ({
+                            _key: name,
+                            model: name,
+                            requests: m.requests || 0,
+                            success: m.success || 0,
+                            failed: m.failure || 0,
+                            tokens: m.total_tokens || m.tokens || 0,
+                        }))
+                        .sort((a, b) => b.requests - a.requests)
+                    setDrilldownData({
+                        label,
+                        title: `${label} — Model Breakdown`,
+                        chartType: 'credential',
+                        columns: [
+                            { key: 'model', label: 'Model' },
+                            { key: 'requests', label: 'Requests', render: v => formatNumber(v) },
+                            { key: 'success', label: 'Success', render: v => formatNumber(v) },
+                            { key: 'failed', label: 'Failed', render: (v) => v > 0 ? v : '0' },
+                            { key: 'tokens', label: 'Tokens', render: v => formatNumber(v) },
+                        ],
+                        rows: modelRows,
+                    })
+                }} />
             </div>
 
-            {/* Usage Pattern Heatmap */}
-            <UsageHeatmap dailyStats={filteredDailyStats} isDarkMode={isDarkMode} />
-
-            {/* Failure Rate Analysis */}
-            <FailureRateCard dailyStats={filteredDailyStats} isDarkMode={isDarkMode} />
+            {/* Drilldown Dialog - shows when clicking a data point on any chart */}
+            <ChartDialog
+                isOpen={drilldownData !== null}
+                onClose={() => setDrilldownData(null)}
+                title={drilldownData?.title || `Breakdown: ${drilldownData?.label || ''}`}
+            >
+                {drilldownData?.columns ? (
+                    <DrilldownPanel
+                        columns={drilldownData.columns}
+                        rows={drilldownData.rows}
+                    />
+                ) : drilldownData ? (
+                    <DrilldownPanel
+                        data={drilldownData.data}
+                    />
+                ) : null}
+            </ChartDialog>
         </div>
     )
 }

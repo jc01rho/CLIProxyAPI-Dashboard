@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from './lib/supabase'
 import Dashboard from './components/Dashboard'
-import Auth from './components/Auth'
 
 // Helper to get date boundaries based on range ID
 // Uses local timezone for date display, converts to UTC for timestamp queries
@@ -81,11 +80,6 @@ const getDateBoundaries = (rangeId) => {
 }
 
 function App() {
-    // Auth state
-    const [session, setSession] = useState(null)
-    const [authLoading, setAuthLoading] = useState(true)
-
-    // Data state
     const [stats, setStats] = useState(null)
     const [dailyStats, setDailyStats] = useState([])
     const [modelUsage, setModelUsage] = useState([])
@@ -96,26 +90,155 @@ function App() {
     const [lastUpdated, setLastUpdated] = useState(null)
     const [dateRange, setDateRange] = useState('today') // 'today', 'yesterday', '7d', '30d', 'year', 'all'
 
-    // Auth: Check session on mount and listen for changes
-    useEffect(() => {
-        // Get initial session
-        supabase.auth.getSession().then(({ data: { session } }) => {
-            setSession(session)
-            setAuthLoading(false)
-        })
+    // Credential stats state
+    const [credentialData, setCredentialData] = useState(null)
+    const [credentialLoading, setCredentialLoading] = useState(true)
+    const [credentialSetupRequired, setCredentialSetupRequired] = useState(false)
 
-        // Listen for auth state changes
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-            setSession(session)
-        })
+    // Fetch credential stats filtered by date range
+    const fetchCredentialStats = useCallback(async (rangeId = dateRange) => {
+        try {
+            setCredentialLoading(true)
 
-        return () => subscription.unsubscribe()
-    }, [])
+            const { startDate, endDate } = getDateBoundaries(rangeId)
 
-    // Sign out handler
-    const handleSignOut = async () => {
-        await supabase.auth.signOut()
-    }
+            // Try credential_daily_stats first (date-range aware)
+            let useDailyStats = false
+            try {
+                let query = supabase
+                    .from('credential_daily_stats')
+                    .select('credentials, api_keys, total_credentials, total_api_keys, stat_date')
+
+                if (startDate) {
+                    query = query.gte('stat_date', startDate)
+                }
+                if (endDate) {
+                    query = query.lt('stat_date', endDate)
+                }
+
+                const { data: dailyRows, error: dailyError } = await query
+
+                if (!dailyError && dailyRows && dailyRows.length > 0) {
+                    useDailyStats = true
+
+                    // Aggregate credentials across days
+                    const credMap = {}  // keyed by "auth_index||source"
+                    const akMap = {}    // keyed by "api_key_name"
+
+                    const CRED_NUM = ['total_requests', 'success_count', 'failure_count',
+                        'input_tokens', 'output_tokens', 'reasoning_tokens', 'cached_tokens', 'total_tokens']
+                    const AK_NUM = ['total_requests', 'total_tokens', 'success_count', 'failure_count',
+                        'input_tokens', 'output_tokens']
+                    const MODEL_NUM_CRED = ['requests', 'success', 'failure',
+                        'input_tokens', 'output_tokens', 'reasoning_tokens', 'cached_tokens', 'total_tokens']
+                    const MODEL_NUM_AK = ['requests', 'tokens', 'success', 'failure']
+
+                    for (const row of dailyRows) {
+                        // Merge credentials
+                        for (const c of (row.credentials || [])) {
+                            const key = `${c.auth_index || ''}||${c.source || ''}`
+                            if (!credMap[key]) {
+                                credMap[key] = { ...c, models: { ...(c.models || {}) } }
+                            } else {
+                                const ex = credMap[key]
+                                for (const f of CRED_NUM) {
+                                    ex[f] = (ex[f] || 0) + (c[f] || 0)
+                                }
+                                // Merge models
+                                for (const [mName, mData] of Object.entries(c.models || {})) {
+                                    if (!ex.models[mName]) {
+                                        ex.models[mName] = { ...mData }
+                                    } else {
+                                        for (const f of MODEL_NUM_CRED) {
+                                            ex.models[mName][f] = (ex.models[mName][f] || 0) + (mData[f] || 0)
+                                        }
+                                    }
+                                }
+                                // Union api_keys
+                                ex.api_keys = [...new Set([...(ex.api_keys || []), ...(c.api_keys || [])])].sort()
+                                // Update metadata
+                                for (const f of ['provider', 'email', 'label', 'status', 'account_type']) {
+                                    if (c[f]) ex[f] = c[f]
+                                }
+                            }
+                        }
+
+                        // Merge API keys
+                        for (const a of (row.api_keys || [])) {
+                            const key = a.api_key_name || ''
+                            if (!akMap[key]) {
+                                akMap[key] = { ...a, models: { ...(a.models || {}) } }
+                            } else {
+                                const ex = akMap[key]
+                                for (const f of AK_NUM) {
+                                    ex[f] = (ex[f] || 0) + (a[f] || 0)
+                                }
+                                for (const [mName, mData] of Object.entries(a.models || {})) {
+                                    if (!ex.models[mName]) {
+                                        ex.models[mName] = { ...mData }
+                                    } else {
+                                        for (const f of MODEL_NUM_AK) {
+                                            ex.models[mName][f] = (ex.models[mName][f] || 0) + (mData[f] || 0)
+                                        }
+                                    }
+                                }
+                                ex.credentials_used = [...new Set([...(ex.credentials_used || []), ...(a.credentials_used || [])])].sort()
+                            }
+                        }
+                    }
+
+                    // Recalculate success_rate for aggregated credentials
+                    const aggregatedCreds = Object.values(credMap).map(c => ({
+                        ...c,
+                        success_rate: c.total_requests > 0
+                            ? Math.round((c.success_count / c.total_requests) * 1000) / 10
+                            : 0
+                    })).sort((a, b) => b.total_requests - a.total_requests)
+
+                    const aggregatedAKs = Object.values(akMap).map(a => ({
+                        ...a,
+                        success_rate: a.total_requests > 0
+                            ? Math.round((a.success_count / a.total_requests) * 1000) / 10
+                            : 0
+                    })).sort((a, b) => b.total_requests - a.total_requests)
+
+                    setCredentialData({
+                        credentials: aggregatedCreds,
+                        api_keys: aggregatedAKs,
+                        total_credentials: aggregatedCreds.length,
+                        total_api_keys: aggregatedAKs.length,
+                    })
+                    setCredentialSetupRequired(false)
+                }
+            } catch (dailyErr) {
+                // credential_daily_stats table might not exist yet — fall through to summary
+                console.debug('credential_daily_stats not available, falling back to summary:', dailyErr.message)
+            }
+
+            // Fallback: use credential_usage_summary (backward compat)
+            if (!useDailyStats) {
+                const { data: rows, error } = await supabase
+                    .from('credential_usage_summary')
+                    .select('*')
+                    .eq('id', 1)
+                    .single()
+
+                if (error) {
+                    if (error.code === 'PGRST205' || error.message?.includes('relation') || error.message?.includes('does not exist') || error.message?.includes('Could not find')) {
+                        setCredentialSetupRequired(true)
+                    }
+                    throw error
+                }
+
+                setCredentialData(rows)
+                setCredentialSetupRequired(false)
+            }
+        } catch (err) {
+            console.error('Error fetching credential stats:', err)
+        } finally {
+            setCredentialLoading(false)
+        }
+    }, [dateRange])
 
     const fetchData = useCallback(async (rangeId = dateRange, isInitial = false) => {
         try {
@@ -142,7 +265,7 @@ function App() {
             // 2. Fetch ALL snapshots within date range (including model_usage for granular delta)
             let snapshotsQuery = supabase
                 .from('usage_snapshots')
-                .select('id, collected_at, total_requests, success_count, failure_count, total_tokens, model_usage(model_name, request_count, total_tokens, estimated_cost_usd)')
+                .select('id, collected_at, total_requests, success_count, failure_count, total_tokens, model_usage(model_name, request_count, total_tokens, estimated_cost_usd, input_tokens, output_tokens, reasoning_tokens, cached_tokens)')
                 .order('collected_at', { ascending: true })
 
             if (startTime) {
@@ -208,26 +331,38 @@ function App() {
                         const allModelNames = new Set([...prevModels.keys(), ...currModels.keys()])
 
                         for (const name of allModelNames) {
-                            const p = prevModels.get(name) || { request_count: 0, total_tokens: 0, estimated_cost_usd: 0 }
-                            const c = currModels.get(name) || { request_count: 0, total_tokens: 0, estimated_cost_usd: 0 }
+                            const p = prevModels.get(name) || { request_count: 0, total_tokens: 0, estimated_cost_usd: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0 }
+                            const c = currModels.get(name) || { request_count: 0, total_tokens: 0, estimated_cost_usd: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0 }
 
                             // Calculate delta for this model
                             // Handle restarts (curr < prev) -> assume curr is the delta (approx)
                             let dReq = c.request_count - p.request_count
                             let dTok = c.total_tokens - p.total_tokens
                             let dCost = (c.estimated_cost_usd || 0) - (p.estimated_cost_usd || 0)
+                            let dIn = (c.input_tokens || 0) - (p.input_tokens || 0)
+                            let dOut = (c.output_tokens || 0) - (p.output_tokens || 0)
+                            let dReasoning = (c.reasoning_tokens || 0) - (p.reasoning_tokens || 0)
+                            let dCached = (c.cached_tokens || 0) - (p.cached_tokens || 0)
 
                             if (dReq < 0 || dTok < 0 || dCost < 0) {
                                 dReq = c.request_count
                                 dTok = c.total_tokens
                                 dCost = c.estimated_cost_usd || 0
+                                dIn = c.input_tokens || 0
+                                dOut = c.output_tokens || 0
+                                dReasoning = c.reasoning_tokens || 0
+                                dCached = c.cached_tokens || 0
                             }
 
                             if (dReq > 0 || dTok > 0 || dCost > 0) {
-                                if (!hourlyMap[hourKey].models[name]) hourlyMap[hourKey].models[name] = { requests: 0, tokens: 0, cost: 0 }
+                                if (!hourlyMap[hourKey].models[name]) hourlyMap[hourKey].models[name] = { requests: 0, tokens: 0, cost: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0 }
                                 hourlyMap[hourKey].models[name].requests += dReq
                                 hourlyMap[hourKey].models[name].tokens += dTok
                                 hourlyMap[hourKey].models[name].cost += dCost
+                                hourlyMap[hourKey].models[name].input_tokens += Math.max(0, dIn)
+                                hourlyMap[hourKey].models[name].output_tokens += Math.max(0, dOut)
+                                hourlyMap[hourKey].models[name].reasoning_tokens += Math.max(0, dReasoning)
+                                hourlyMap[hourKey].models[name].cached_tokens += Math.max(0, dCached)
                             }
                         }
                     }
@@ -280,11 +415,9 @@ function App() {
                         hasBreakdownData = true
                         const b = row.breakdown
 
-                        // Store daily breakdown for charts (including hourly for heatmap)
-                        breakdownByDate[row.stat_date] = {
-                            models: b.models || {},
-                            hourly: b.hourly || {},
-                            endpoints: b.endpoints || {}
+                        // Store daily breakdown for charts
+                        if (b.models) {
+                             breakdownByDate[row.stat_date] = b.models
                         }
 
                         // Merge Models
@@ -296,14 +429,10 @@ function App() {
                                         request_count: 0,
                                         total_tokens: 0,
                                         estimated_cost_usd: 0,
-                                        input_tokens: 0, // Not stored in breakdown currently, assume 0 or avg?
-                                        output_tokens: 0
-                                        // Note: breakdown JSON only stores 'tokens' (total).
-                                        // If we need input/output split, we need to update schema/collector.
-                                        // For now, charts use total_tokens mainly. Cost details table uses input/output.
-                                        // If input/output missing, table might show 0.
-                                        // Update: My collector update DID NOT save input/output split to breakdown.
-                                        // This is a regression for the table view if we switch fully.
+                                        input_tokens: 0,
+                                        output_tokens: 0,
+                                        reasoning_tokens: 0,
+                                        cached_tokens: 0,
                                     }
                                 }
                                 const m = aggregatedBreakdown.models[mName]
@@ -312,46 +441,38 @@ function App() {
                                 m.estimated_cost_usd += data.cost || 0
                                 m.input_tokens += data.input_tokens || 0
                                 m.output_tokens += data.output_tokens || 0
+                                m.reasoning_tokens += data.reasoning_tokens || 0
+                                m.cached_tokens += data.cached_tokens || 0
                             }
                         }
 
                         // Merge Endpoints
                         if (b.endpoints) {
                              for (const [epName, data] of Object.entries(b.endpoints)) {
-                                  if (!aggregatedBreakdown.endpoints[epName]) {
-                                      aggregatedBreakdown.endpoints[epName] = {
-                                          api_endpoint: epName,
-                                          request_count: 0,
-                                          estimated_cost_usd: 0,
-                                          input_tokens: 0,
-                                          output_tokens: 0,
-                                          total_tokens: 0,
-                                          models: {} // Track nested model usage
-                                      }
-                                  }
-                                  const e = aggregatedBreakdown.endpoints[epName]
-                                  e.request_count += data.requests || 0
-                                  e.estimated_cost_usd += data.cost || 0
+                                 if (!aggregatedBreakdown.endpoints[epName]) {
+                                     aggregatedBreakdown.endpoints[epName] = {
+                                         api_endpoint: epName,
+                                         request_count: 0,
+                                         estimated_cost_usd: 0,
+                                         models: {} // Track nested model usage
+                                     }
+                                 }
+                                 const e = aggregatedBreakdown.endpoints[epName]
+                                 e.request_count += data.requests || 0
+                                 e.estimated_cost_usd += data.cost || 0
 
-                                  // Merge nested models if available
-                                  if (data.models) {
-                                      for (const [mName, mData] of Object.entries(data.models)) {
-                                          if (!e.models[mName]) {
-                                              e.models[mName] = { requests: 0, cost: 0, tokens: 0, input_tokens: 0, output_tokens: 0 }
-                                          }
-                                          e.models[mName].requests += mData.requests || 0
-                                          e.models[mName].cost += mData.cost || 0
-                                          e.models[mName].tokens += mData.tokens || 0
-                                          e.models[mName].input_tokens += mData.input_tokens || 0
-                                          e.models[mName].output_tokens += mData.output_tokens || 0
-
-                                          // Aggregate tokens to endpoint level
-                                          e.input_tokens += mData.input_tokens || 0
-                                          e.output_tokens += mData.output_tokens || 0
-                                          e.total_tokens += mData.tokens || 0
-                                      }
-                                  }
-                             }
+                                 // Merge nested models if available
+                                 if (data.models) {
+                                     for (const [mName, mData] of Object.entries(data.models)) {
+                                         if (!e.models[mName]) {
+                                             e.models[mName] = { requests: 0, cost: 0, tokens: 0 }
+                                         }
+                                         e.models[mName].requests += mData.requests || 0
+                                         e.models[mName].cost += mData.cost || 0
+                                         e.models[mName].tokens += mData.tokens || 0
+                                     }
+                                 }
+                            }
                         }
                     }
                 })
@@ -376,7 +497,7 @@ function App() {
                     success_count: fromDB?.success_count ?? (calculated?.success || 0),
                     failure_count: fromDB?.failure_count ?? (calculated?.failure || 0),
                     estimated_cost_usd: fromDB?.estimated_cost_usd ?? 0,
-                    breakdown: breakdownByDate[dateKey] || { models: {}, hourly: {}, endpoints: {} }
+                    models: breakdownByDate[dateKey] || {}
                 }
             }).sort((a, b) => a.stat_date.localeCompare(b.stat_date))
 
@@ -497,7 +618,7 @@ function App() {
                 // CRITICAL: Supabase defaults to 1000 rows. With many snapshots, this query can return thousands of rows.
                 // We MUST increase the limit.
                 const { data: usageRecords } = await supabase.from('model_usage')
-                    .select('snapshot_id, model_name, api_endpoint, request_count, input_tokens, output_tokens, total_tokens, estimated_cost_usd')
+                    .select('snapshot_id, model_name, api_endpoint, request_count, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, estimated_cost_usd')
                     .in('snapshot_id', uniqueSnapIds)
                     .limit(100000); // Increase limit to ensure we get all records
 
@@ -530,10 +651,10 @@ function App() {
                     const allKeys = new Set([...prevModelUsageMap.keys(), ...currentModelUsageMap.keys()]);
 
                     for (const key of allKeys) {
-                        const prev = prevModelUsageMap.get(key) || { request_count: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
-                        const curr = currentModelUsageMap.get(key) || { request_count: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
+                        const prev = prevModelUsageMap.get(key) || { request_count: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
+                        const curr = currentModelUsageMap.get(key) || { request_count: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
 
-                        let deltaReq = 0, deltaIn = 0, deltaOut = 0, deltaTotal = 0, deltaCost = 0;
+                        let deltaReq = 0, deltaIn = 0, deltaOut = 0, deltaReasoning = 0, deltaCached = 0, deltaTotal = 0, deltaCost = 0;
 
                         // Determine if a reset occurred for this specific model+endpoint key
                         // A reset is indicated if current counters are less than previous counters
@@ -545,6 +666,8 @@ function App() {
                             deltaReq = curr.request_count;
                             deltaIn = curr.input_tokens;
                             deltaOut = curr.output_tokens;
+                            deltaReasoning = curr.reasoning_tokens || 0;
+                            deltaCached = curr.cached_tokens || 0;
                             deltaTotal = curr.total_tokens;
                             deltaCost = parseFloat(curr.estimated_cost_usd || 0);
                         } else {
@@ -552,6 +675,8 @@ function App() {
                             deltaReq = curr.request_count - prev.request_count;
                             deltaIn = curr.input_tokens - prev.input_tokens;
                             deltaOut = curr.output_tokens - prev.output_tokens;
+                            deltaReasoning = (curr.reasoning_tokens || 0) - (prev.reasoning_tokens || 0);
+                            deltaCached = (curr.cached_tokens || 0) - (prev.cached_tokens || 0);
                             deltaTotal = curr.total_tokens - prev.total_tokens;
                             deltaCost = parseFloat(curr.estimated_cost_usd || 0) - parseFloat(prev.estimated_cost_usd || 0);
                         }
@@ -560,15 +685,17 @@ function App() {
                         if (deltaReq > 0 || deltaCost > 0) {
                             if (!totalByModel.has(key)) {
                                 totalByModel.set(key, {
-                                    model_name: curr.model_name || prev.model_name, // Use whichever is available
+                                    model_name: curr.model_name || prev.model_name,
                                     api_endpoint: curr.api_endpoint || prev.api_endpoint,
-                                    request_count: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, estimated_cost_usd: 0
+                                    request_count: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0, total_tokens: 0, estimated_cost_usd: 0
                                 });
                             }
                             const item = totalByModel.get(key);
                             item.request_count += deltaReq;
                             item.input_tokens += deltaIn;
                             item.output_tokens += deltaOut;
+                            item.reasoning_tokens += deltaReasoning;
+                            item.cached_tokens += deltaCached;
                             item.total_tokens += deltaTotal;
                             item.estimated_cost_usd += deltaCost;
                         }
@@ -588,10 +715,12 @@ function App() {
                     if (!modelMap.has(mName)) {
                         modelMap.set(mName, {
                             model_name: mName,
-                            api_endpoint: data.api_endpoint, // First endpoint found (will be overwritten if mult)
+                            api_endpoint: data.api_endpoint,
                             request_count: 0,
                             input_tokens: 0,
                             output_tokens: 0,
+                            reasoning_tokens: 0,
+                            cached_tokens: 0,
                             total_tokens: 0,
                             estimated_cost_usd: 0
                         })
@@ -600,6 +729,8 @@ function App() {
                     mExisting.request_count += data.request_count
                     mExisting.input_tokens += data.input_tokens
                     mExisting.output_tokens += data.output_tokens
+                    mExisting.reasoning_tokens += data.reasoning_tokens || 0
+                    mExisting.cached_tokens += data.cached_tokens || 0
                     mExisting.total_tokens += data.total_tokens
                     mExisting.estimated_cost_usd += data.estimated_cost_usd
                     // Note: api_endpoint aggregation for Model List isn't strictly needed as list doesn't show it,
@@ -649,42 +780,23 @@ function App() {
         }
     }, [dateRange])
 
-    // Refetch when dateRange changes
+    // Refetch when dateRange changes (both main data and credential stats)
     useEffect(() => {
-        // This effect runs on initial mount and when dateRange changes.
-        // We want `loading` for the very first fetch, and `isRefreshing` for subsequent dateRange changes.
-        // A simple way to handle this is to call fetchData with `isInitial = true` on mount,
-        // and let the `dateRange` dependency trigger subsequent calls with `isInitial = false` (default).
-        // However, since `fetchData` is in the dependency array, it will be recreated if `dateRange` changes,
-        // and this effect will re-run.
-        // To ensure `isInitial` is true only once, we can use a ref or a separate useEffect for initial load.
-        // Given the instruction, we'll assume `loading` is set to true initially and then `isRefreshing` takes over.
-
-        // On initial mount, `loading` is already true.
-        // For subsequent calls (e.g., dateRange change), `isInitial` will be false by default.
         fetchData(dateRange)
-    }, [dateRange, fetchData])
+        fetchCredentialStats(dateRange)
+    }, [dateRange, fetchData, fetchCredentialStats])
 
     useEffect(() => {
-        // Set up real-time subscription
-        const channel = supabase
-            .channel('usage_changes')
-            .on('postgres_changes',
-                { event: 'INSERT', schema: 'public', table: 'usage_snapshots' },
-                () => {
-                    fetchData(dateRange)
-                }
-            )
-            .subscribe()
-
         // Refresh every 5 minutes
-        const interval = setInterval(() => fetchData(dateRange), 5 * 60 * 1000)
+        const interval = setInterval(() => {
+            fetchData(dateRange)
+            fetchCredentialStats(dateRange)
+        }, 5 * 60 * 1000)
 
         return () => {
-            supabase.removeChannel(channel)
             clearInterval(interval)
         }
-    }, [dateRange, fetchData])
+    }, [dateRange, fetchData, fetchCredentialStats])
 
     // Trigger collector to fetch fresh data from CLIProxy
     const triggerCollector = async () => {
@@ -735,6 +847,7 @@ function App() {
                 // If date range hasn't changed, useEffect won't run, so we must fetch manually
                 if (days === dateRange) {
                     await fetchData()
+                    await fetchCredentialStats(dateRange)
                 }
             } catch (e) {
                 console.error('Trigger error:', e)
@@ -742,38 +855,6 @@ function App() {
             }
         }
         setDateRange(days)
-    }
-
-    // Show loading while checking auth
-    if (authLoading) {
-        return (
-            <div className="app" style={{
-                minHeight: '100vh',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)'
-            }}>
-                <div className="spinner" style={{
-                    width: '40px',
-                    height: '40px',
-                    border: '3px solid rgba(59, 130, 246, 0.2)',
-                    borderTopColor: '#3b82f6',
-                    borderRadius: '50%',
-                    animation: 'spin 1s linear infinite'
-                }} />
-                <style>{`
-                    @keyframes spin {
-                        to { transform: rotate(360deg); }
-                    }
-                `}</style>
-            </div>
-        )
-    }
-
-    // Show Auth if not logged in
-    if (!session) {
-        return <Auth />
     }
 
     return (
@@ -789,7 +870,9 @@ function App() {
                 dateRange={dateRange}
                 onDateRangeChange={handleDateRangeChange}
                 endpointUsage={endpointUsage}
-                onSignOut={handleSignOut}
+                credentialData={credentialData}
+                credentialLoading={credentialLoading}
+                credentialSetupRequired={credentialSetupRequired}
             />
         </div>
     )

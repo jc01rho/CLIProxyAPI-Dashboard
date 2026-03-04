@@ -868,7 +868,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         fontSize: '11px', fontWeight: 600,
                                         marginBottom: '4px', textTransform: 'uppercase',
                                         letterSpacing: '0.5px', display: 'grid',
-                                        gridTemplateColumns: '1fr 54px 54px 54px 54px',
+                                        gridTemplateColumns: '1fr 46px 46px 46px 46px',
                                         gap: '4px', paddingRight: '4px'
                                     }}>
                                         <span style={{ color: isDarkMode ? '#94A3B8' : '#475569' }}>Model</span>
@@ -881,7 +881,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         const md = filteredModelUsage.find(m => m.model_name === model) || {}
                                         return (
                                             <div key={model} style={{
-                                                display: 'grid', gridTemplateColumns: '1fr 54px 54px 54px 54px',
+                                                display: 'grid', gridTemplateColumns: '1fr 46px 46px 46px 46px',
                                                 gap: '4px', alignItems: 'center',
                                                 padding: '6px 8px',
                                                 background: isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
@@ -891,7 +891,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                                                     <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, boxShadow: `0 0 6px ${color}`, flexShrink: 0 }} />
                                                     <span style={{ fontSize: '11px', fontWeight: 500, color: isDarkMode ? '#F8FAFC' : '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                        {model.length > 18 ? '…' + model.slice(-15) : model}
+                                                        {model}
                                                     </span>
                                                 </div>
                                                 {TOKEN_TYPES.map(t => (

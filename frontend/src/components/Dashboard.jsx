@@ -581,10 +581,11 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                             )}
                         </div>
                     </div>
-                    <div className="chart-body chart-body-dark" style={{ display: 'flex', gap: '20px' }}>
+                    <div className="chart-body chart-body-dark">
                         {usageTrendView === 'models' ? (
-                            <>
-                                <ResponsiveContainer width="62%" height={320}>
+                            <div className="chart-split">
+                                <div className="chart-split-main">
+                                <ResponsiveContainer width="100%" height={320}>
                                     {modelTrendData.length > 0 ? (
                                         <AreaChart data={modelTrendData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                                             <defs>
@@ -676,8 +677,8 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         </AreaChart>
                                     )}
                                 </ResponsiveContainer>
-                                <div className="chart-legend-panel" style={{
-                                    width: '36%',
+                                </div>{/* chart-split-main */}
+                                <div className="chart-legend-panel chart-split-legend" style={{
                                     display: 'flex',
                                     flexDirection: 'column',
                                     gap: '8px',
@@ -760,12 +761,12 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         )
                                     })}
                                 </div>
-                            </>
+                            </div>{/* chart-split */}
                         ) : (
                             /* Token Types: Clustered stacked column — X = time, 4 clusters per tick, stacks = models */
-                            <div style={{ display: 'flex', gap: '20px', minHeight: 320, flex: 1, minWidth: 0 }}>
+                            <div className="chart-split" style={{ minHeight: 320 }}>
                                 {/* Chart column */}
-                                <div style={{ flex: 1, minWidth: 0 }}>
+                                <div className="chart-split-main">
                                     {/* Token type legend (opacity key) */}
                                     <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 8, paddingLeft: 4 }}>
                                         {TOKEN_TYPES.map(({ label, color, suffix }) => (
@@ -861,18 +862,18 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                     </ResponsiveContainer>
                                 </div>
                                 {/* Legend panel (right side) — same style as model legend */}
-                                <div style={{ width: '240px', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '30px', overflowY: 'auto', maxHeight: '340px' }}>
+                                <div className="chart-legend-panel chart-split-legend" style={{ display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '10px', overflowY: 'auto', maxHeight: '340px' }}>
                                     {/* Column headers */}
                                     <div style={{
                                         fontSize: '11px', fontWeight: 600,
                                         marginBottom: '4px', textTransform: 'uppercase',
                                         letterSpacing: '0.5px', display: 'grid',
-                                        gridTemplateColumns: '1fr repeat(4, 52px)',
-                                        gap: '2px', paddingRight: '4px'
+                                        gridTemplateColumns: '1fr auto auto auto auto',
+                                        gap: '6px', paddingRight: '4px'
                                     }}>
                                         <span style={{ color: isDarkMode ? '#94A3B8' : '#475569' }}>Model</span>
                                         {TOKEN_TYPES.map(t => (
-                                            <span key={t.suffix} style={{ textAlign: 'right', color: t.color }}>{t.label.slice(0, 3)}</span>
+                                            <span key={t.suffix} style={{ textAlign: 'right', color: t.color, minWidth: 42 }}>{t.label}</span>
                                         ))}
                                     </div>
                                     {tokenTrendModels.map(model => {
@@ -880,8 +881,8 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         const md = filteredModelUsage.find(m => m.model_name === model) || {}
                                         return (
                                             <div key={model} style={{
-                                                display: 'grid', gridTemplateColumns: '1fr repeat(4, 52px)',
-                                                gap: '2px', alignItems: 'center',
+                                                display: 'grid', gridTemplateColumns: '1fr auto auto auto auto',
+                                                gap: '6px', alignItems: 'center',
                                                 padding: '6px 8px',
                                                 background: isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
                                                 borderRadius: '6px',
@@ -890,11 +891,11 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                                                     <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, boxShadow: `0 0 6px ${color}`, flexShrink: 0 }} />
                                                     <span style={{ fontSize: '11px', fontWeight: 500, color: isDarkMode ? '#F8FAFC' : '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                        {model.length > 16 ? '…' + model.slice(-13) : model}
+                                                        {model.length > 18 ? '…' + model.slice(-15) : model}
                                                     </span>
                                                 </div>
                                                 {TOKEN_TYPES.map(t => (
-                                                    <span key={t.suffix} style={{ fontSize: '11px', fontFamily: 'monospace', textAlign: 'right', color: t.color, fontWeight: 600, whiteSpace: 'nowrap' }}>
+                                                    <span key={t.suffix} style={{ fontSize: '11px', fontFamily: 'monospace', textAlign: 'right', color: t.color, fontWeight: 600, whiteSpace: 'nowrap', minWidth: 42 }}>
                                                         {formatNumber(md[t.dataKey] || 0)}
                                                     </span>
                                                 ))}
@@ -919,10 +920,11 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                         </div>
                     </div>
                     {costView === 'chart' ? (
-                        <div className="chart-body chart-body-dark pie-container" style={{ minHeight: 300, display: 'flex', gap: '20px' }}>
+                        <div className="chart-body chart-body-dark pie-container" style={{ minHeight: 300 }}>
                             {costBreakdown.length > 0 ? (
-                                <>
-                                    <ResponsiveContainer width="55%" height={300}>
+                                <div className="chart-split">
+                                    <div className="chart-split-main">
+                                    <ResponsiveContainer width="100%" height={300}>
                                         <PieChart onClick={() => {
                                             if (costBreakdown.length > 0) {
                                                 const models = {}
@@ -957,8 +959,8 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                             <Tooltip content={<CustomTooltip isDarkMode={isDarkMode} forceCurrency={true} />} />
                                         </PieChart>
                                     </ResponsiveContainer>
-                                    <div className="chart-legend-panel" style={{
-                                        width: '43%',
+                                    </div>{/* chart-split-main */}
+                                    <div className="chart-legend-panel chart-split-legend" style={{
                                         display: 'flex',
                                         flexDirection: 'column',
                                         gap: '6px',
@@ -1046,7 +1048,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                             </div>
                                         ))}
                                     </div>
-                                </>
+                                </div>{/* chart-split */}
                             ) : (
                                 <div className="empty-state">No cost data</div>
                             )}

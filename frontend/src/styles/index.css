@@ -793,6 +793,35 @@ body {
   background: rgba(148, 163, 184, 0.25);
 }
 
+/* ===== Chart Split Layout (chart + legend side-by-side) ===== */
+/* Consistent 65/35 ratio across all chart cards */
+.chart-split {
+  display: flex;
+  gap: 20px;
+  width: 100%;
+  align-items: flex-start;
+}
+
+.chart-split-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.chart-split-legend {
+  width: 35%;
+  flex-shrink: 0;
+}
+
+@media (max-width: 768px) {
+  .chart-split {
+    flex-direction: column;
+  }
+  .chart-split-legend {
+    width: 100%;
+    max-height: 220px;
+  }
+}
+
 /* ===== Selection ===== */
 ::selection {
   background: var(--color-primary);

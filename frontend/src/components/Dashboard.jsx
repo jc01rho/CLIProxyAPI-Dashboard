@@ -163,6 +163,14 @@ const ApiKeyLabel = ({ x, y, width, height, value, data, isDarkMode }) => {
     )
 }
 
+// Token type color constants (distinct colors, not opacity-based)
+const TOKEN_TYPES = [
+    { label: 'Input',     suffix: 'in',  color: '#6366f1', dataKey: 'input_tokens' },
+    { label: 'Output',    suffix: 'out', color: '#8b5cf6', dataKey: 'output_tokens' },
+    { label: 'Cached',    suffix: 'ca',  color: '#f59e0b', dataKey: 'cached_tokens' },
+    { label: 'Reasoning', suffix: 're',  color: '#10b981', dataKey: 'reasoning_tokens' },
+]
+
 // Trend configuration for the unified Usage Trends chart
 const TREND_CONFIG = {
     requests: { stroke: '#3b82f6', name: 'Requests' },
@@ -755,19 +763,14 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                             </>
                         ) : (
                             /* Token Types: Clustered stacked column — X = time, 4 clusters per tick, stacks = models */
-                            <div style={{ display: 'flex', gap: '20px', minHeight: 320 }}>
+                            <div style={{ display: 'flex', gap: '20px', minHeight: 320, flex: 1, minWidth: 0 }}>
                                 {/* Chart column */}
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                     {/* Token type legend (opacity key) */}
                                     <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 8, paddingLeft: 4 }}>
-                                        {[
-                                            { label: 'Input', opacity: 1.0, suffix: 'in' },
-                                            { label: 'Output', opacity: 0.85, suffix: 'out' },
-                                            { label: 'Cached', opacity: 0.55, suffix: 'ca' },
-                                            { label: 'Reasoning', opacity: 0.40, suffix: 're' },
-                                        ].map(({ label, opacity, suffix }) => (
-                                            <span key={suffix} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: isDarkMode ? '#94A3B8' : '#64748B' }}>
-                                                <span style={{ width: 10, height: 10, borderRadius: 2, background: `rgba(99,102,241,${opacity})`, display: 'inline-block' }} />
+                                        {TOKEN_TYPES.map(({ label, color, suffix }) => (
+                                            <span key={suffix} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color }}>
+                                                <span style={{ width: 10, height: 10, borderRadius: 2, background: color, display: 'inline-block' }} />
                                                 {label}
                                             </span>
                                         ))}
@@ -843,76 +846,58 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                 }}
                                                 cursor={{ fill: isDarkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' }}
                                             />
-                                            {/* 4 clusters: Input (opacity 1.0), Output (0.85), Cached (0.55), Reasoning (0.40) */}
-                                            {tokenTrendModels.map((model, i) => (
-                                                <Bar key={`${model}-in`} dataKey={`${model}||in`} stackId="in"
-                                                    fill={getModelColor(model)} fillOpacity={1.0}
-                                                    radius={i === tokenTrendModels.length - 1 ? [3, 3, 0, 0] : [0, 0, 0, 0]}
-                                                    isAnimationActive={chartAnimated} animationDuration={1000} animationBegin={i * 60}
-                                                />
-                                            ))}
-                                            {tokenTrendModels.map((model, i) => (
-                                                <Bar key={`${model}-out`} dataKey={`${model}||out`} stackId="out"
-                                                    fill={getModelColor(model)} fillOpacity={0.85}
-                                                    radius={i === tokenTrendModels.length - 1 ? [3, 3, 0, 0] : [0, 0, 0, 0]}
-                                                    isAnimationActive={chartAnimated} animationDuration={1000} animationBegin={i * 60}
-                                                />
-                                            ))}
-                                            {tokenTrendModels.map((model, i) => (
-                                                <Bar key={`${model}-ca`} dataKey={`${model}||ca`} stackId="ca"
-                                                    fill={getModelColor(model)} fillOpacity={0.55}
-                                                    radius={i === tokenTrendModels.length - 1 ? [3, 3, 0, 0] : [0, 0, 0, 0]}
-                                                    isAnimationActive={chartAnimated} animationDuration={1000} animationBegin={i * 60}
-                                                />
-                                            ))}
-                                            {tokenTrendModels.map((model, i) => (
-                                                <Bar key={`${model}-re`} dataKey={`${model}||re`} stackId="re"
-                                                    fill={getModelColor(model)} fillOpacity={0.40}
-                                                    radius={i === tokenTrendModels.length - 1 ? [3, 3, 0, 0] : [0, 0, 0, 0]}
-                                                    isAnimationActive={chartAnimated} animationDuration={1000} animationBegin={i * 60}
-                                                />
-                                            ))}
+                                            {/* Bars: color = token type (distinct), stacked by model (opacity gradient) */}
+                                            {TOKEN_TYPES.map(({ suffix, color }) =>
+                                                tokenTrendModels.map((model, i) => (
+                                                    <Bar key={`${model}-${suffix}`} dataKey={`${model}||${suffix}`} stackId={suffix}
+                                                        fill={color}
+                                                        fillOpacity={1 - (i * 0.12)}
+                                                        radius={i === tokenTrendModels.length - 1 ? [3, 3, 0, 0] : [0, 0, 0, 0]}
+                                                        isAnimationActive={chartAnimated} animationDuration={1000} animationBegin={i * 60}
+                                                    />
+                                                ))
+                                            )}
                                         </BarChart>
                                     </ResponsiveContainer>
                                 </div>
-                                {/* Legend panel (right side) */}
-                                <div style={{ width: '28%', display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '30px', overflowY: 'auto', maxHeight: '340px' }}>
+                                {/* Legend panel (right side) — same style as model legend */}
+                                <div style={{ width: '240px', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '30px', overflowY: 'auto', maxHeight: '340px' }}>
+                                    {/* Column headers */}
                                     <div style={{
                                         fontSize: '11px', fontWeight: 600,
-                                        color: isDarkMode ? '#94A3B8' : '#475569',
                                         marginBottom: '4px', textTransform: 'uppercase',
                                         letterSpacing: '0.5px', display: 'grid',
-                                        gridTemplateColumns: '1fr auto auto auto auto',
-                                        gap: '4px', paddingRight: '4px'
+                                        gridTemplateColumns: '1fr repeat(4, 52px)',
+                                        gap: '2px', paddingRight: '4px'
                                     }}>
-                                        <span>Model</span>
-                                        <span style={{ textAlign: 'right', fontSize: 9 }}>In</span>
-                                        <span style={{ textAlign: 'right', fontSize: 9 }}>Out</span>
-                                        <span style={{ textAlign: 'right', fontSize: 9 }}>Ca</span>
-                                        <span style={{ textAlign: 'right', fontSize: 9 }}>Re</span>
+                                        <span style={{ color: isDarkMode ? '#94A3B8' : '#475569' }}>Model</span>
+                                        {TOKEN_TYPES.map(t => (
+                                            <span key={t.suffix} style={{ textAlign: 'right', color: t.color }}>{t.label.slice(0, 3)}</span>
+                                        ))}
                                     </div>
                                     {tokenTrendModels.map(model => {
                                         const color = getModelColor(model)
                                         const md = filteredModelUsage.find(m => m.model_name === model) || {}
                                         return (
                                             <div key={model} style={{
-                                                display: 'grid', gridTemplateColumns: '1fr auto auto auto auto',
-                                                gap: '4px', alignItems: 'center',
-                                                padding: '5px 6px',
+                                                display: 'grid', gridTemplateColumns: '1fr repeat(4, 52px)',
+                                                gap: '2px', alignItems: 'center',
+                                                padding: '6px 8px',
                                                 background: isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
                                                 borderRadius: '6px',
                                                 border: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'}`,
                                             }}>
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
-                                                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, flexShrink: 0 }} />
-                                                    <span style={{ fontSize: 10, fontWeight: 500, color: isDarkMode ? '#F8FAFC' : '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                        {model.length > 14 ? '…' + model.slice(-11) : model}
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                                                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, boxShadow: `0 0 6px ${color}`, flexShrink: 0 }} />
+                                                    <span style={{ fontSize: '11px', fontWeight: 500, color: isDarkMode ? '#F8FAFC' : '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                        {model.length > 16 ? '…' + model.slice(-13) : model}
                                                     </span>
                                                 </div>
-                                                <span style={{ fontSize: 9, fontFamily: 'monospace', textAlign: 'right', color: isDarkMode ? '#CBD5E1' : '#334155', opacity: 1.0, whiteSpace: 'nowrap' }}>{formatNumber(md.input_tokens || 0)}</span>
-                                                <span style={{ fontSize: 9, fontFamily: 'monospace', textAlign: 'right', color: isDarkMode ? '#CBD5E1' : '#334155', opacity: 0.85, whiteSpace: 'nowrap' }}>{formatNumber(md.output_tokens || 0)}</span>
-                                                <span style={{ fontSize: 9, fontFamily: 'monospace', textAlign: 'right', color: isDarkMode ? '#CBD5E1' : '#334155', opacity: 0.7, whiteSpace: 'nowrap' }}>{formatNumber(md.cached_tokens || 0)}</span>
-                                                <span style={{ fontSize: 9, fontFamily: 'monospace', textAlign: 'right', color: isDarkMode ? '#CBD5E1' : '#334155', opacity: 0.55, whiteSpace: 'nowrap' }}>{formatNumber(md.reasoning_tokens || 0)}</span>
+                                                {TOKEN_TYPES.map(t => (
+                                                    <span key={t.suffix} style={{ fontSize: '11px', fontFamily: 'monospace', textAlign: 'right', color: t.color, fontWeight: 600, whiteSpace: 'nowrap' }}>
+                                                        {formatNumber(md[t.dataKey] || 0)}
+                                                    </span>
+                                                ))}
                                             </div>
                                         )
                                     })}

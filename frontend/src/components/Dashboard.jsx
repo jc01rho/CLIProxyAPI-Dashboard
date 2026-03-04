@@ -37,7 +37,8 @@ const StatCard = ({ label, value, meta, icon, sparklineData, dataKey, stroke }) 
             <div className="stat-value">{value}</div>
             <div className="stat-meta" dangerouslySetInnerHTML={{ __html: meta }}></div>
             <div className="stat-sparkline">
-                <ResponsiveContainer width="100%" height={35} debounce={50}>
+                <div style={{ width: '100%', height: 35 }}>
+                <ResponsiveContainer width="100%" height="100%" debounce={50}>
                     <AreaChart data={sparklineData}>
                         <defs>
                             <linearGradient id={`gradient-${dataKey}-${stroke.replace('#', '')}`} x1="0" y1="0" x2="0" y2="1">
@@ -56,6 +57,7 @@ const StatCard = ({ label, value, meta, icon, sparklineData, dataKey, stroke }) 
                         />
                     </AreaChart>
                 </ResponsiveContainer>
+                </div>
             </div>
         </div>
     )
@@ -581,7 +583,8 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                         {usageTrendView === 'models' ? (
                             <div className="chart-split">
                                 <div className="chart-split-main">
-                                <ResponsiveContainer width="100%" height={320} debounce={50}>
+                                <div style={{ width: '100%', height: 320 }}>
+                                <ResponsiveContainer width="100%" height="100%" debounce={50}>
                                     {modelTrendData.length > 0 ? (
                                         <AreaChart data={modelTrendData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                                             <defs>
@@ -674,6 +677,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         </AreaChart>
                                     )}
                                 </ResponsiveContainer>
+                                </div>
                                 </div>
                                 <div className="chart-legend-panel chart-split-legend" style={{
                                     display: 'flex',
@@ -773,7 +777,8 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                             </span>
                                         ))}
                                     </div>
-                                    <ResponsiveContainer width="100%" height={300} debounce={50}>
+                                    <div style={{ width: '100%', height: 300 }}>
+                                    <ResponsiveContainer width="100%" height="100%" debounce={50}>
                                         <BarChart
                                             data={tokenTrendData}
                                             margin={{ top: 4, right: 10, left: 10, bottom: 5 }}
@@ -858,6 +863,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                             )}
                                         </BarChart>
                                     </ResponsiveContainer>
+                                    </div>
                                 </div>
                                 {/* Legend panel (right side) — same style as model legend */}
                                 <div className="chart-legend-panel chart-split-legend" style={{ display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '10px', overflowY: 'auto', maxHeight: '340px' }}>
@@ -934,7 +940,8 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                             {costBreakdown.length > 0 ? (
                                 <div className="chart-split">
                                     <div className="chart-split-main">
-                                    <ResponsiveContainer width="100%" height={300} debounce={50}>
+                                    <div style={{ width: '100%', height: 300 }}>
+                                    <ResponsiveContainer width="100%" height="100%" debounce={50}>
                                         <PieChart onClick={() => {
                                             if (costBreakdown.length > 0) {
                                                 const models = {}
@@ -969,6 +976,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                             <Tooltip content={<CustomTooltip isDarkMode={isDarkMode} forceCurrency={true} />} />
                                         </PieChart>
                                     </ResponsiveContainer>
+                                    </div>
                                     </div>
                                     <div className="chart-legend-panel chart-split-legend" style={{
                                         display: 'flex',
@@ -1137,7 +1145,8 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                     </div>
                     <div className="chart-body chart-body-dark">
                         {endpointUsage.length > 0 ? (
-                            <ResponsiveContainer width="100%" height={Math.max(200, endpointUsage.length * 45)} debounce={50}>
+                            <div style={{ width: '100%', height: Math.max(200, endpointUsage.length * 45) }}>
+                            <ResponsiveContainer width="100%" height="100%" debounce={50}>
                                 <BarChart data={endpointUsage} layout="vertical" margin={{ left: 10, right: 150 }} onClick={(data) => {
                                     if (data?.activePayload?.[0]?.payload?.models) {
                                         const point = data.activePayload[0].payload
@@ -1177,6 +1186,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                     />
                                 </BarChart>
                             </ResponsiveContainer>
+                            </div>
                         ) : (
                             <div className="empty-state">No endpoint data</div>
                         )}

@@ -469,6 +469,7 @@ body {
 
 .chart-full {
   flex: 1;
+  min-width: 0;
   width: 100%;
 }
 
@@ -815,6 +816,7 @@ body {
 .chart-split-main {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
 }
 
 .chart-split-legend {

@@ -473,9 +473,18 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                     d.get("tokens", {}).get("output_tokens", 0)
                     for d in model_data.get("details", [])
                 )
+                reasoning_tok = sum(
+                    d.get("tokens", {}).get("reasoning_tokens", 0)
+                    for d in model_data.get("details", [])
+                )
+                cached_tok = sum(
+                    d.get("tokens", {}).get("cached_tokens", 0)
+                    for d in model_data.get("details", [])
+                )
                 model_price, _ = find_pricing_for_model(model_name, pricing)
                 cost = calculate_cost(input_tok, output_tok, model_price)
                 total_cost += cost
+
                 model_records.append(
                     {
                         "snapshot_id": snapshot_id,
@@ -485,10 +494,13 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                         "failure_count": model_data.get("failure_count", 0),
                         "input_tokens": input_tok,
                         "output_tokens": output_tok,
+                        "reasoning_tokens": reasoning_tok,
+                        "cached_tokens": cached_tok,
                         "total_tokens": model_data.get("total_tokens", 0),
                         "api_endpoint": api_endpoint,
                     }
                 )
+
 
         if model_records:
             supabase.table("model_usage").insert(model_records).execute()
@@ -615,24 +627,26 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                 p_req = prev.get("request_count", 0)
                 p_fail = prev.get("failure_count", 0)
                 p_tok = prev.get("total_tokens", 0)
-                p_cost = float(prev.get("estimated_cost_usd", 0))
                 p_in = prev.get("input_tokens", 0)
                 p_out = prev.get("output_tokens", 0)
-
+                p_reasoning = prev.get("reasoning_tokens", 0)
+                p_cached = prev.get("cached_tokens", 0)
                 c_req = curr.get("request_count", 0)
                 c_fail = curr.get("failure_count", 0)
                 c_tok = curr.get("total_tokens", 0)
                 c_cost = float(curr.get("estimated_cost_usd", 0))
                 c_in = curr.get("input_tokens", 0)
                 c_out = curr.get("output_tokens", 0)
-
+                c_reasoning = curr.get("reasoning_tokens", 0)
+                c_cached = curr.get("cached_tokens", 0)
                 d_req = c_req - p_req
                 d_fail = c_fail - p_fail
                 d_tok = c_tok - p_tok
                 d_cost = c_cost - p_cost
                 d_in = c_in - p_in
                 d_out = c_out - p_out
-
+                d_reasoning = c_reasoning - p_reasoning
+                d_cached = c_cached - p_cached
                 # Granular restart detection
                 if d_req < 0 or d_tok < 0:
                     d_req = c_req
@@ -641,6 +655,8 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                     d_cost = c_cost
                     d_in = c_in
                     d_out = c_out
+                    d_reasoning = c_reasoning
+                    d_cached = c_cached
 
                 # Sanity Check for False Starts (New Key with huge history)
                 # This prevents massive spikes when a key with existing usage is first seen
@@ -678,6 +694,8 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                             "cost": 0.0,
                             "input_tokens": 0,
                             "output_tokens": 0,
+                            "reasoning_tokens": 0,
+                            "cached_tokens": 0,
                             "failures": 0,
                         }
                     breakdown_deltas["models"][model_name]["requests"] += d_req
@@ -686,7 +704,8 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                     breakdown_deltas["models"][model_name]["cost"] += d_cost
                     breakdown_deltas["models"][model_name]["input_tokens"] += d_in
                     breakdown_deltas["models"][model_name]["output_tokens"] += d_out
-
+                    breakdown_deltas["models"][model_name]["reasoning_tokens"] += d_reasoning
+                    breakdown_deltas["models"][model_name]["cached_tokens"] += d_cached
                     # Add to Endpoints
                     if endpoint not in breakdown_deltas["endpoints"]:
                         breakdown_deltas["endpoints"][endpoint] = {
@@ -754,7 +773,8 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                 cost = float(r.get("estimated_cost_usd", 0))
                 in_tok = r.get("input_tokens", 0)
                 out_tok = r.get("output_tokens", 0)
-
+                reasoning_tok = r.get("reasoning_tokens", 0)
+                cached_tok = r.get("cached_tokens", 0)
                 if model_name not in breakdown_deltas["models"]:
                     breakdown_deltas["models"][model_name] = {
                         "requests": 0,
@@ -762,6 +782,8 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                         "cost": 0.0,
                         "input_tokens": 0,
                         "output_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "cached_tokens": 0,
                         "failures": 0,
                     }
                 breakdown_deltas["models"][model_name]["requests"] += req
@@ -770,7 +792,8 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                 breakdown_deltas["models"][model_name]["cost"] += cost
                 breakdown_deltas["models"][model_name]["input_tokens"] += in_tok
                 breakdown_deltas["models"][model_name]["output_tokens"] += out_tok
-
+                breakdown_deltas["models"][model_name]["reasoning_tokens"] += reasoning_tok
+                breakdown_deltas["models"][model_name]["cached_tokens"] += cached_tok
                 if endpoint not in breakdown_deltas["endpoints"]:
                     breakdown_deltas["endpoints"][endpoint] = {
                         "requests": 0,
@@ -785,6 +808,8 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                 breakdown_deltas["endpoints"][endpoint]["cost"] += cost
                 breakdown_deltas["endpoints"][endpoint]["input_tokens"] += in_tok
                 breakdown_deltas["endpoints"][endpoint]["output_tokens"] += out_tok
+                breakdown_deltas["endpoints"][endpoint]["reasoning_tokens"] += reasoning_tok
+                breakdown_deltas["endpoints"][endpoint]["cached_tokens"] += cached_tok
 
                 # Add to nested models within endpoint
                 if model_name not in breakdown_deltas["endpoints"][endpoint]["models"]:
@@ -794,6 +819,8 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                         "cost": 0.0,
                         "input_tokens": 0,
                         "output_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "cached_tokens": 0,
                     }
                 m_data = breakdown_deltas["endpoints"][endpoint]["models"][model_name]
                 m_data["requests"] += req
@@ -801,6 +828,8 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                 m_data["cost"] += cost
                 m_data["input_tokens"] += in_tok
                 m_data["output_tokens"] += out_tok
+                m_data["reasoning_tokens"] += reasoning_tok
+                m_data["cached_tokens"] += cached_tok
 
                 # Add to Hourly aggregation (current hour)
                 if hour_key not in breakdown_deltas["hourly"]:
@@ -883,18 +912,18 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                     "cost": 0.0,
                     "input_tokens": 0,
                     "output_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "cached_tokens": 0,
                     "failures": 0,
                 }
             existing = existing_breakdown["models"][m]
             existing["requests"] += data["requests"]
             existing["tokens"] += data["tokens"]
             existing["cost"] += data["cost"]
-            existing["input_tokens"] = existing.get("input_tokens", 0) + data.get(
-                "input_tokens", 0
-            )
-            existing["output_tokens"] = existing.get("output_tokens", 0) + data.get(
-                "output_tokens", 0
-            )
+            existing["input_tokens"] = existing.get("input_tokens", 0) + data.get("input_tokens", 0)
+            existing["output_tokens"] = existing.get("output_tokens", 0) + data.get("output_tokens", 0)
+            existing["reasoning_tokens"] = existing.get("reasoning_tokens", 0) + data.get("reasoning_tokens", 0)
+            existing["cached_tokens"] = existing.get("cached_tokens", 0) + data.get("cached_tokens", 0)
             existing["failures"] = existing.get("failures", 0) + data.get("failures", 0)
 
         # Merge Endpoints
@@ -904,13 +933,20 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                     "requests": 0,
                     "tokens": 0,
                     "cost": 0.0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "cached_tokens": 0,
                     "models": {},
                 }
             existing = existing_breakdown["endpoints"][e]
             existing["requests"] += data["requests"]
             existing["tokens"] += data["tokens"]
             existing["cost"] += data["cost"]
-
+            existing["input_tokens"] = existing.get("input_tokens", 0) + data.get("input_tokens", 0)
+            existing["output_tokens"] = existing.get("output_tokens", 0) + data.get("output_tokens", 0)
+            existing["reasoning_tokens"] = existing.get("reasoning_tokens", 0) + data.get("reasoning_tokens", 0)
+            existing["cached_tokens"] = existing.get("cached_tokens", 0) + data.get("cached_tokens", 0)
             # Merge nested models
             if "models" not in existing:
                 existing["models"] = {}
@@ -920,10 +956,18 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                         "requests": 0,
                         "tokens": 0,
                         "cost": 0.0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "cached_tokens": 0,
                     }
                 existing["models"][mName]["requests"] += mData["requests"]
                 existing["models"][mName]["tokens"] += mData["tokens"]
                 existing["models"][mName]["cost"] += mData["cost"]
+                existing["models"][mName]["input_tokens"] = existing["models"][mName].get("input_tokens", 0) + mData.get("input_tokens", 0)
+                existing["models"][mName]["output_tokens"] = existing["models"][mName].get("output_tokens", 0) + mData.get("output_tokens", 0)
+                existing["models"][mName]["reasoning_tokens"] = existing["models"][mName].get("reasoning_tokens", 0) + mData.get("reasoning_tokens", 0)
+                existing["models"][mName]["cached_tokens"] = existing["models"][mName].get("cached_tokens", 0) + mData.get("cached_tokens", 0)
 
         # Merge Hourly data
         for h, data in breakdown_deltas["hourly"].items():
@@ -932,12 +976,20 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                     "requests": 0,
                     "tokens": 0,
                     "cost": 0.0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "cached_tokens": 0,
                     "models": {},
                 }
             existing = existing_breakdown["hourly"][h]
             existing["requests"] += data["requests"]
             existing["tokens"] += data["tokens"]
             existing["cost"] += data["cost"]
+            existing["input_tokens"] = existing.get("input_tokens", 0) + data.get("input_tokens", 0)
+            existing["output_tokens"] = existing.get("output_tokens", 0) + data.get("output_tokens", 0)
+            existing["reasoning_tokens"] = existing.get("reasoning_tokens", 0) + data.get("reasoning_tokens", 0)
+            existing["cached_tokens"] = existing.get("cached_tokens", 0) + data.get("cached_tokens", 0)
 
             # Merge nested models within hour
             if "models" not in existing:
@@ -948,10 +1000,18 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                         "requests": 0,
                         "tokens": 0,
                         "cost": 0.0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "cached_tokens": 0,
                     }
                 existing["models"][mName]["requests"] += mData["requests"]
                 existing["models"][mName]["tokens"] += mData["tokens"]
                 existing["models"][mName]["cost"] += mData["cost"]
+                existing["models"][mName]["input_tokens"] = existing["models"][mName].get("input_tokens", 0) + mData.get("input_tokens", 0)
+                existing["models"][mName]["output_tokens"] = existing["models"][mName].get("output_tokens", 0) + mData.get("output_tokens", 0)
+                existing["models"][mName]["reasoning_tokens"] = existing["models"][mName].get("reasoning_tokens", 0) + mData.get("reasoning_tokens", 0)
+                existing["models"][mName]["cached_tokens"] = existing["models"][mName].get("cached_tokens", 0) + mData.get("cached_tokens", 0)
 
         # --- Self-Healing: Recalculate Totals from Merged Breakdown ---
         # This ensures that the global totals ALWAYS match the sum of the breakdown models.

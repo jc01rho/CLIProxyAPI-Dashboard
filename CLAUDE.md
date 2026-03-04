@@ -76,6 +76,18 @@ http://localhost:8417
 
 Schema auto-applied from `init-db/schema.sql` on first postgres container boot.
 
+> **⚠️ Schema Migration Rule — QUAN TRỌNG:**
+> `init-db/schema.sql` **chỉ chạy một lần duy nhất** khi postgres volume được tạo lần đầu.
+> Nếu thêm cột mới vào schema, **BẮT BUỘC** phải thêm migration SQL tương ứng vào
+> `collector/migrations/` để collector tự chạy khi khởi động.
+>
+> **Khi thay đổi schema (thêm/sửa cột, bảng):**
+> 1. Cập nhật `init-db/schema.sql` (cho fresh install)
+> 2. Tạo file `collector/migrations/NNNN_description.sql` với `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...`
+> 3. Collector sẽ tự apply migrations chưa chạy khi startup (xem `collector/db.py` → `run_migrations()`)
+>
+> **Không làm điều này = production DB thiếu cột, collector crash khi INSERT.**
+
 **Core Tables:**
 - `usage_snapshots`: Raw snapshots collected every 5 minutes
 - `model_usage`: Per-model breakdown of each snapshot (FK → usage_snapshots.id CASCADE DELETE)

@@ -7,6 +7,8 @@ Uses psycopg2 with a ThreadedConnectionPool for thread safety.
 """
 
 import logging
+import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import psycopg2
@@ -252,6 +254,52 @@ class PostgreSQLClient:
 
     def table(self, name: str) -> QueryBuilder:
         return QueryBuilder(self._pool, name)
+
+    def run_migrations(self, migrations_dir: Optional[str] = None) -> None:
+        """
+        Apply pending SQL migration files from migrations_dir (default: ./migrations/).
+        Tracks applied migrations in the `schema_migrations` table.
+        Each .sql file is applied exactly once, in filename order.
+        """
+        if migrations_dir is None:
+            migrations_dir = Path(__file__).parent / 'migrations'
+        else:
+            migrations_dir = Path(migrations_dir)
+
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS schema_migrations (
+                        filename TEXT PRIMARY KEY,
+                        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                conn.commit()
+
+                sql_files = sorted(migrations_dir.glob('*.sql'))
+                if not sql_files:
+                    logger.info("No migration files found in %s", migrations_dir)
+                    return
+
+                for sql_file in sql_files:
+                    cur.execute("SELECT 1 FROM schema_migrations WHERE filename = %s", (sql_file.name,))
+                    if cur.fetchone():
+                        continue
+
+                    logger.info("Applying migration: %s", sql_file.name)
+                    sql = sql_file.read_text(encoding='utf-8')
+                    cur.execute(sql)
+                    cur.execute("INSERT INTO schema_migrations (filename) VALUES (%s)", (sql_file.name,))
+                    conn.commit()
+                    logger.info("Migration applied: %s", sql_file.name)
+
+        except Exception as e:
+            conn.rollback()
+            logger.error("Migration failed: %s", e)
+            raise
+        finally:
+            self._pool.putconn(conn)
 
     def close(self):
         self._pool.closeall()

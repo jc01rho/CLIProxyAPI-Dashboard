@@ -230,7 +230,7 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
             .order('collected_at', desc=True) \
             .limit(1) \
             .execute()
-        last_cost_total = last_cost_resp.data[0].get('cumulative_cost_usd', 0) if last_cost_resp.data else 0
+        last_cost_total = float(last_cost_resp.data[0].get('cumulative_cost_usd', 0) or 0) if last_cost_resp.data else 0.0
         snapshot_data['cumulative_cost_usd'] = last_cost_total  # placeholder, updated after cost calc
 
         snapshot_result = db_client.table('usage_snapshots').insert(snapshot_data).execute()
@@ -291,7 +291,7 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
             inc_success = current_success - prev_snap.get('success_count', 0)
             inc_failure = current_failure - prev_snap.get('failure_count', 0)
             inc_tokens = current_tokens - prev_snap.get('total_tokens', 0)
-            inc_cost = cumulative_cost - (prev_snap.get('cumulative_cost_usd', 0) or 0)
+            inc_cost = cumulative_cost - float(prev_snap.get('cumulative_cost_usd', 0) or 0)
 
             # Detect restart (negative delta) -> Treat current value as the full increment
             if inc_requests < 0 or inc_tokens < 0:
@@ -550,17 +550,17 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
         # (though breakdown shouldn't be empty if we have usage)
 
         final_cost = total_cost_from_breakdown if total_cost_from_breakdown > 0 else (float(existing_daily.get('estimated_cost_usd', 0)) + inc_cost)
-        final_tokens = total_tokens_from_breakdown if total_tokens_from_breakdown > 0 else (existing_daily.get('total_tokens', 0) + inc_tokens)
+        final_tokens = total_tokens_from_breakdown if total_tokens_from_breakdown > 0 else (int(existing_daily.get('total_tokens', 0) or 0) + inc_tokens)
 
         # For requests, we might have successful requests that aren't in model breakdown?
         # No, all requests go through models.
-        final_requests = total_requests_from_breakdown if total_requests_from_breakdown > 0 else (existing_daily.get('total_requests', 0) + inc_requests)
+        final_requests = total_requests_from_breakdown if total_requests_from_breakdown > 0 else (int(existing_daily.get('total_requests', 0) or 0) + inc_requests)
 
         daily_data = {
             'stat_date': today_iso,
             'total_requests': final_requests,
-            'success_count': existing_daily.get('success_count', 0) + inc_success,
-            'failure_count': existing_daily.get('failure_count', 0) + inc_failure,
+            'success_count': int(existing_daily.get('success_count', 0) or 0) + inc_success,
+            'failure_count': int(existing_daily.get('failure_count', 0) or 0) + inc_failure,
             'total_tokens': final_tokens,
             'estimated_cost_usd': final_cost,
             'breakdown': existing_breakdown # Save the updated breakdown
@@ -584,6 +584,7 @@ def main():
     try:
         db_client = init_db()
         logger.info("PostgreSQL client initialized.")
+        db_client.run_migrations()
     except Exception as e:
         logger.critical(f"CRITICAL: Failed to initialize PostgreSQL: {e}", exc_info=True)
         return

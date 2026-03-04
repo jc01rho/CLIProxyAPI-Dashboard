@@ -182,8 +182,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
     // Auto-select time range based on dateRange: hour for today/yesterday, day for longer ranges
     const defaultTimeRange = (dateRange === 'today' || dateRange === 'yesterday') ? 'hour' : 'day'
 
-    // Unified usage trend controls (replaces separate requestTimeRange, tokenTimeRange, modelSort)
-    const [usageTrendMetric, setUsageTrendMetric] = useState('requests')
+    // Unified usage trend controls
     const [usageTrendView, setUsageTrendView] = useState('models')
     const [usageTrendTime, setUsageTrendTime] = useState(defaultTimeRange)
 
@@ -226,7 +225,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
         setChartAnimated(false)
         const timer = setTimeout(() => setChartAnimated(true), 50)
         return () => clearTimeout(timer)
-    }, [usageTrendTime, usageTrendMetric, usageTrendView, costView])
+    }, [usageTrendTime, usageTrendView, costView])
 
     const toggleTheme = () => {
         setIsDarkMode(prev => {
@@ -298,17 +297,13 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
             .map(m => m.model_name)
     }, [filteredModelUsage])
 
-    // Get active top models based on selected metric
+    // Top models sorted by requests (chart always shows requests)
     const activeTopModels = useMemo(() => {
-        if (usageTrendMetric === 'cost') {
-            return [...filteredModelUsage]
-                .sort((a, b) => (b.estimated_cost_usd || 0) - (a.estimated_cost_usd || 0))
-                .slice(0, 5)
-                .map(m => m.model_name)
-        }
-        if (usageTrendMetric === 'tokens') return topTokenModels
-        return topRequestModels
-    }, [filteredModelUsage, usageTrendMetric, topRequestModels, topTokenModels])
+        return [...filteredModelUsage]
+            .sort((a, b) => (b.request_count || 0) - (a.request_count || 0))
+            .slice(0, 5)
+            .map(m => m.model_name)
+    }, [filteredModelUsage])
 
     // Prepare data for Stacked Area Chart (By Model view)
     const modelTrendData = useMemo(() => {
@@ -326,16 +321,14 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                 let val = 0
 
                 if (modelData) {
-                    if (usageTrendMetric === 'cost') val = modelData.cost || modelData.estimated_cost_usd || 0
-                    else if (usageTrendMetric === 'tokens') val = modelData.tokens || modelData.total_tokens || 0
-                    else val = modelData.requests || modelData.request_count || 0
-                }
+                        val = modelData.requests || modelData.request_count || 0
+                    }
 
                 newPoint[modelName] = val
             })
             return newPoint
         })
-    }, [hourlyChartData, dailyChartData, usageTrendTime, activeTopModels, usageTrendMetric])
+    }, [hourlyChartData, dailyChartData, usageTrendTime, activeTopModels])
 
     // Token Type Time-Series: clustered stacked by time, 4 groups per point, stacks = models
     // Hourly for today/yesterday, daily for multi-day ranges
@@ -471,7 +464,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
     }
 
     // Current trend visual config
-    const currentTrend = TREND_CONFIG[usageTrendMetric]
+    const currentTrend = TREND_CONFIG['requests']
 
     // Loading state
     if (loading) {
@@ -563,12 +556,6 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                     <div className="chart-header">
                         <h3>Usage Trends</h3>
                         <div className="chart-controls">
-                            {usageTrendView === 'models' && (
-                                <div className="chart-tabs">
-                                    <button className={`tab ${usageTrendMetric === 'requests' ? 'active' : ''}`} onClick={() => setUsageTrendMetric('requests')}>Requests</button>
-                                    <button className={`tab ${usageTrendMetric === 'tokens' ? 'active' : ''}`} onClick={() => setUsageTrendMetric('tokens')}>Tokens</button>
-                                </div>
-                            )}
                             <div className="chart-tabs">
                                 <button className={`tab ${usageTrendView === 'models' ? 'active' : ''}`} onClick={() => setUsageTrendView('models')}>Models</button>
                                 <button className={`tab ${usageTrendView === 'tokenTypes' ? 'active' : ''}`} onClick={() => setUsageTrendView('tokenTypes')}>Token Types</button>

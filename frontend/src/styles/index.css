@@ -775,9 +775,17 @@ body {
     width: 100%;
   }
 
+  .chart-controls {
+    width: 100%;
+  }
+
   .chart-tabs {
     width: 100%;
     justify-content: center;
+  }
+
+  .chart-controls .chart-tabs {
+    flex: 1;
   }
 
   .tab {
@@ -865,6 +873,9 @@ body {
 @media (max-width: 768px) {
   .chart-split {
     flex-direction: column;
+  }
+  .chart-split-main {
+    width: 100%;
   }
   .chart-split-legend {
     width: 100%;

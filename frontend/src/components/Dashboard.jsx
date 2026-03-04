@@ -791,7 +791,6 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                             </span>
                                         ))}
                                     </div>
-                                    <div style={{ width: '100%', height: 300 }}>
                                     <AutoWidthChart height={300}>
                                         <BarChart
                                             data={tokenTrendData}
@@ -877,7 +876,6 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                             )}
                                         </BarChart>
                                     </AutoWidthChart>
-                                    </div>
                                 </div>
                                 {/* Legend panel (right side) — same style as model legend */}
                                 <div className="chart-legend-panel chart-split-legend" style={{ display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '10px', overflowY: 'auto', maxHeight: '340px' }}>

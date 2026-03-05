@@ -405,7 +405,7 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                         # (prev_usage_map is rebuilt from DB next time), we just need to NOT add to breakdown_deltas.
                         continue
 
-                if d_req > 0 or d_cost > 0:
+                if d_req > 0 or d_cost > 0 or d_cached > 0 or d_reasoning > 0:
                     parts = key.split('|')
                     model_name = parts[0]
                     endpoint = parts[1]

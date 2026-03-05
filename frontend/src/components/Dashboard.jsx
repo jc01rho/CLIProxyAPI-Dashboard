@@ -359,17 +359,23 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
 
     // Token Type Time-Series: clustered stacked by time, 4 groups per point, stacks = models
     // Hourly for today/yesterday, daily for multi-day ranges
-    const { tokenTrendData, tokenTrendModels } = useMemo(() => {
+    const { tokenTrendData, tokenTrendModels, tokenTrendTotals } = useMemo(() => {
         const isHourly = ['today', 'yesterday'].includes(dateRange)
         const sourceData = isHourly ? hourlyStats : dailyStats
 
-        // Find top models that have any token data in this range
+        // Find top models + accumulate per-type totals from same source as chart
         const modelTotals = {}
+        const typeTotals = {} // model → { input_tokens, output_tokens, cached_tokens, reasoning_tokens }
         for (const point of (sourceData || [])) {
             for (const [name, d] of Object.entries(point.models || {})) {
                 const total = (d.input_tokens || 0) + (d.output_tokens || 0) +
                               (d.reasoning_tokens || 0) + (d.cached_tokens || 0)
                 if (total > 0) modelTotals[name] = (modelTotals[name] || 0) + total
+                if (!typeTotals[name]) typeTotals[name] = { input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0 }
+                typeTotals[name].input_tokens    += d.input_tokens    || 0
+                typeTotals[name].output_tokens   += d.output_tokens   || 0
+                typeTotals[name].cached_tokens   += d.cached_tokens   || 0
+                typeTotals[name].reasoning_tokens += d.reasoning_tokens || 0
             }
         }
         const topModels = Object.entries(modelTotals)
@@ -392,7 +398,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
             return row
         })
 
-        return { tokenTrendData: data, tokenTrendModels: topModels }
+        return { tokenTrendData: data, tokenTrendModels: topModels, tokenTrendTotals: typeTotals }
     }, [hourlyStats, dailyStats, dateRange])
 
     // API Endpoint usage - uses granular endpointUsage passed from App.jsx
@@ -861,7 +867,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                     )
                                                 }}
                                                 cursor={{ fill: isDarkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' }}
-                                                allowEscapeViewBox={{ x: false, y: true }}
+                                                allowEscapeViewBox={{ x: true, y: true }}
                                             />
                                             {/* Bars: color = token type (distinct), stacked by model (opacity gradient) */}
                                             {TOKEN_TYPES.map(({ suffix, color }) =>
@@ -894,7 +900,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                     </div>
                                     {tokenTrendModels.map(model => {
                                         const color = getModelColor(model)
-                                        const md = filteredModelUsage.find(m => m.model_name === model) || {}
+                                        const md = tokenTrendTotals[model] || {}
                                         return (
                                             <div key={model}
                                                 onClick={() => openModelDrilldown(model)}

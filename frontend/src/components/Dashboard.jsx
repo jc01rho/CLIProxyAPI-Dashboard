@@ -430,15 +430,23 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
     const sparklineData = hourlyChartData.slice(-12)
     const costSparkline = dailyChartData.length >= 2 ? dailyChartData : [...Array(7)].map((_, i) => ({ cost: i === 6 ? totalCost : totalCost * (i * 0.1) }))
 
-    // Cost breakdown with sorting
-    const costBreakdown = useMemo(() => {
-        const data = (filteredModelUsage || []).map((m) => ({
+    // Cost breakdown datasets
+    const costBreakdownBase = useMemo(() => {
+        return (filteredModelUsage || []).map((m) => ({
             ...m,
             percentage: totalCost > 0 ? ((m.estimated_cost_usd || 0) / totalCost * 100).toFixed(0) : '0',
             color: getModelColor(m.model_name)
         }))
+    }, [filteredModelUsage, totalCost])
 
-        return data.sort((a, b) => {
+    // Legend always sorted by cost (desc)
+    const costLegend = useMemo(() => {
+        return [...costBreakdownBase].sort((a, b) => (b.estimated_cost_usd || 0) - (a.estimated_cost_usd || 0))
+    }, [costBreakdownBase])
+
+    // Table sorting honors user-selected column/direction
+    const costBreakdown = useMemo(() => {
+        return [...costBreakdownBase].sort((a, b) => {
             let aVal = a[tableSort.column]
             let bVal = b[tableSort.column]
 
@@ -452,7 +460,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
 
             return tableSort.direction === 'asc' ? aVal - bVal : bVal - aVal
         })
-    }, [filteredModelUsage, totalCost, tableSort])
+    }, [costBreakdownBase, tableSort])
 
     // Handle table sort
     const handleSort = (column) => {
@@ -955,14 +963,14 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                     </div>
                     {costView === 'chart' ? (
                         <div className="chart-body chart-body-dark pie-container" style={{ minHeight: 300 }}>
-                            {costBreakdown.length > 0 ? (
+                            {costLegend.length > 0 ? (
                                 <div className="chart-split">
                                     <div className="chart-split-main">
                                     <AutoWidthChart height={300}>
                                         <PieChart onClick={() => {
-                                            if (costBreakdown.length > 0) {
+                                            if (costLegend.length > 0) {
                                                 const models = {}
-                                                costBreakdown.forEach(m => {
+                                                costLegend.forEach(m => {
                                                     models[m.model_name] = {
                                                         requests: m.request_count,
                                                         tokens: m.total_tokens,
@@ -973,7 +981,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                             }
                                         }}>
                                             <Pie
-                                                data={costBreakdown}
+                                                data={costLegend}
                                                 dataKey="estimated_cost_usd"
                                                 nameKey="model_name"
                                                 cx="50%"
@@ -986,7 +994,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                 isAnimationActive={chartAnimated}
                                                 animationDuration={1500}
                                             >
-                                                {costBreakdown.map((entry, index) => (
+                                                {costLegend.map((entry, index) => (
                                                     <Cell key={`cell-${index}`} fill={entry.color} fillOpacity={0.85} />
                                                 ))}
                                             </Pie>
@@ -1016,7 +1024,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                             <span>Model</span>
                                             <span>Cost / %</span>
                                         </div>
-                                        {costBreakdown.map((model, index) => (
+                                        {costLegend.map((model, index) => (
                                             <div key={index} onClick={() => openModelDrilldown(model.model_name)} style={{
                                                 display: 'flex',
                                                 alignItems: 'center',

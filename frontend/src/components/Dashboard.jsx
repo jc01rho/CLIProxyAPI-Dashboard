@@ -332,6 +332,14 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
             .map(m => m.model_name)
     }, [filteredModelUsage])
 
+    // Legend ordering for Usage Trends: sort current top models by cost desc
+    const activeTopModelsByCost = useMemo(() => {
+        const modelMap = new Map(filteredModelUsage.map(m => [m.model_name, m]))
+        return [...activeTopModels]
+            .map(name => modelMap.get(name) || { model_name: name })
+            .sort((a, b) => (b.estimated_cost_usd || 0) - (a.estimated_cost_usd || 0))
+    }, [activeTopModels, filteredModelUsage])
+
     // Prepare data for Stacked Area Chart (By Model view)
     const modelTrendData = useMemo(() => {
         const sourceData = usageTrendTime === 'hour' ? hourlyChartData : dailyChartData
@@ -732,9 +740,10 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                         <span style={{ textAlign: 'right' }}>Tokens</span>
                                         <span style={{ textAlign: 'right', color: isDarkMode ? '#10b981' : '#059669' }}>Cost</span>
                                     </div>
-                                    {activeTopModels.map((modelName) => {
+                                    {activeTopModelsByCost.map((model) => {
+                                        const modelName = model.model_name
                                         const color = getModelColor(modelName)
-                                        const modelData = filteredModelUsage.find(m => m.model_name === modelName)
+                                        const modelData = model
 
                                         return (
                                             <div key={modelName} onClick={() => openModelDrilldown(modelName)} style={{
@@ -906,7 +915,10 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                             <span key={t.suffix} style={{ textAlign: 'right', color: t.color }}>{t.short}</span>
                                         ))}
                                     </div>
-                                    {tokenTrendModels.map(model => {
+                                    {tokenTrendModels
+                                        .map(model => ({ model, cost: (filteredModelUsage.find(m => m.model_name === model)?.estimated_cost_usd) || 0 }))
+                                        .sort((a, b) => b.cost - a.cost)
+                                        .map(({ model }) => {
                                         const color = getModelColor(model)
                                         const md = tokenTrendTotals[model] || {}
                                         return (

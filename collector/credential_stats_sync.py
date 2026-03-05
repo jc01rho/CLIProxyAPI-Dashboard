@@ -14,6 +14,7 @@ Data flow:
 """
 
 import logging
+import re
 import requests
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timezone, timedelta, date
@@ -358,7 +359,13 @@ class CredentialStatsSync:
 
         if source:
             s = source.lower()
-            if s.startswith('aizasy') or 'googleapis' in s:
+            # config:<provider>[token] 형식 파싱 (CLIProxyAPIPlus openai-compatibility 계정)
+            # 예: config:z.ai[abcd1234], config:alibaba[...] → provider를 z.ai, alibaba로 추출
+            _config_match = re.match(r'^config:([^\[\]\s]+)\[', s)
+            if _config_match:
+                provider = _config_match.group(1).strip()
+                email = source[:20] + '...' if len(source) > 20 else source
+            elif s.startswith('aizasy') or 'googleapis' in s:
                 provider = 'gemini-api-key'
                 email = source[:20] + '...'
             elif s.endswith('.json'):

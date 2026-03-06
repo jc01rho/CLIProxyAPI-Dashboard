@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { supabase } from './lib/supabase'
+import { selectRows, selectSingle } from './lib/postgrest'
 import Dashboard from './components/Dashboard'
 import Login from './components/Login'
 
@@ -183,18 +183,14 @@ function App() {
             // Try credential_daily_stats first (date-range aware)
             let useDailyStats = false
             try {
-                let query = supabase
-                    .from('credential_daily_stats')
-                    .select('credentials, api_keys, total_credentials, total_api_keys, stat_date')
-
-                if (startDate) {
-                    query = query.gte('stat_date', startDate)
-                }
-                if (endDate) {
-                    query = query.lt('stat_date', endDate)
-                }
-
-                const { data: dailyRows, error: dailyError } = await query
+                const dailyRows = await selectRows('credential_daily_stats', {
+                    select: 'credentials,api_keys,total_credentials,total_api_keys,stat_date',
+                    filters: [
+                        ...(startDate ? [{ column: 'stat_date', operator: 'gte', value: startDate }] : []),
+                        ...(endDate ? [{ column: 'stat_date', operator: 'lt', value: endDate }] : []),
+                    ],
+                })
+                const dailyError = null
 
                 if (!dailyError && dailyRows && dailyRows.length > 0) {
                     useDailyStats = true
@@ -318,11 +314,11 @@ function App() {
 
             // Fallback: use credential_usage_summary (backward compat)
             if (!useDailyStats) {
-                const { data: rows, error } = await supabase
-                    .from('credential_usage_summary')
-                    .select('*')
-                    .eq('id', 1)
-                    .single()
+                const rows = await selectSingle('credential_usage_summary', {
+                    select: '*',
+                    filters: [{ column: 'id', operator: 'eq', value: 1 }],
+                })
+                const error = rows ? null : { code: 'PGRST116', message: 'No rows found' }
 
                 if (error) {
                     if (error.code === 'PGRST205' || error.message?.includes('relation') || error.message?.includes('does not exist') || error.message?.includes('Could not find')) {
@@ -352,11 +348,11 @@ function App() {
             const { startTime, endTime, startDate, endDate } = getDateBoundaries(rangeId)
 
             // 1. Fetch latest snapshot for raw_data (used for Rate Limits)
-            const { data: latestSnapshots } = await supabase
-                .from('usage_snapshots')
-                .select('*')
-                .order('collected_at', { ascending: false })
-                .limit(1)
+            const latestSnapshots = await selectRows('usage_snapshots', {
+                select: '*',
+                order: { column: 'collected_at', ascending: false },
+                limit: 1,
+            })
 
             if (latestSnapshots?.length > 0) {
                 setStats(latestSnapshots[0])
@@ -364,29 +360,24 @@ function App() {
             }
 
             // 2. Fetch ALL snapshots within date range (including model_usage for granular delta)
-            let snapshotsQuery = supabase
-                .from('usage_snapshots')
-                .select('id, collected_at, total_requests, success_count, failure_count, total_tokens, model_usage(model_name, request_count, total_tokens, estimated_cost_usd, input_tokens, output_tokens, reasoning_tokens, cached_tokens)')
-                .order('collected_at', { ascending: true })
-
-            if (startTime) {
-                snapshotsQuery = snapshotsQuery.gte('collected_at', startTime)
-            }
-            if (endTime) {
-                snapshotsQuery = snapshotsQuery.lt('collected_at', endTime)
-            }
-
-            const { data: snapshotsData } = await snapshotsQuery
+            const snapshotsData = await selectRows('usage_snapshots', {
+                select: 'id,collected_at,total_requests,success_count,failure_count,total_tokens,model_usage(model_name,request_count,total_tokens,estimated_cost_usd,input_tokens,output_tokens,reasoning_tokens,cached_tokens)',
+                order: { column: 'collected_at', ascending: true },
+                filters: [
+                    ...(startTime ? [{ column: 'collected_at', operator: 'gte', value: startTime }] : []),
+                    ...(endTime ? [{ column: 'collected_at', operator: 'lt', value: endTime }] : []),
+                ],
+            })
 
             // 2b. Fetch baseline snapshot (just before startTime) for accurate delta calculation
             let baselineSnapshot = null
             if (startTime && snapshotsData?.length > 0) {
-                const { data: baselineData } = await supabase
-                    .from('usage_snapshots')
-                    .select('id, collected_at, total_requests, success_count, failure_count, total_tokens, model_usage(model_name, request_count, total_tokens, estimated_cost_usd)')
-                    .lt('collected_at', startTime)
-                    .order('collected_at', { ascending: false })
-                    .limit(1)
+                const baselineData = await selectRows('usage_snapshots', {
+                    select: 'id,collected_at,total_requests,success_count,failure_count,total_tokens,model_usage(model_name,request_count,total_tokens,estimated_cost_usd)',
+                    filters: [{ column: 'collected_at', operator: 'lt', value: startTime }],
+                    order: { column: 'collected_at', ascending: false },
+                    limit: 1,
+                })
 
                 baselineSnapshot = baselineData?.[0] || null
             }
@@ -491,17 +482,13 @@ function App() {
 
             // For 'all' time, we want all daily stats, otherwise respect startDate
             if (rangeId === 'all' || startDate) {
-                let dailyStatsQuery = supabase
-                    .from('daily_stats')
-                    .select('stat_date, total_requests, total_tokens, success_count, failure_count, estimated_cost_usd, breakdown')
-
-                if (startDate) {
-                    dailyStatsQuery = dailyStatsQuery.gte('stat_date', startDate)
-                }
-                if (endDate) {
-                    dailyStatsQuery = dailyStatsQuery.lt('stat_date', endDate)
-                }
-                const { data: dailyStatsRows } = await dailyStatsQuery
+                const dailyStatsRows = await selectRows('daily_stats', {
+                    select: 'stat_date,total_requests,total_tokens,success_count,failure_count,estimated_cost_usd,breakdown',
+                    filters: [
+                        ...(startDate ? [{ column: 'stat_date', operator: 'gte', value: startDate }] : []),
+                        ...(endDate ? [{ column: 'stat_date', operator: 'lt', value: endDate }] : []),
+                    ],
+                })
                 dailyStatsRows?.forEach(row => {
                     dailyStatsFromDB[row.stat_date] = {
                         total_requests: row.total_requests || 0,
@@ -663,11 +650,12 @@ function App() {
                 // If no baseline (e.g. All Time), assume 0 for all counters.
                 let baselineId = null;
                 if (startTime) {
-                    const { data: baselineData } = await supabase.from('usage_snapshots')
-                        .select('id, collected_at, total_requests, success_count, failure_count, total_tokens')
-                        .lt('collected_at', startTime)
-                        .order('collected_at', { ascending: false })
-                        .limit(1)
+                    const baselineData = await selectRows('usage_snapshots', {
+                        select: 'id,collected_at,total_requests,success_count,failure_count,total_tokens',
+                        filters: [{ column: 'collected_at', operator: 'lt', value: startTime }],
+                        order: { column: 'collected_at', ascending: false },
+                        limit: 1,
+                    })
 
                     baselineId = baselineData?.[0]?.id;
                 }
@@ -718,10 +706,11 @@ function App() {
                 // For now, assuming < 100 restarts is safe for a single 'in' query.
                 // CRITICAL: Supabase defaults to 1000 rows. With many snapshots, this query can return thousands of rows.
                 // We MUST increase the limit.
-                const { data: usageRecords } = await supabase.from('model_usage')
-                    .select('snapshot_id, model_name, api_endpoint, request_count, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, estimated_cost_usd')
-                    .in('snapshot_id', uniqueSnapIds)
-                    .limit(100000); // Increase limit to ensure we get all records
+                const usageRecords = await selectRows('model_usage', {
+                    select: 'snapshot_id,model_name,api_endpoint,request_count,input_tokens,output_tokens,reasoning_tokens,cached_tokens,total_tokens,estimated_cost_usd',
+                    filters: [{ column: 'snapshot_id', operator: 'in', value: uniqueSnapIds }],
+                    limit: 100000,
+                }) // Increase limit to ensure we get all records
 
                 // Group fetched usage records by Snapshot ID -> Map<snapshot_id, Map<composite_key, model_usage_data>>
                 const snapMap = new Map();
@@ -956,6 +945,8 @@ function App() {
             }
         }
         setDateRange(days)
+    }
+
     // Show loading while checking auth
     if (authChecking) {
         return (

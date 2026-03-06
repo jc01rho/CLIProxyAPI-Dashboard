@@ -491,6 +491,7 @@ class CredentialStatsSync:
                     }
                 ),
                 "credentials_used": set(),
+                "display_name": "",
             }
         )
 
@@ -517,6 +518,17 @@ class CredentialStatsSync:
                         cred["info"] = self.resolve_credential(
                             auth_idx, source, by_auth_index, by_name
                         )
+
+                    if not ak["display_name"]:
+                        cred_info = cred["info"] or {}
+                        display_name = (
+                            cred_info.get("label")
+                            or cred_info.get("name")
+                            or cred_info.get("provider")
+                            or ""
+                        )
+                        if display_name:
+                            ak["display_name"] = str(display_name)
 
                     # Token values
                     in_tok = tokens.get("input_tokens", 0)
@@ -611,6 +623,7 @@ class CredentialStatsSync:
             api_key_stats.append(
                 {
                     "api_key_name": ak_name,
+                    "display_name": ak["display_name"] or ak_name,
                     "total_requests": ak["total_requests"],
                     "total_tokens": ak["total_tokens"],
                     "success_count": ak["success_count"],

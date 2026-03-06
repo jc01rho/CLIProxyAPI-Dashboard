@@ -701,12 +701,13 @@ function ApiKeysTable({ items, onSort, SortIcon, expandedRow, setExpandedRow, on
           {items.map((ak) => {
             const rateColor = getSuccessColor(ak.success_rate || 0)
             const isExpanded = expandedRow === ak.api_key_name
+            const apiKeyDisplayName = ak.display_name || ak.api_key_name
             return (
               <tr key={ak.api_key_name}
                 className={`cred-row ${isExpanded ? 'cred-row-expanded' : ''}`}
                 onClick={() => onRowClick ? onRowClick(ak, 'api_key') : setExpandedRow(isExpanded ? null : ak.api_key_name)}
               >
-                <td><span className="cred-apikey-badge">{ak.api_key_name}</span></td>
+                <td><span className="cred-apikey-badge">{apiKeyDisplayName}</span></td>
                 <td className="cred-mono">{formatNumber(ak.total_requests)}</td>
                 <td>
                   <div className="cred-health-cell">
@@ -727,10 +728,11 @@ function ApiKeysTable({ items, onSort, SortIcon, expandedRow, setExpandedRow, on
         const ak = items.find((a) => a.api_key_name === expandedRow)
         if (!ak?.models || Object.keys(ak.models).length === 0) return null
         const modelEntries = Object.entries(ak.models).sort(([, a], [, b]) => (b.requests || 0) - (a.requests || 0))
+        const apiKeyDisplayName = ak.display_name || ak.api_key_name
         return (
           <div className="cred-detail-panel">
             <div className="cred-detail-header">
-              <span className="cred-apikey-badge">{ak.api_key_name}</span>
+              <span className="cred-apikey-badge">{apiKeyDisplayName}</span>
               <span className="cred-detail-email">{ak.credentials_used?.length || 0} credentials used</span>
             </div>
             <div className="cred-detail-models">

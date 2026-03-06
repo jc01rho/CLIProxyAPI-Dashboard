@@ -7,6 +7,5 @@
   },
   "repository": "https://github.com/leolionart/CLIProxyAPI-Dashboard",
   "license": "MIT",
-  "keywords": ["analytics", "skills", "monitoring", "tracking", "dashboard"],
-  "hooks": "./hooks/hooks.json"
+  "keywords": ["analytics", "skills", "monitoring", "tracking", "dashboard"]
 }

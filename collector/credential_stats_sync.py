@@ -329,7 +329,9 @@ class CredentialStatsSync:
             logger.error(f"Failed to fetch auth files: {e}")
             return None
 
-    def build_auth_index_map(self, auth_files: List[Dict]) -> Dict[str, Dict]:
+    def build_auth_index_map(
+        self, auth_files: List[Dict]
+    ) -> Tuple[Dict[str, Dict], Dict[str, Dict]]:
         """
         Build lookup maps from auth files.
         Returns dict keyed by auth_index with credential info.
@@ -362,52 +364,67 @@ class CredentialStatsSync:
         Resolve a credential from auth_index and source.
         Try auth_index first, then source (filename), then fallback.
         """
-        # Try auth_index match
-        if auth_index and auth_index in by_auth_index:
-            return by_auth_index[auth_index]
 
-        # Try source as filename match
-        if source and source in by_name:
-            return by_name[source]
+        def _infer_provider_and_email(src: str) -> Tuple[str, str]:
+            provider = "unknown"
+            email = src or auth_index or "unknown"
 
-        # Fallback - try to infer from source string
-        provider = "unknown"
-        email = source or auth_index or "unknown"
+            if not src:
+                return provider, email
 
-        if source:
-            s = source.lower()
-            # config:<provider>[token] 형식 파싱 (CLIProxyAPIPlus openai-compatibility 계정)
-            # 예: config:z.ai[abcd1234], config:alibaba[...] → provider를 z.ai, alibaba로 추출
-            _config_match = re.match(r"^config:([^\[\]\s]+)\[", s)
+            s = src.lower()
             _config_match = re.match(r"^config:([^\[\]\s]+)\[", s)
             if _config_match:
                 provider = _config_match.group(1).strip()
-                # Keep original provider name for all OpenAI-compatible providers
-                # (z.ai, groq, openrouter, deepseek, etc.)
-                email = source[:20] + "..." if len(source) > 20 else source
-                provider = _config_match.group(1).strip()
-                if provider in ("z.ai", "z-ai", "zai"):
-                    provider = "openai"
-                elif provider in ("google", "googleai"):
-                    provider = "gemini-api-key"
-                elif provider in ("anthropic", "claude"):
-                    provider = "anthropic"
-                email = source[:20] + "..." if len(source) > 20 else source
+                email = src[:20] + "..." if len(src) > 20 else src
             elif s.startswith("aizasy") or "googleapis" in s:
                 provider = "gemini-api-key"
-                email = source[:20] + "..."
+                email = src[:20] + "..."
             elif s.endswith(".json"):
                 # Try to extract provider-email pattern
                 parts = s.replace(".json", "").split("-", 1)
                 if len(parts) == 2:
                     provider = parts[0]
                     email = parts[1].replace("_", ".")
-            elif "@" in source:
-                email = source
+            elif "@" in src:
+                email = src
                 provider = "oauth"
-            elif "=" in source or len(source) > 40:
+            elif "=" in src or len(src) > 40:
                 provider = "api-key"
-                email = source[:20] + "..."
+                email = src[:20] + "..."
+
+            return provider, email
+
+        # Try auth_index match
+        if auth_index and auth_index in by_auth_index:
+            matched = dict(by_auth_index[auth_index])
+            raw_provider = (matched.get("provider") or "").strip().lower()
+            if raw_provider in ("", "unknown"):
+                inferred_provider, inferred_email = _infer_provider_and_email(source)
+                matched["provider"] = inferred_provider
+                if not matched.get("email"):
+                    matched["email"] = inferred_email
+                if not matched.get("label"):
+                    matched["label"] = matched.get("email", inferred_email)
+                if not matched.get("name") and source:
+                    matched["name"] = source
+            return matched
+
+        # Try source as filename match
+        if source and source in by_name:
+            matched = dict(by_name[source])
+            raw_provider = (matched.get("provider") or "").strip().lower()
+            if raw_provider in ("", "unknown"):
+                inferred_provider, inferred_email = _infer_provider_and_email(source)
+                matched["provider"] = inferred_provider
+                if not matched.get("email"):
+                    matched["email"] = inferred_email
+                if not matched.get("label"):
+                    matched["label"] = matched.get("email", inferred_email)
+            return matched
+
+        # Fallback - try to infer from source string
+        provider, email = _infer_provider_and_email(source)
 
         return {
             "provider": provider,

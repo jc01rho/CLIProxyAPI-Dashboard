@@ -1828,6 +1828,107 @@ body {
   box-shadow: 0 0 20px var(--color-glow);
 }
 
+/* ===== AI Boot Screen ===== */
+.ai-boot-screen {
+  background: var(--color-bg-deep) !important;
+}
+
+.boot-terminal {
+  width: min(580px, 90vw);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  box-shadow:
+    0 0 40px rgba(245, 158, 11, 0.08),
+    0 0 80px rgba(0, 0, 0, 0.5);
+  border: 1px solid var(--color-border);
+}
+
+.boot-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px;
+  background: var(--color-bg-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.boot-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.boot-dot.red { background: #ef4444; }
+.boot-dot.yellow { background: #eab308; }
+.boot-dot.green { background: #22c55e; }
+
+.boot-title {
+  margin-left: 8px;
+  font-family: 'Space Grotesk', monospace;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  letter-spacing: 0.5px;
+}
+
+.boot-body {
+  padding: 16px 18px;
+  background: #0a0e1a;
+  min-height: 260px;
+  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+  font-size: 12.5px;
+  line-height: 1.8;
+}
+
+.dashboard.light .boot-body {
+  background: #f0f1f5;
+}
+
+.boot-line {
+  animation: bootFadeIn 0.15s ease-out both;
+  white-space: pre;
+}
+
+.boot-system { color: var(--color-text-secondary); }
+.boot-success { color: var(--color-success); }
+.boot-info { color: var(--color-info); opacity: 0.8; }
+.boot-final {
+  color: var(--color-primary);
+  font-weight: 600;
+  text-shadow: 0 0 12px var(--color-glow);
+}
+
+.boot-latest {
+  animation: bootFadeIn 0.15s ease-out both, bootGlow 0.4s ease-out;
+}
+
+.boot-cursor {
+  display: inline-block;
+  color: var(--color-primary);
+  animation: cursorBlink 0.6s steps(2) infinite;
+}
+
+@keyframes bootFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes bootGlow {
+  0% { filter: brightness(1.6); }
+  100% { filter: brightness(1); }
+}
+
+@keyframes cursorBlink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+
 /* ===== Animations ===== */
 @keyframes spin {
   to {
@@ -3517,4 +3618,109 @@ body {
   padding: 24px 16px;
   color: var(--color-text-muted);
   font-size: 13px;
+}
+
+/* ===== Skill Ranked List ===== */
+.skill-ranked-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 16px 16px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.skill-rank-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+
+.skill-rank-num {
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  min-width: 20px;
+  text-align: right;
+  opacity: 0.7;
+}
+
+.skill-rank-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.skill-rank-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.skill-rank-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.skill-rank-stats {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.skill-stat-pill {
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+  background: rgba(255, 255, 255, 0.05);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.dashboard.light .skill-stat-pill {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.skill-stat-pill.cost {
+  color: #34d399;
+}
+
+.dashboard.light .skill-stat-pill.cost {
+  color: #059669;
+}
+
+.skill-rank-bar-track {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.dashboard.light .skill-rank-bar-track {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.skill-rank-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  opacity: 0.7;
+  transition: width 0.4s ease;
+}
+
+@media (max-width: 640px) {
+  .skill-rank-top {
+    flex-direction: column;
+    gap: 4px;
+  }
+  .skill-rank-stats {
+    flex-wrap: wrap;
+  }
 }

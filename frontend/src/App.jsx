@@ -916,7 +916,7 @@ function App() {
             // 5. Fetch skill runs + daily stats
             let skillRunsQuery = supabase
                 .from('skill_runs')
-                .select('skill_name,session_id,machine_id,triggered_at,tokens_used,output_tokens,duration_ms,model,tool_calls,is_skeleton')
+                .select('skill_name,session_id,machine_id,triggered_at,tokens_used,output_tokens,duration_ms,model,tool_calls,is_skeleton,project_dir')
                 .eq('is_skeleton', false)
                 .order('triggered_at', { ascending: false })
                 .limit(1000)

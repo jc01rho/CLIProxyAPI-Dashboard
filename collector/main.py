@@ -92,10 +92,14 @@ DEFAULT_PRICING = {
     "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
     "_default": {"input": 0.15, "output": 0.60},
 }
+OPENROUTER_PRICES_URL = "https://openrouter.ai/api/v1/models"
 LLM_PRICES_URL = "https://www.llm-prices.com/current-v1.json"
+PRICING_CACHE_TTL_SECONDS = 3600
 
 # --- Globals ---
 db_client: Optional[PostgreSQLClient] = None
+openrouter_pricing_cache: Dict[str, Dict[str, float]] = {}
+openrouter_pricing_last_fetch: float = 0
 remote_pricing_cache: Dict[str, Dict[str, float]] = {}
 remote_pricing_last_fetch: float = 0
 
@@ -301,13 +305,69 @@ def run_full_sync_once():
 
 # --- Core Logic Functions (fetch_remote_pricing, init_db, etc.) ---
 # These functions remain largely the same as before.
-def fetch_remote_pricing() -> Dict[str, Dict[str, float]]:
-    # (Implementation from before)
-    global remote_pricing_cache, remote_pricing_last_fetch
-    if remote_pricing_cache and (time.time() - remote_pricing_last_fetch) < 3600:
-        return remote_pricing_cache
+def fetch_openrouter_pricing() -> Dict[str, Dict[str, float]]:
+    global openrouter_pricing_cache, openrouter_pricing_last_fetch
+    if (
+        openrouter_pricing_cache
+        and (time.time() - openrouter_pricing_last_fetch) < PRICING_CACHE_TTL_SECONDS
+    ):
+        return openrouter_pricing_cache
+
     try:
-        logger.info("Fetching latest pricing from llm-prices.com...")
+        logger.info("Fetching latest pricing from OpenRouter...")
+        response = requests.get(OPENROUTER_PRICES_URL, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+
+        pricing: Dict[str, Dict[str, float]] = {}
+        for item in data.get("data", []):
+            model_id = str(item.get("id") or "").strip().lower()
+            prompt_price = item.get("pricing", {}).get("prompt")
+            completion_price = item.get("pricing", {}).get("completion")
+
+            if not model_id or prompt_price is None or completion_price is None:
+                continue
+
+            try:
+                normalized_price = {
+                    "input": float(prompt_price) * 1_000_000,
+                    "output": float(completion_price) * 1_000_000,
+                }
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Skipping OpenRouter pricing for %s due to invalid prompt/completion values",
+                    model_id,
+                )
+                continue
+
+            pricing[model_id] = normalized_price
+
+            if "/" in model_id:
+                bare_model_id = model_id.split("/", 1)[1]
+                pricing.setdefault(bare_model_id, normalized_price)
+                if ":" in bare_model_id:
+                    pricing.setdefault(bare_model_id.split(":", 1)[0], normalized_price)
+
+        if pricing:
+            openrouter_pricing_cache = pricing
+            openrouter_pricing_last_fetch = time.time()
+            return pricing
+    except Exception as e:
+        logger.warning(f"Could not fetch OpenRouter pricing: {e}")
+
+    return {}
+
+
+def fetch_remote_pricing() -> Dict[str, Dict[str, float]]:
+    global remote_pricing_cache, remote_pricing_last_fetch
+    if (
+        remote_pricing_cache
+        and (time.time() - remote_pricing_last_fetch) < PRICING_CACHE_TTL_SECONDS
+    ):
+        return remote_pricing_cache
+
+    try:
+        logger.info("Fetching fallback pricing from llm-prices.com...")
         response = requests.get(LLM_PRICES_URL, timeout=30)
         response.raise_for_status()
         data = response.json()
@@ -355,7 +415,10 @@ def fetch_usage_data() -> Optional[Dict[str, Any]]:
 
 
 def get_model_pricing() -> Dict[str, Dict[str, float]]:
-    # (Implementation from before)
+    openrouter_pricing = fetch_openrouter_pricing()
+    if openrouter_pricing:
+        return {**DEFAULT_PRICING, **openrouter_pricing}
+
     remote_pricing = fetch_remote_pricing()
     if remote_pricing:
         return {**DEFAULT_PRICING, **remote_pricing}
@@ -365,10 +428,24 @@ def get_model_pricing() -> Dict[str, Dict[str, float]]:
 def find_pricing_for_model(
     model_name: str, pricing: Dict
 ) -> tuple[Dict[str, float], bool]:
-    # (Implementation from before)
     model_lower = model_name.lower()
     if model_lower in pricing:
         return pricing[model_lower], True
+
+    if "/" in model_lower:
+        bare_model_name = model_lower.split("/", 1)[1]
+        if bare_model_name in pricing:
+            return pricing[bare_model_name], True
+        if ":" in bare_model_name:
+            normalized_model_name = bare_model_name.split(":", 1)[0]
+            if normalized_model_name in pricing:
+                return pricing[normalized_model_name], True
+
+    if ":" in model_lower:
+        normalized_model_name = model_lower.split(":", 1)[0]
+        if normalized_model_name in pricing:
+            return pricing[normalized_model_name], True
+
     for pattern, prices in pricing.items():
         if pattern != "_default" and (pattern in model_lower or model_lower in pattern):
             return prices, True

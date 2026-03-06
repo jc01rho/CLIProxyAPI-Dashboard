@@ -272,7 +272,13 @@ function App() {
                         const haystack = `${source} ${email} ${label}`
 
                         const configMatch = source.match(/^config:([^\[\]\s]+)\[/)
-                        if (configMatch) return configMatch[1]
+                        if (configMatch) {
+                            const provider = configMatch[1]
+                            if (['z.ai', 'z-ai', 'zai'].includes(provider)) return 'openai'
+                            if (['google', 'googleai'].includes(provider)) return 'gemini-api-key'
+                            if (['anthropic', 'claude'].includes(provider)) return 'anthropic'
+                            return provider
+                        }
                         if (haystack.includes('gemini') || haystack.includes('googleapis')) return 'gemini-api-key'
                         if (haystack.includes('claude') || haystack.includes('anthropic') || haystack.includes('antigravity')) return 'anthropic'
                         if (haystack.includes('openai') || haystack.includes('chatgpt') || haystack.includes('gpt') || haystack.includes('codex')) return 'openai'

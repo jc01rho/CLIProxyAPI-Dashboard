@@ -306,7 +306,17 @@ function App() {
                     // Recalculate success_rate for aggregated credentials
                     const inferProvider = (cred) => {
                         const rawProvider = (cred.provider || '').trim()
-                        if (rawProvider && rawProvider.toLowerCase() !== 'unknown') return rawProvider
+                        const normalizedRawProvider = rawProvider.toLowerCase()
+                        if (rawProvider) {
+                            if (['unknown', 'unkown', 'unknown provider', 'unkown provider', 'api key provider'].includes(normalizedRawProvider)) {
+                            } else if (normalizedRawProvider === 'api-key provider') {
+                                return 'api-key'
+                            } else if (normalizedRawProvider === 'oauth provider') {
+                                return 'oauth'
+                            } else {
+                                return rawProvider
+                            }
+                        }
 
                         const source = (cred.source || '').toLowerCase()
                         const email = (cred.email || '').toLowerCase()

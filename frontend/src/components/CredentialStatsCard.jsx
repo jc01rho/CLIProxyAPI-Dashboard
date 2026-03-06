@@ -45,6 +45,14 @@ const getProviderHex = (provider) => {
 }
 
 const getCredKey = (cred) => cred.auth_index || cred.source || cred.email
+const getCredDisplayName = (cred) => cred.name || cred.label || cred.email || cred.source || getCredKey(cred)
+const getProviderSubtitle = (provider, cred) => {
+  const normalizedProvider = (provider || '').toLowerCase()
+  if (['api-key', 'unknown', 'oauth'].includes(normalizedProvider) && cred) {
+    return getCredDisplayName(cred)
+  }
+  return getProviderDisplay(provider).name
+}
 
 /** SVG Donut ring */
 const SuccessRing = ({ rate, size = 44, stroke = 3.5 }) => {
@@ -98,6 +106,7 @@ function ProviderTopology({ provider, group, selectedCred, onCredClick }) {
 
   const pc = getProviderDisplay(provider)
   const providerColor = getProviderHex(provider)
+  const providerSubtitle = getProviderSubtitle(provider, group.credentials[0])
 
   // Sort credentials by volume descending, split into left/right
   const sorted = useMemo(() =>
@@ -228,7 +237,7 @@ function ProviderTopology({ provider, group, selectedCred, onCredClick }) {
             <div className="cred-center-node-icon" style={{ background: providerColor }}>
               {pc.name.charAt(0)}
             </div>
-            <div className="cred-center-node-title">{pc.name}</div>
+            <div className="cred-center-node-title">{providerSubtitle}</div>
             <div className="cred-center-node-sub">PROVIDER</div>
             <div className="cred-center-node-stats">
               <div className="cred-center-stat">
@@ -267,7 +276,7 @@ function ProviderTopology({ provider, group, selectedCred, onCredClick }) {
 
 /** Content inside a topology credential card */
 function TopoCardContent({ cred, providerColor }) {
-  const displayName = cred.email || cred.source || cred.label || getCredKey(cred)
+  const displayName = getCredDisplayName(cred)
   const truncated = displayName.length > 20 ? displayName.slice(0, 18) + '...' : displayName
   const rateColor = getSuccessColor(cred.success_rate || 0)
 
@@ -432,7 +441,8 @@ function CredentialDetailContent({ cred }) {
 function CredentialDetailPanel({ cred, onClose }) {
   if (!cred) return null
   const pc = getProviderDisplay(cred.provider)
-  const displayName = cred.email || cred.source || cred.label || getCredKey(cred)
+  const displayName = getCredDisplayName(cred)
+  const providerSubtitle = getProviderSubtitle(cred.provider, cred)
 
   return (
     <div className="cred-detail-side" key={getCredKey(cred)}>
@@ -443,7 +453,7 @@ function CredentialDetailPanel({ cred, onClose }) {
           </span>
           <div className="cred-detail-side-info">
             <span className="cred-detail-side-name">{displayName}</span>
-            <span className="cred-detail-side-sub">{pc.name}</span>
+            <span className="cred-detail-side-sub">{providerSubtitle}</span>
           </div>
         </div>
         <button className="cred-detail-side-close" onClick={onClose} aria-label="Close">&times;</button>
@@ -561,7 +571,7 @@ export default function CredentialStatsCard({ onRowClick, data, isLoading, setup
   }
 
   const dialogTitle = dialogCred
-    ? `${getProviderDisplay(dialogCred.provider).name} — ${dialogCred.email || dialogCred.source || getCredKey(dialogCred)}`
+              ? `${getProviderSubtitle(dialogCred.provider, dialogCred)} — ${getCredDisplayName(dialogCred)}`
     : ''
 
   return (

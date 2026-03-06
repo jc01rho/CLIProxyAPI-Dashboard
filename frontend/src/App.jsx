@@ -4,7 +4,7 @@ import Dashboard from './components/Dashboard'
 
 // Helper to get date boundaries based on range ID
 // Uses local timezone for date display, converts to UTC for timestamp queries
-const getDateBoundaries = (rangeId) => {
+const getDateBoundaries = (rangeId, customRange) => {
     const now = new Date()
 
     // Get today's date in local timezone as YYYY-MM-DD (for daily_stats)
@@ -28,6 +28,13 @@ const getDateBoundaries = (rangeId) => {
     yesterday.setDate(yesterday.getDate() - 1)
     const yesterdayStr = formatDate(yesterday)
     const yesterdayUTC = localMidnightToUTC(yesterday)
+
+    const parseLocalDate = (value) => {
+        if (!value) return null
+        const [y, m, d] = value.split('-').map(Number)
+        if (!y || !m || !d) return null
+        return new Date(y, m - 1, d, 0, 0, 0)
+    }
 
     switch (rangeId) {
         case 'today':
@@ -64,6 +71,25 @@ const getDateBoundaries = (rangeId) => {
                 endTime: null
             }
         }
+        case 'month': {
+            const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
+            return {
+                startDate: formatDate(monthStart),
+                endDate: null,
+                startTime: localMidnightToUTC(monthStart),
+                endTime: null
+            }
+        }
+        case 'quarter': {
+            const qStartMonth = Math.floor(now.getMonth() / 3) * 3
+            const quarterStart = new Date(now.getFullYear(), qStartMonth, 1)
+            return {
+                startDate: formatDate(quarterStart),
+                endDate: null,
+                startTime: localMidnightToUTC(quarterStart),
+                endTime: null
+            }
+        }
         case 'year': {
             const yearStart = new Date(now.getFullYear(), 0, 1)
             return {
@@ -71,6 +97,19 @@ const getDateBoundaries = (rangeId) => {
                 endDate: null,
                 startTime: localMidnightToUTC(yearStart),
                 endTime: null
+            }
+        }
+        case 'custom': {
+            const start = parseLocalDate(customRange?.startDate)
+            const end = parseLocalDate(customRange?.endDate)
+
+            const endExclusive = end ? new Date(end.getFullYear(), end.getMonth(), end.getDate() + 1) : null
+
+            return {
+                startDate: start ? formatDate(start) : null,
+                endDate: endExclusive ? formatDate(endExclusive) : null,
+                startTime: start ? localMidnightToUTC(start) : null,
+                endTime: endExclusive ? localMidnightToUTC(endExclusive) : null
             }
         }
         case 'all':
@@ -85,10 +124,13 @@ function App() {
     const [modelUsage, setModelUsage] = useState([])
     const [endpointUsage, setEndpointUsage] = useState([]) // NEW: granular usage for API Keys
     const [hourlyStats, setHourlyStats] = useState([]) // NEW: hourly breakdown
+    const [skillRuns, setSkillRuns] = useState([])
+    const [skillDailyStats, setSkillDailyStats] = useState([])
     const [loading, setLoading] = useState(true) // Only for initial load
     const [isRefreshing, setIsRefreshing] = useState(false) // For date range changes
     const [lastUpdated, setLastUpdated] = useState(null)
-    const [dateRange, setDateRange] = useState('today') // 'today', 'yesterday', '7d', '30d', 'year', 'all'
+    const [dateRange, setDateRange] = useState('today') // 'today', 'yesterday', '7d', '30d', 'year', 'custom'
+    const [customRange, setCustomRange] = useState({ startDate: null, endDate: null })
 
     // Credential stats state
     const [credentialData, setCredentialData] = useState(null)
@@ -100,7 +142,7 @@ function App() {
         try {
             setCredentialLoading(true)
 
-            const { startDate, endDate } = getDateBoundaries(rangeId)
+            const { startDate, endDate } = getDateBoundaries(rangeId, customRange)
 
             // Try credential_daily_stats first (date-range aware)
             let useDailyStats = false
@@ -238,7 +280,7 @@ function App() {
         } finally {
             setCredentialLoading(false)
         }
-    }, [dateRange])
+    }, [customRange, dateRange])
 
     const fetchData = useCallback(async (rangeId = dateRange, isInitial = false) => {
         try {
@@ -248,7 +290,7 @@ function App() {
                 setIsRefreshing(true)
             }
 
-            const { startTime, endTime, startDate, endDate } = getDateBoundaries(rangeId)
+            const { startTime, endTime, startDate, endDate } = getDateBoundaries(rangeId, customRange)
 
             // 1. Fetch latest snapshot for raw_data (used for Rate Limits)
             const { data: latestSnapshots } = await supabase
@@ -771,6 +813,41 @@ function App() {
                 setEndpointUsage(Array.from(endpointMap.values()))
             }
 
+            // 5. Fetch skill runs + daily stats
+            let skillRunsQuery = supabase
+                .from('skill_runs')
+                .select('skill_name,session_id,machine_id,triggered_at,tokens_used,output_tokens,duration_ms,model,tool_calls,is_skeleton')
+                .eq('is_skeleton', false)
+                .order('triggered_at', { ascending: false })
+                .limit(1000)
+
+            if (startTime) {
+                skillRunsQuery = skillRunsQuery.gte('triggered_at', startTime)
+            }
+            if (endTime) {
+                skillRunsQuery = skillRunsQuery.lt('triggered_at', endTime)
+            }
+
+            let skillDailyQuery = supabase
+                .from('skill_daily_stats')
+                .select('*')
+                .order('stat_date', { ascending: true })
+
+            if (startDate) {
+                skillDailyQuery = skillDailyQuery.gte('stat_date', startDate)
+            }
+            if (endDate) {
+                skillDailyQuery = skillDailyQuery.lt('stat_date', endDate)
+            }
+
+            const [{ data: skillRunsData }, { data: skillDailyData }] = await Promise.all([
+                skillRunsQuery,
+                skillDailyQuery,
+            ])
+
+            setSkillRuns(skillRunsData || [])
+            setSkillDailyStats(skillDailyData || [])
+
             setLoading(false)
             setIsRefreshing(false)
         } catch (error) {
@@ -778,7 +855,7 @@ function App() {
             setLoading(false)
             setIsRefreshing(false)
         }
-    }, [dateRange])
+    }, [customRange, dateRange])
 
     // Refetch when dateRange changes (both main data and credential stats)
     useEffect(() => {
@@ -857,6 +934,14 @@ function App() {
         setDateRange(days)
     }
 
+    const handleCustomRangeApply = (range) => {
+        setCustomRange({
+            startDate: range.startDate || null,
+            endDate: range.endDate || null
+        })
+        setDateRange('custom')
+    }
+
     return (
         <div className="app">
             <Dashboard
@@ -869,10 +954,14 @@ function App() {
                 lastUpdated={lastUpdated}
                 dateRange={dateRange}
                 onDateRangeChange={handleDateRangeChange}
+                customRange={customRange}
+                onCustomRangeApply={handleCustomRangeApply}
                 endpointUsage={endpointUsage}
                 credentialData={credentialData}
                 credentialLoading={credentialLoading}
                 credentialSetupRequired={credentialSetupRequired}
+                skillRuns={skillRuns}
+                skillDailyStats={skillDailyStats}
             />
         </div>
     )

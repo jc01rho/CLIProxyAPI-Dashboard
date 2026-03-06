@@ -14,7 +14,7 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-from flask import Flask, jsonify, Blueprint
+from flask import Flask, jsonify, Blueprint, request
 from flask_cors import CORS
 from db import PostgreSQLClient
 from credential_stats_sync import sync_credential_stats
@@ -124,6 +124,78 @@ def trigger_credential_stats_sync():
     sync_thread = threading.Thread(target=credential_stats_task)
     sync_thread.start()
     return jsonify({"message": "Credential stats sync triggered."}), 202
+
+
+@api_bp.route('/skill-events', methods=['POST'])
+def ingest_skill_events():
+    if not db_client:
+        return jsonify({"error": "database not initialized"}), 500
+
+    body = request.get_json(force=True, silent=True)
+    if not body or 'events' not in body or not isinstance(body.get('events'), list):
+        return jsonify({'error': 'missing events'}), 400
+
+    events = body['events']
+    upserted = 0
+    skipped = 0
+    daily_keys = set()
+
+    for evt in events:
+        skill_name = str(evt.get('skill_name', '')).strip()[:100]
+        session_id = str(evt.get('session_id', '')).strip()[:100]
+        machine_id = str(evt.get('machine_id', '')).strip()[:100]
+
+        if not skill_name or not session_id:
+            skipped += 1
+            continue
+
+        sqlite_id = evt.get('sqlite_id')
+        is_skeleton = bool(evt.get('is_skeleton', False))
+        tokens_used = int(evt.get('tokens_used', 0) or 0)
+        output_tokens = int(evt.get('output_tokens', 0) or 0)
+
+        record = {
+            'machine_id': machine_id,
+            'sqlite_id': sqlite_id,
+            'skill_name': skill_name,
+            'session_id': session_id,
+            'trigger_type': str(evt.get('trigger_type') or 'explicit')[:50],
+            'triggered_at': evt.get('triggered_at') or datetime.utcnow().isoformat(),
+            'arguments': evt.get('arguments'),
+            'tokens_used': tokens_used,
+            'output_tokens': output_tokens,
+            'tool_calls': int(evt.get('tool_calls', 0) or 0),
+            'duration_ms': int(evt.get('duration_ms', 0) or 0),
+            'skill_version_hash': evt.get('skill_version_hash'),
+            'model': evt.get('model'),
+            'is_skeleton': is_skeleton,
+            'synced_at': datetime.utcnow().isoformat(),
+            'project_dir': str(evt.get('project_dir', '')).strip()[:255],
+        }
+
+        try:
+            result = db_client.table('skill_runs').upsert(
+                record,
+                on_conflict=['machine_id', 'sqlite_id', 'session_id', 'skill_name']
+            ).execute()
+            if result.data is not None:
+                upserted += 1
+        except Exception as e:
+            logger.error(f"Failed to upsert skill event: {e}", exc_info=True)
+            skipped += 1
+            continue
+
+        if not is_skeleton and tokens_used >= 0:
+            stat_date = str(record['triggered_at'])[:10]
+            daily_keys.add((stat_date, skill_name, machine_id))
+
+    for stat_date, skill_name, machine_id in daily_keys:
+        try:
+            _upsert_skill_daily_stats(stat_date, skill_name, machine_id)
+        except Exception as e:
+            logger.error(f"Failed to update skill daily stats for {skill_name}: {e}", exc_info=True)
+
+    return jsonify({'status': 'ok', 'upserted': upserted, 'skipped': skipped})
 
 # --- Sync Functions ---
 def run_full_sync_once():
@@ -573,6 +645,37 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
     except Exception as e:
         logger.error(f"Failed to store usage data: {e}")
         return False
+
+
+def _upsert_skill_daily_stats(stat_date: str, skill_name: str, machine_id: str) -> None:
+    if not db_client:
+        return
+
+    rows = db_client.table('skill_runs').select('tokens_used,output_tokens,duration_ms') \
+        .eq('skill_name', skill_name) \
+        .eq('machine_id', machine_id) \
+        .eq('is_skeleton', False) \
+        .gte('triggered_at', f'{stat_date}T00:00:00') \
+        .lt('triggered_at', f'{stat_date}T23:59:59') \
+        .execute().data
+
+    if not rows:
+        return
+
+    total_tokens = sum(r.get('tokens_used', 0) or 0 for r in rows)
+    total_output_tokens = sum(r.get('output_tokens', 0) or 0 for r in rows)
+    total_duration_ms = sum(r.get('duration_ms', 0) or 0 for r in rows)
+
+    db_client.table('skill_daily_stats').upsert({
+        'stat_date': stat_date,
+        'skill_name': skill_name,
+        'machine_id': machine_id,
+        'run_count': len(rows),
+        'total_tokens': total_tokens,
+        'total_output_tokens': total_output_tokens,
+        'total_duration_ms': total_duration_ms,
+        'updated_at': datetime.utcnow().isoformat(),
+    }, on_conflict=['stat_date', 'skill_name', 'machine_id']).execute()
 
 # --- Main Application ---
 def main():

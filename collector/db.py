@@ -221,13 +221,32 @@ class QueryBuilder:
         sql = f'INSERT INTO "{self._table}" ({col_names}) VALUES ({placeholders})'
 
         if self._on_conflict:
-            # All columns except the conflict column get updated
-            update_cols = [c for c in cols if c != self._on_conflict]
-            if update_cols:
-                updates = ', '.join(f'"{c}" = EXCLUDED."{c}"' for c in update_cols)
-                sql += f' ON CONFLICT ("{self._on_conflict}") DO UPDATE SET {updates}'
+            raw_conflict = self._on_conflict
+            conflict_cols = []
+
+            if isinstance(raw_conflict, (list, tuple)):
+                conflict_cols = [str(c).strip().strip('"') for c in raw_conflict if str(c).strip()]
             else:
-                sql += f' ON CONFLICT ("{self._on_conflict}") DO NOTHING'
+                raw_conflict = str(raw_conflict).strip()
+                if raw_conflict.startswith('(') and raw_conflict.endswith(')'):
+                    inner = raw_conflict[1:-1]
+                    conflict_cols = [c.strip().strip('"') for c in inner.split(',') if c.strip()]
+                elif ',' in raw_conflict:
+                    conflict_cols = [c.strip().strip('"') for c in raw_conflict.split(',') if c.strip()]
+                elif raw_conflict:
+                    conflict_cols = [raw_conflict.strip().strip('"')]
+
+            conflict_target = None
+            if conflict_cols:
+                conflict_target = ', '.join(f'"{c}"' for c in conflict_cols)
+
+            if conflict_target:
+                update_cols = [c for c in cols if c not in conflict_cols]
+                if update_cols:
+                    updates = ', '.join(f'"{c}" = EXCLUDED."{c}"' for c in update_cols)
+                    sql += f' ON CONFLICT ({conflict_target}) DO UPDATE SET {updates}'
+                else:
+                    sql += f' ON CONFLICT ({conflict_target}) DO NOTHING'
 
         sql += ' RETURNING *'
         cur.execute(sql, vals)

@@ -12,7 +12,7 @@ from datetime import datetime, date, timezone, timedelta
 from typing import Optional, Dict, Any
 from pathlib import Path
 
-import requests
+import jwt
 from dotenv import load_dotenv
 from flask import Flask, jsonify, Blueprint
 from flask_cors import CORS
@@ -45,6 +45,11 @@ CLIPROXY_MANAGEMENT_KEY = os.getenv('CLIPROXY_MANAGEMENT_KEY', '')
 COLLECTOR_INTERVAL = int(os.getenv('COLLECTOR_INTERVAL_SECONDS', '300'))
 TRIGGER_PORT = int(os.getenv('COLLECTOR_TRIGGER_PORT', '5001'))
 
+# Authentication settings
+AUTH_PASSWORD = os.getenv('AUTH_PASSWORD', '')  # If empty, auth is disabled
+JWT_SECRET = os.getenv('JWT_SECRET', 'cliproxy-dashboard-secret-key-change-in-production')
+JWT_ALGORITHM = 'HS256'
+JWT_EXPIRATION_HOURS = int(os.getenv('JWT_EXPIRATION_HOURS', '8760'))  # Default: 365 days (365 * 24 = 8760)
 
 # Default pricing (USD per 1M tokens) - Updated Dec 2024
 DEFAULT_PRICING = {
@@ -98,9 +103,68 @@ api_bp = Blueprint('api', __name__, url_prefix='/api/collector')
 # --- API Endpoints ---
 @api_bp.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint."""
     return jsonify({"status": "healthy", "timestamp": datetime.now(APP_TIMEZONE).isoformat()})
 
+# --- Authentication Endpoints ---
+@api_bp.route('/auth/login', methods=['POST'])
+def auth_login():
+    """Login endpoint - validates password and returns JWT token."""
+    from flask import request
+    
+    # If no password configured, auth is disabled
+    if not AUTH_PASSWORD:
+        return jsonify({"error": "Authentication not configured"}), 400
+    
+    data = request.get_json()
+    if not data or 'password' not in data:
+        return jsonify({"error": "Password required"}), 400
+    
+    if data['password'] != AUTH_PASSWORD:
+        return jsonify({"error": "Invalid password"}), 401
+    
+    # Generate JWT token
+    expiration = datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS)
+    token = jwt.encode(
+        {'exp': expiration, 'iat': datetime.now(timezone.utc)},
+        JWT_SECRET,
+        algorithm=JWT_ALGORITHM
+    )
+    
+    return jsonify({
+        "token": token,
+        "expires": expiration.isoformat()
+    })
+
+@api_bp.route('/auth/verify', methods=['GET'])
+def auth_verify():
+    """Verify JWT token validity."""
+    from flask import request
+    
+    # If no password configured, auth is disabled - return success
+    if not AUTH_PASSWORD:
+        return jsonify({"valid": True, "auth_enabled": False})
+    
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        return jsonify({"valid": False, "error": "No token provided"}), 401
+    
+    token = auth_header[7:]  # Remove 'Bearer ' prefix
+    
+    try:
+        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return jsonify({"valid": True, "auth_enabled": True})
+    except jwt.ExpiredSignatureError:
+        return jsonify({"valid": False, "error": "Token expired"}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"valid": False, "error": "Invalid token"}), 401
+
+@api_bp.route('/auth/status', methods=['GET'])
+def auth_status():
+    """Check if authentication is enabled."""
+    return jsonify({
+        "auth_enabled": bool(AUTH_PASSWORD),
+        "message": "Authentication required" if AUTH_PASSWORD else "Authentication disabled"
+    })
 @api_bp.route('/trigger', methods=['POST'])
 def trigger_sync_endpoint():
     """Endpoint to manually trigger the full data collection and sync process."""

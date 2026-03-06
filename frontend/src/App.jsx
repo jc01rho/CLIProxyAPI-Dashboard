@@ -1,7 +1,13 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from './lib/supabase'
 import Dashboard from './components/Dashboard'
+import Login from './components/Login'
 
+// Auth context helper - returns auth header if token exists
+const getAuthHeader = () => {
+    const token = localStorage.getItem('auth_token')
+    return token ? { 'Authorization': `Bearer ${token}` } : {}
+}
 // Helper to get date boundaries based on range ID
 // Uses local timezone for date display, converts to UTC for timestamp queries
 const getDateBoundaries = (rangeId) => {
@@ -95,6 +101,78 @@ function App() {
     const [credentialLoading, setCredentialLoading] = useState(true)
     const [credentialSetupRequired, setCredentialSetupRequired] = useState(false)
 
+    // Authentication state
+    const [isAuthenticated, setIsAuthenticated] = useState(false)
+    const [authChecking, setAuthChecking] = useState(true)
+    const [authEnabled, setAuthEnabled] = useState(true)
+
+    // Check authentication status on mount
+    useEffect(() => {
+        const checkAuth = async () => {
+            try {
+                // Check if auth is enabled on server
+                const statusRes = await fetch('/api/collector/auth/status')
+                const statusData = await statusRes.json()
+                
+                if (!statusData.auth_enabled) {
+                    // Auth disabled on server - allow access
+                    setAuthEnabled(false)
+                    setIsAuthenticated(true)
+                    return
+                }
+                
+                setAuthEnabled(true)
+                
+                // Check if we have a stored token
+                const token = localStorage.getItem('auth_token')
+                const expires = localStorage.getItem('auth_expires')
+                
+                if (!token) {
+                    setIsAuthenticated(false)
+                    return
+                }
+                
+                // Check if token is expired
+                if (expires && new Date(expires) < new Date()) {
+                    localStorage.removeItem('auth_token')
+                    localStorage.removeItem('auth_expires')
+                    setIsAuthenticated(false)
+                    return
+                }
+                
+                // Verify token with server
+                const verifyRes = await fetch('/api/collector/auth/verify', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                })
+                
+                if (verifyRes.ok) {
+                    setIsAuthenticated(true)
+                } else {
+                    localStorage.removeItem('auth_token')
+                    localStorage.removeItem('auth_expires')
+                    setIsAuthenticated(false)
+                }
+            } catch (err) {
+                console.error('Auth check failed:', err)
+                // On error, assume auth disabled and allow access
+                setIsAuthenticated(true)
+            } finally {
+                setAuthChecking(false)
+            }
+        }
+        
+        checkAuth()
+    }, [])
+
+    const handleLogin = (token) => {
+        setIsAuthenticated(true)
+    }
+
+    const handleLogout = () => {
+        localStorage.removeItem('auth_token')
+        localStorage.removeItem('auth_expires')
+        setIsAuthenticated(false)
+    }
     // Fetch credential stats filtered by date range
     const fetchCredentialStats = useCallback(async (rangeId = dateRange) => {
         try {
@@ -188,8 +266,31 @@ function App() {
                     }
 
                     // Recalculate success_rate for aggregated credentials
+                    const inferProvider = (cred) => {
+                        const rawProvider = (cred.provider || '').trim()
+                        if (rawProvider && rawProvider.toLowerCase() !== 'unknown') return rawProvider
+
+                        const source = (cred.source || '').toLowerCase()
+                        const email = (cred.email || '').toLowerCase()
+                        const label = (cred.label || '').toLowerCase()
+                        const haystack = `${source} ${email} ${label}`
+
+                        const configMatch = source.match(/^config:([^\[\]\s]+)\[/)
+                        if (configMatch) return configMatch[1]
+                        if (haystack.includes('gemini') || haystack.includes('googleapis')) return 'gemini-api-key'
+                        if (haystack.includes('claude') || haystack.includes('anthropic') || haystack.includes('antigravity')) return 'anthropic'
+                        if (haystack.includes('openai') || haystack.includes('chatgpt') || haystack.includes('gpt') || haystack.includes('codex')) return 'openai'
+                        if (haystack.includes('qwen') || haystack.includes('alibaba')) return 'alibaba'
+                        if (haystack.includes('deepseek')) return 'deepseek'
+                        if (haystack.includes('grok') || haystack.includes('xai')) return 'xai'
+                        if (haystack.includes('@')) return 'oauth'
+                        if (source.includes('=') || source.length > 40) return 'api-key'
+                        return 'unknown'
+                    }
+
                     const aggregatedCreds = Object.values(credMap).map(c => ({
                         ...c,
+                        provider: inferProvider(c),
                         success_rate: c.total_requests > 0
                             ? Math.round((c.success_count / c.total_requests) * 1000) / 10
                             : 0
@@ -855,6 +956,27 @@ function App() {
             }
         }
         setDateRange(days)
+    // Show loading while checking auth
+    if (authChecking) {
+        return (
+            <div style={{
+                minHeight: '100vh',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: '#1a1a2e',
+                color: '#fff'
+            }}>
+                <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: '24px', marginBottom: '10px' }}>Loading...</div>
+                </div>
+            </div>
+        )
+    }
+
+    // Show login if not authenticated (and auth is enabled)
+    if (!isAuthenticated && authEnabled) {
+        return <Login onLogin={handleLogin} authEnabled={authEnabled} />
     }
 
     return (
@@ -873,6 +995,8 @@ function App() {
                 credentialData={credentialData}
                 credentialLoading={credentialLoading}
                 credentialSetupRequired={credentialSetupRequired}
+                onLogout={handleLogout}
+                isAuthenticated={isAuthenticated}
             />
         </div>
     )

@@ -7,3 +7,4 @@ python-dotenv
 waitress
 apscheduler
 gunicorn
+PyJWT>=2.8.0

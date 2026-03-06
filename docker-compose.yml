@@ -38,7 +38,8 @@ services:
 
   # ── Collector: polls CLIProxy, writes to postgres ───────────
   collector:
-    image: ghcr.io/leolionart/cliproxy-collector:latest
+    build:
+      context: ./collector
     platform: linux/amd64
     container_name: cliproxy-collector
     environment:
@@ -48,6 +49,8 @@ services:
       COLLECTOR_INTERVAL_SECONDS: ${COLLECTOR_INTERVAL_SECONDS:-300}
       COLLECTOR_TRIGGER_PORT: 5001
       TIMEZONE_OFFSET_HOURS: ${TIMEZONE_OFFSET_HOURS:-7}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-}
+      JWT_SECRET: ${JWT_SECRET:-cliproxy-dashboard-secret-key-change-in-production}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
@@ -65,7 +68,8 @@ services:
 
   # ── Frontend: nginx proxies /rest/v1 → postgrest, /api → collector
   frontend:
-    image: ghcr.io/leolionart/cliproxy-dashboard:latest
+    build:
+      context: ./frontend
     platform: linux/amd64
     container_name: cliproxy-dashboard
     ports:

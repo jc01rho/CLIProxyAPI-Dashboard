@@ -379,7 +379,12 @@ class CredentialStatsSync:
             # config:<provider>[token] 형식 파싱 (CLIProxyAPIPlus openai-compatibility 계정)
             # 예: config:z.ai[abcd1234], config:alibaba[...] → provider를 z.ai, alibaba로 추출
             _config_match = re.match(r"^config:([^\[\]\s]+)\[", s)
+            _config_match = re.match(r"^config:([^\[\]\s]+)\[", s)
             if _config_match:
+                provider = _config_match.group(1).strip()
+                # Keep original provider name for all OpenAI-compatible providers
+                # (z.ai, groq, openrouter, deepseek, etc.)
+                email = source[:20] + "..." if len(source) > 20 else source
                 provider = _config_match.group(1).strip()
                 if provider in ("z.ai", "z-ai", "zai"):
                     provider = "openai"

@@ -94,9 +94,8 @@ export const PROVIDER_DISPLAY = {
   'codex': { name: 'Codex', colorVar: '--color-brand-openai' },
   'gpt': { name: 'GPT', colorVar: '--color-brand-openai' },
   'chatgpt': { name: 'ChatGPT', colorVar: '--color-brand-openai' },
-  'z.ai': { name: 'OpenAI-Compatible', colorVar: '--color-brand-openai' },
-  'z-ai': { name: 'OpenAI-Compatible', colorVar: '--color-brand-openai' },
-  'zai': { name: 'OpenAI-Compatible', colorVar: '--color-brand-openai' },
+  // OpenAI-compatible providers will use fallback display name
+  // (z.ai, groq, openrouter, etc. will show their original names)
   'claude': { name: 'Claude', colorVar: '--color-brand-anthropic' },
   'antigravity': { name: 'Antigravity', colorVar: '--color-brand-anthropic' },
   'anthropic': { name: 'Anthropic', colorVar: '--color-brand-anthropic' },

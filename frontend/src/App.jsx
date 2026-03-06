@@ -273,6 +273,10 @@ function App() {
 
                         const configMatch = source.match(/^config:([^\[\]\s]+)\[/)
                         if (configMatch) {
+                            // Keep original provider name for all OpenAI-compatible providers
+                            return configMatch[1]
+                        }
+                        if (configMatch) {
                             const provider = configMatch[1]
                             if (['z.ai', 'z-ai', 'zai'].includes(provider)) return 'openai'
                             if (['google', 'googleai'].includes(provider)) return 'gemini-api-key'

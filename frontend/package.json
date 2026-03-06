@@ -1,7 +1,7 @@
 {
     "name": "cliproxy-dashboard",
     "private": true,
-    "version": "2.3.3",
+    "version": "2.4.0",
     "type": "module",
     "scripts": {
         "dev": "vite",
@@ -11,6 +11,7 @@
     "dependencies": {
         "dotenv": "^17.2.3",
         "react": "^18.3.1",
+        "react-date-range": "^2.0.1",
         "react-dom": "^18.3.1",
         "recharts": "^2.12.7"
     },

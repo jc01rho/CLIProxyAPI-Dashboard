@@ -6,6 +6,13 @@ This document describes the technical challenges faced when calculating usage st
 
 CLIProxy Dashboard collects periodic snapshots of API usage from CLIProxy. Each snapshot contains cumulative counters (requests, tokens, cost) for each model and API endpoint. The dashboard needs to calculate **actual usage** within specific date ranges (Today, Yesterday, 7 Days, etc.).
 
+## Current flow (Mar 2026)
+
+- **Backend-first aggregation:** The collector now calculates daily deltas and per-model/per-endpoint breakdowns when each snapshot is ingested. Results are stored in `daily_stats.breakdown` (JSON) alongside daily totals and cumulative cost.
+- **Snapshot safety nets:** Each ingest compares the latest snapshot to the previous one to derive increments, detects restarts (counter drops) at both global and model+endpoint levels, and filters false starts (sudden cost spikes where `delta ≈ current`).
+- **Frontend consumption:** For date ranges, the UI first aggregates `daily_stats` rows (and their breakdowns). If breakdown data is missing (old installs or partial migrations), it falls back to the snapshot-delta logic described in the challenges below.
+- **Hourly view:** Still uses snapshot deltas computed client-side because `daily_stats` is per-day.
+
 ## Core Challenges
 
 ### Challenge 1: Cumulative vs Delta Data
@@ -212,17 +219,20 @@ For single-day ranges:
 
 ## Summary of Current Implementation
 
-| Range Type | Calculation Method |
-|------------|-------------------|
-| **Today/Yesterday** | Segment-based: detect restart, sum (peak-first) + last |
-| **7 Days/30 Days/All** | Sum of daily deltas: calculate delta per day, then sum |
-| **Key Strategy** | `model_name|||api_endpoint` combo to track all endpoints |
+| Area | Current behavior |
+|------|------------------|
+| Backend ingestion | Each snapshot is written to `usage_snapshots` + `model_usage`, cost computed from pricing (default + llm-prices). The collector calculates increments vs the previous snapshot, handles restarts (global and per model+endpoint), filters false starts, and upserts `daily_stats` with a JSON breakdown (models + endpoints). |
+| Frontend range calc | Aggregates `daily_stats` rows (and their breakdowns) for the selected range. If breakdowns are absent (legacy data), it falls back to snapshot-based restart-aware deltas using baseline/critical points. |
+| Hourly view | Derived client-side from snapshot deltas (restart-aware) because `daily_stats` is day-granular. |
+| Key strategy | Composite key `model_name|||api_endpoint` (endpoint defaults to `unknown`). |
+| Pricing | Default pricing in collector with hourly remote override from llm-prices.com; cost is stored per model_usage row and rolled into snapshot cumulative + daily stats. |
 
 ## Code Locations
 
-- **Main calculation logic:** `frontend/src/App.jsx` (lines 195-475)
-- **API Keys chart:** `frontend/src/components/Dashboard.jsx` (endpointUsage useMemo)
-- **Database tables:** `usage_snapshots`, `model_usage` (Supabase)
+- **Backend ingestion + daily aggregation:** `collector/main.py` (`store_usage_data`, restart handling, false-start filtering, daily_stats.breakdown upsert).
+- **Frontend range + hourly calculation (fallback path):** `frontend/src/App.jsx` — snapshot delta + restart detection + hourly map; also consumes daily_stats breakdown when present.
+- **API keys/model charts:** `frontend/src/components/Dashboard.jsx` (endpoint/model breakdown rendering) and `frontend/src/components/SkillsPanel.jsx` for skill usage.
+- **Storage:** `usage_snapshots`, `model_usage`, `daily_stats` (with `breakdown` JSONB), plus credential/skill tables when enabled.
 
 ## Testing Recommendations
 

@@ -40,6 +40,12 @@ curl -O https://raw.githubusercontent.com/leolionart/CLIProxyAPI-Dashboard/main/
 cp .env.example .env
 ```
 
+If you cloned this repository for development, initialize the tracker submodule:
+
+```bash
+git submodule update --init --recursive
+```
+
 ### 2. Configure Environment
 
 Edit `.env`:

@@ -11,8 +11,8 @@
   "plugins": [
     {
       "name": "cliproxy-skill-tracker",
-      "source": "./plugin/cliproxy-skill-tracker",
-      "description": "Track Claude Code skill usage to your CLIProxy Dashboard — tokens, duration, tool calls, project context, all automatic",
+      "source": "./plugin/claude-skills-tracker",
+      "description": "Track Claude Code skill usage to your CLIProxy Dashboard from the shared claude-skills-tracker repository — tokens, duration, tool calls, project context, all automatic",
       "version": "1.0.0",
       "author": {
         "name": "leolionart"

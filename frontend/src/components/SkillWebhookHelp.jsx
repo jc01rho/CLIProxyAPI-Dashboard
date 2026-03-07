@@ -146,6 +146,9 @@ function SetupGuide({ isDarkMode }) {
                             Run these two commands inside Claude Code to add the marketplace and install the tracker plugin.
                             This registers hooks automatically — no manual config needed.
                         </p>
+                        <div className="guide-tip" style={{ marginBottom: 12 }}>
+                            Tracker distribution now comes from the shared <code>claude-skills-tracker</code> repository via this marketplace.
+                        </div>
                         <CodeBlock isDarkMode={isDarkMode} language="claude" code={`/plugin marketplace add leolionart/CLIProxyAPI-Dashboard`} />
                         <CodeBlock isDarkMode={isDarkMode} language="claude" code={`/plugin install cliproxy-skill-tracker`} />
                     </div>

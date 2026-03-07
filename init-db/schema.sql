@@ -11,11 +11,11 @@
 CREATE TABLE IF NOT EXISTS usage_snapshots (
     id BIGSERIAL PRIMARY KEY,
     collected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    total_requests INTEGER NOT NULL DEFAULT 0,
-    success_count INTEGER NOT NULL DEFAULT 0,
-    failure_count INTEGER NOT NULL DEFAULT 0,
+    total_requests BIGINT NOT NULL DEFAULT 0,
+    success_count BIGINT NOT NULL DEFAULT 0,
+    failure_count BIGINT NOT NULL DEFAULT 0,
     total_tokens BIGINT NOT NULL DEFAULT 0,
-    cumulative_cost_usd DECIMAL(10, 6) DEFAULT 0,
+    cumulative_cost_usd DECIMAL(20, 6) DEFAULT 0,
     raw_data JSONB
 );
 
@@ -25,13 +25,13 @@ CREATE TABLE IF NOT EXISTS model_usage (
     snapshot_id BIGINT REFERENCES usage_snapshots(id) ON DELETE CASCADE,
     api_endpoint VARCHAR(255) NOT NULL,
     model_name VARCHAR(255) NOT NULL,
-    request_count INTEGER NOT NULL DEFAULT 0,
+    request_count BIGINT NOT NULL DEFAULT 0,
     input_tokens BIGINT NOT NULL DEFAULT 0,
     output_tokens BIGINT NOT NULL DEFAULT 0,
     reasoning_tokens BIGINT NOT NULL DEFAULT 0,
     cached_tokens BIGINT NOT NULL DEFAULT 0,
     total_tokens BIGINT NOT NULL DEFAULT 0,
-    estimated_cost_usd DECIMAL(10, 6) DEFAULT 0,
+    estimated_cost_usd DECIMAL(20, 6) DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -39,11 +39,11 @@ CREATE TABLE IF NOT EXISTS model_usage (
 CREATE TABLE IF NOT EXISTS daily_stats (
     id BIGSERIAL PRIMARY KEY,
     stat_date DATE NOT NULL UNIQUE,
-    total_requests INTEGER NOT NULL DEFAULT 0,
-    success_count INTEGER NOT NULL DEFAULT 0,
-    failure_count INTEGER NOT NULL DEFAULT 0,
+    total_requests BIGINT NOT NULL DEFAULT 0,
+    success_count BIGINT NOT NULL DEFAULT 0,
+    failure_count BIGINT NOT NULL DEFAULT 0,
     total_tokens BIGINT NOT NULL DEFAULT 0,
-    estimated_cost_usd DECIMAL(10, 6) DEFAULT 0,
+    estimated_cost_usd DECIMAL(20, 6) DEFAULT 0,
     breakdown JSONB,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

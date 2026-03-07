@@ -133,13 +133,17 @@ docker compose up -d
 <details>
 <summary><h2>Skill Tracker Plugin Setup</h2></summary>
 
-Tracker plugin marketplace is now maintained in the dedicated tracker repository.
+Tracker plugin marketplace is maintained in the dedicated tracker repository.
+
+- **Marketplace repo:** `leolionart/claude-skills-tracker`
+- **Plugin install ID:** `claude-skill-tracker`
 
 Inside Claude Code:
 
 ```claude
 /plugin marketplace add leolionart/claude-skills-tracker
 /plugin install claude-skill-tracker
+/reload-plugins
 ```
 
 Optional endpoint override (if dashboard is not local):

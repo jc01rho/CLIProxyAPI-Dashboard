@@ -149,7 +149,7 @@ function SetupGuide({ isDarkMode }) {
                         <div className="guide-tip" style={{ marginBottom: 12 }}>
                             Tracker distribution now comes from the shared <code>claude-skills-tracker</code> repository via this marketplace.
                         </div>
-                        <CodeBlock isDarkMode={isDarkMode} language="claude" code={`/plugin marketplace add leolionart/CLIProxyAPI-Dashboard`} />
+                        <CodeBlock isDarkMode={isDarkMode} language="claude" code={`/plugin marketplace add leolionart/claude-skills-tracker`} />
                         <CodeBlock isDarkMode={isDarkMode} language="claude" code={`/plugin install cliproxy-skill-tracker`} />
                     </div>
                 </div>

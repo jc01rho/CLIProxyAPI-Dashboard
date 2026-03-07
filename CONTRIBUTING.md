@@ -249,8 +249,7 @@ cliproxy-dashboard/
 ├── docker-compose.yml     # Service orchestration
 ├── supabase-schema.sql    # Database schema
 ├── .env.example           # Environment template
-├── README.md              # Main documentation
-├── SETUP.md               # Setup guide
+├── README.md              # Main documentation + setup guide
 ├── CLAUDE.md              # AI assistant context
 └── CONTRIBUTING.md        # This file
 ```
@@ -297,8 +296,7 @@ Always use `.env.example` as template with placeholder values.
 
 - Open an issue for discussion
 - Check existing issues and PRs
-- See [README.md](README.md) for project overview
-- See [SETUP.md](SETUP.md) for setup instructions
+- See [README.md](README.md) for project overview and setup instructions
 
 ---
 

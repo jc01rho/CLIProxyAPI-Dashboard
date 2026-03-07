@@ -39,13 +39,13 @@ Ensure your CLIProxy config includes:
 ```yaml
 remote-management:
   allow-remote: true
-  secret: "your-management-secret-key"
+  secret: "<your-management-secret>"
 ```
 
 Quick verification:
 
 ```bash
-curl -H "Authorization: Bearer your-management-secret-key" \
+curl -H "Authorization: Bearer <your-management-secret>" \
   http://localhost:8317/v0/management/usage
 ```
 
@@ -70,7 +70,7 @@ Edit `.env`:
 ```env
 DB_PASSWORD=your_secure_password_here
 CLIPROXY_URL=http://host.docker.internal:8317
-CLIPROXY_MANAGEMENT_KEY=your-management-secret-key
+CLIPROXY_MANAGEMENT_KEY=<your-management-secret>
 
 # Optional
 COLLECTOR_INTERVAL_SECONDS=300

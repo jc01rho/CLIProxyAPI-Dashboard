@@ -81,9 +81,16 @@ docker compose up -d
 
 Docker will automatically:
 - Start PostgreSQL and create all tables on first boot
-- Start PostgREST as the read-only API layer
 - Start the collector (polls CLIProxy every 5 minutes)
-- Start the frontend dashboard
+- Start PostgREST as the read-only API layer (after collector is healthy)
+- Start the frontend dashboard (after postgrest starts)
+
+### Expected Boot Order (release-safe)
+
+1. `postgres` must be `healthy`
+2. `collector` becomes `healthy` (DB init + migrations done)
+3. `postgrest` starts after `collector` is healthy
+4. `frontend` starts after `collector` is healthy and `postgrest` is started
 
 ### Access Dashboard
 
@@ -135,6 +142,22 @@ curl -X POST http://localhost:8417/api/collector/trigger
 docker compose pull
 docker compose up -d
 ```
+
+### Post-release smoke checks
+
+```bash
+docker compose ps
+docker compose logs --tail=200 collector postgrest frontend
+curl http://localhost:8417/api/collector/health
+curl "http://localhost:8417/rest/v1/daily_stats?select=date,total_requests&order=date.desc&limit=1"
+curl -X POST http://localhost:8417/api/collector/trigger
+```
+
+Success criteria:
+- `collector` healthy and migration logs show applied/skipped without DB errors
+- `postgrest` has no missing column/table errors after startup
+- Collector health endpoint responds successfully
+- PostgREST `daily_stats` read path works before and after manual trigger
 
 ---
 

@@ -171,6 +171,10 @@ function SetupGuide({ isDarkMode }) {
                             <strong>Local setup?</strong> If your dashboard runs on the same machine
                             at <code>localhost:8417</code>, this step is optional — that's the default URL.
                         </div>
+                        <div className="guide-tip" style={{ marginTop: 10 }}>
+                            <strong>Important dedupe note:</strong> if you already installed <code>cliproxy-skill-tracker</code> from marketplace,
+                            do <strong>not</strong> keep a manual <code>PostToolUse: Skill</code> hook at the same time. Running both can send duplicate events.
+                        </div>
                     </div>
                 </div>
             </div>
@@ -199,6 +203,10 @@ function SetupGuide({ isDarkMode }) {
                         />
                         <p className="guide-desc" style={{ marginTop: 12 }}>
                             Expected response: <code>{`{"status":"ok","upserted":1,"skipped":0}`}</code>
+                        </p>
+                        <p className="guide-desc" style={{ marginTop: 8 }}>
+                            Dedupe checklist: one skill invocation should map to one unique <code>event_uid</code>.
+                            If counts look doubled, remove duplicate manual/plugin hooks and test again.
                         </p>
                         <div className="guide-tip">
                             <strong>What the plugin tracks:</strong> skill name, session ID, project directory,

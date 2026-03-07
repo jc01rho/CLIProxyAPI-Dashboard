@@ -10,7 +10,7 @@ import ChartDialog from './ChartDialog'
 import DrilldownPanel from './DrilldownPanel'
 import SkillsPanel from './SkillsPanel'
 import SetupGuide from './SkillWebhookHelp'
-import { getModelColor } from '../lib/brandColors'
+import { getModelColor, CHART_TYPOGRAPHY } from '../lib/brandColors'
 import 'react-date-range/dist/styles.css'
 import 'react-date-range/dist/theme/default.css'
 
@@ -108,14 +108,13 @@ const CustomTooltip = ({ active, payload, label, isDarkMode, forceCurrency }) =>
         }}>
             <div style={{
                 color: isDarkMode ? '#F8FAFC' : '#0F172A',
-                fontWeight: 600,
-                marginBottom: 6,
-                fontFamily: 'Space Grotesk, sans-serif'
+                ...CHART_TYPOGRAPHY.tooltipLabel,
+                marginBottom: 6
             }}>{label}</div>
             {payload.map((p, i) => (
                 <div key={i} style={{
                     color: isDarkMode ? '#94A3B8' : '#475569',
-                    fontSize: 12,
+                    ...CHART_TYPOGRAPHY.tooltipItem,
                     display: 'flex',
                     gap: 6,
                     alignItems: 'center'
@@ -146,7 +145,7 @@ const CustomTooltip = ({ active, payload, label, isDarkMode, forceCurrency }) =>
                                 <span style={{ color: isDarkMode ? '#CBD5E1' : '#334155', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 140 }}>
                                     {mName}
                                 </span>
-                                <span style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'monospace', fontSize: 10 }}>
+                                <span style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: CHART_TYPOGRAPHY.mono.fontFamily, fontSize: 10 }}>
                                     ${mData.cost ? (mData.cost < 1 ? '$' + mData.cost.toFixed(2) : '$' + Math.round(mData.cost).toLocaleString('en-US')) : '$0'}
                                 </span>
                             </div>
@@ -162,13 +161,27 @@ const CustomTooltip = ({ active, payload, label, isDarkMode, forceCurrency }) =>
     )
 }
 
-// Custom Label for API Keys chart to show requests and cost
-const ApiKeyLabel = ({ x, y, width, height, value, data, isDarkMode }) => {
+// Custom Label for API Keys chart to show context-aware metrics
+const shortenApiKeyLabel = (key) => {
+    const v = String(key || '')
+    if (v.length <= 16) return v
+    return `${v.slice(0, 6)}...${v.slice(-4)}`
+}
+
+const ApiKeyLabel = ({ x, y, width, height, value, data, isDarkMode, endpointSort }) => {
     const item = data
     if (!item) return null
 
     const labelX = x + width + 10
     const labelY = y + height / 2
+    const costText = `$${(item.cost || 0) < 1 ? (item.cost || 0).toFixed(2) : Math.round(item.cost || 0).toLocaleString('en-US')}`
+    const tokenCount = item.tokens || 0
+    const requestsCount = item.requests || 0
+    const primaryText = endpointSort === 'cost'
+        ? (tokenCount > 0
+            ? `${costText} | ${tokenCount.toLocaleString()} tokens`
+            : `${costText} | ${requestsCount.toLocaleString()} req`)
+        : `${value.toLocaleString()} req | ${costText}`
 
     return (
         <g>
@@ -176,12 +189,12 @@ const ApiKeyLabel = ({ x, y, width, height, value, data, isDarkMode }) => {
                 x={labelX}
                 y={labelY}
                 fill={isDarkMode ? '#94A3B8' : '#475569'}
-                fontSize={11}
-                fontFamily="monospace"
+                fontSize={CHART_TYPOGRAPHY.mono.fontSize}
+                fontFamily={CHART_TYPOGRAPHY.mono.fontFamily}
                 textAnchor="start"
                 dominantBaseline="middle"
             >
-                {value.toLocaleString()} req | ${(item.cost || 0) < 1 ? (item.cost || 0).toFixed(2) : Math.round(item.cost || 0).toLocaleString('en-US')}
+                {primaryText}
             </text>
         </g>
     )
@@ -202,7 +215,7 @@ const TREND_CONFIG = {
     cost: { stroke: '#f59e0b', name: 'Cost' },
 }
 
-function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefreshing, lastUpdated, dateRange, onDateRangeChange, customRange, onCustomRangeApply, endpointUsage: rawEndpointUsage, credentialData, credentialLoading, credentialSetupRequired, skillRuns, skillDailyStats }) {
+function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefreshing, lastUpdated, dateRange, onDateRangeChange, customRange, onCustomRangeApply, endpointUsage: rawEndpointUsage, credentialData, credentialTimeSeries, credentialLoading, credentialSetupRequired, skillRuns, skillDailyStats }) {
     // Auto-select time range based on dateRange: hour for today/yesterday, day for longer ranges
     const defaultTimeRange = (dateRange === 'today' || dateRange === 'yesterday') ? 'hour' : 'day'
 
@@ -597,7 +610,8 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                     : parts[0]
 
                 return {
-                    endpoint: displayName,
+                    endpoint: shortenApiKeyLabel(displayName),
+                    endpoint_full: displayName,
                     requests: m.request_count || 0,
                     tokens: m.total_tokens || 0,
                     cost: m.estimated_cost_usd || 0,
@@ -1045,10 +1059,10 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                                     })}
                                                                 </defs>
                                                                 <CartesianGrid strokeDasharray="4 4" stroke={isDarkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'} />
-                                                                <XAxis dataKey="time" stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+                                                                <XAxis dataKey="time" stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={CHART_TYPOGRAPHY.axisTick} axisLine={false} tickLine={false} />
                                                                 <YAxis
                                                                     stroke={isDarkMode ? '#6e7681' : '#57606a'}
-                                                                    tick={{ fontSize: 11 }}
+                                                                    tick={CHART_TYPOGRAPHY.axisTick}
                                                                     axisLine={false}
                                                                     tickLine={false}
                                                                     tickFormatter={formatNumberShort}
@@ -1068,26 +1082,26 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                                                 backdropFilter: 'blur(12px)',
                                                                                 maxWidth: 280,
                                                                             }}>
-                                                                                <div style={{ fontWeight: 600, marginBottom: 8, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk' }}>{label}</div>
+                                                                                <div style={{ fontWeight: 600, marginBottom: 8, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: CHART_TYPOGRAPHY.tooltipLabel.fontFamily }}>{label}</div>
                                                                                 <div style={{ display: 'flex', gap: 12, marginBottom: 8, paddingBottom: 8, borderBottom: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'}` }}>
                                                                                     <div style={{ fontSize: 11 }}>
                                                                                         <span style={{ color: '#06b6d4' }}>Tokens</span>
-                                                                                        <div style={{ fontWeight: 700, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk' }}>{formatNumber(point?._totalTokens || 0)}</div>
+                                                                                        <div style={{ fontWeight: 700, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: CHART_TYPOGRAPHY.tooltipLabel.fontFamily }}>{formatNumber(point?._totalTokens || 0)}</div>
                                                                                     </div>
                                                                                     <div style={{ fontSize: 11 }}>
                                                                                         <span style={{ color: '#f59e0b' }}>Cost</span>
-                                                                                        <div style={{ fontWeight: 700, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk' }}>{formatCost(point?._totalCost || 0)}</div>
+                                                                                        <div style={{ fontWeight: 700, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: CHART_TYPOGRAPHY.tooltipLabel.fontFamily }}>{formatCost(point?._totalCost || 0)}</div>
                                                                                     </div>
                                                                                     <div style={{ fontSize: 11 }}>
                                                                                         <span style={{ color: '#3b82f6' }}>Reqs</span>
-                                                                                        <div style={{ fontWeight: 700, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk' }}>{formatNumber(point?._totalRequests || 0)}</div>
+                                                                                        <div style={{ fontWeight: 700, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: CHART_TYPOGRAPHY.tooltipLabel.fontFamily }}>{formatNumber(point?._totalRequests || 0)}</div>
                                                                                     </div>
                                                                                 </div>
                                                                                 {modelEntries.map((p, i) => (
-                                                                                    <div key={i} style={{ fontSize: 12, display: 'flex', gap: 8, alignItems: 'center', marginBottom: 3 }}>
+                                                                                    <div key={i} style={{ ...CHART_TYPOGRAPHY.tooltipItem, display: 'flex', gap: 8, alignItems: 'center', marginBottom: 3 }}>
                                                                                         <span style={{ width: 8, height: 8, borderRadius: '50%', background: p.color, boxShadow: `0 0 6px ${p.color}`, flexShrink: 0 }}></span>
                                                                                         <span style={{ color: isDarkMode ? '#94A3B8' : '#475569', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
-                                                                                        <span style={{ fontWeight: 600, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk', whiteSpace: 'nowrap' }}>
+                                                                                        <span style={{ fontWeight: 600, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: CHART_TYPOGRAPHY.tooltipLabel.fontFamily, whiteSpace: 'nowrap' }}>
                                                                                             {formatNumber(p.value)}
                                                                                         </span>
                                                                                     </div>
@@ -1194,13 +1208,13 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                                         {modelName}
                                                                     </span>
                                                                 </div>
-                                                                <span style={{ fontSize: '10px', fontWeight: 600, color: isDarkMode ? '#CBD5E1' : '#334155', fontFamily: 'monospace', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                                                <span style={{ fontSize: CHART_TYPOGRAPHY.mono.fontSize, fontWeight: CHART_TYPOGRAPHY.mono.fontWeight, color: isDarkMode ? '#CBD5E1' : '#334155', fontFamily: CHART_TYPOGRAPHY.mono.fontFamily, textAlign: 'right', whiteSpace: 'nowrap' }}>
                                                                     {formatNumberShort(modelData?.request_count || 0)}
                                                                 </span>
-                                                                <span style={{ fontSize: '10px', fontWeight: 600, color: isDarkMode ? '#CBD5E1' : '#334155', fontFamily: 'monospace', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                                                <span style={{ fontSize: CHART_TYPOGRAPHY.mono.fontSize, fontWeight: CHART_TYPOGRAPHY.mono.fontWeight, color: isDarkMode ? '#CBD5E1' : '#334155', fontFamily: CHART_TYPOGRAPHY.mono.fontFamily, textAlign: 'right', whiteSpace: 'nowrap' }}>
                                                                     {formatNumberShort(modelData?.total_tokens || 0)}
                                                                 </span>
-                                                                <span style={{ fontSize: '10px', fontWeight: 600, color: isDarkMode ? '#10b981' : '#059669', fontFamily: 'monospace', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                                                <span style={{ fontSize: CHART_TYPOGRAPHY.mono.fontSize, fontWeight: CHART_TYPOGRAPHY.mono.fontWeight, color: isDarkMode ? '#10b981' : '#059669', fontFamily: CHART_TYPOGRAPHY.mono.fontFamily, textAlign: 'right', whiteSpace: 'nowrap' }}>
                                                                     {formatCost(modelData?.estimated_cost_usd || 0)}
                                                                 </span>
                                                             </div>
@@ -1233,13 +1247,13 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                             <XAxis
                                                                 dataKey="time"
                                                                 stroke={isDarkMode ? '#6e7681' : '#57606a'}
-                                                                tick={{ fontSize: 11 }}
+                                                                tick={CHART_TYPOGRAPHY.axisTick}
                                                                 axisLine={false}
                                                                 tickLine={false}
                                                             />
                                                             <YAxis
                                                                 stroke={isDarkMode ? '#6e7681' : '#57606a'}
-                                                                tick={{ fontSize: 11 }}
+                                                                tick={CHART_TYPOGRAPHY.axisTick}
                                                                 axisLine={false}
                                                                 tickLine={false}
                                                                 tickFormatter={formatNumberShort}
@@ -1265,7 +1279,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                                             boxShadow: isDarkMode ? '0 8px 24px rgba(0,0,0,0.5)' : '0 8px 24px rgba(0,0,0,0.1)',
                                                                             maxHeight: 320, overflowY: 'auto'
                                                                         }}>
-                                                                            <div style={{ fontWeight: 700, marginBottom: 8, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: 'Space Grotesk' }}>
+                                                                            <div style={{ fontWeight: 700, marginBottom: 8, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontFamily: CHART_TYPOGRAPHY.tooltipLabel.fontFamily }}>
                                                                                 {label}
                                                                             </div>
                                                                             {Object.entries(byModel).map(([model, types]) => (
@@ -1357,7 +1371,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                                         </span>
                                                                     </div>
                                                                     {TOKEN_TYPES.map(t => (
-                                                                        <span key={t.suffix} style={{ fontSize: '11px', fontFamily: 'monospace', textAlign: 'right', color: t.color, fontWeight: 600, whiteSpace: 'nowrap', display: 'block' }}>
+                                                                        <span key={t.suffix} style={{ fontSize: '11px', fontFamily: CHART_TYPOGRAPHY.mono.fontFamily, textAlign: 'right', color: t.color, fontWeight: 600, whiteSpace: 'nowrap', display: 'block' }}>
                                                                             {formatNumberShort(md[t.dataKey] || 0)}
                                                                         </span>
                                                                     ))}
@@ -1494,7 +1508,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                                         fontSize: '11px',
                                                                         fontWeight: 600,
                                                                         color: isDarkMode ? '#10b981' : '#059669',
-                                                                        fontFamily: 'monospace'
+                                                                        fontFamily: CHART_TYPOGRAPHY.mono.fontFamily
                                                                     }}>
                                                                         {formatCost(model.estimated_cost_usd || 0)}
                                                                     </span>
@@ -1603,12 +1617,12 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                         </linearGradient>
                                                     </defs>
                                                     <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'} horizontal={false} />
-                                                    <XAxis type="number" stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={{ fontSize: 12 }} axisLine={false} tickLine={false} />
+                                                    <XAxis type="number" stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={CHART_TYPOGRAPHY.axisTick} axisLine={false} tickLine={false} />
                                                     <YAxis
                                                         type="category"
                                                         dataKey="endpoint"
                                                         stroke={isDarkMode ? '#6e7681' : '#57606a'}
-                                                        tick={{ fontSize: 12 }}
+                                                        tick={CHART_TYPOGRAPHY.axisTick}
                                                         width={150}
                                                         axisLine={false}
                                                         tickLine={false}
@@ -1625,7 +1639,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                         isAnimationActive={chartAnimated}
                                                         animationDuration={1500}
                                                         minPointSize={2}
-                                                        label={(props) => <ApiKeyLabel {...props} data={endpointUsage[props.index]} isDarkMode={isDarkMode} />}
+                                                        label={(props) => <ApiKeyLabel {...props} data={endpointUsage[props.index]} isDarkMode={isDarkMode} endpointSort={endpointSort} />}
                                                     />
                                                 </BarChart>
                                             </AutoWidthChart>
@@ -1641,11 +1655,15 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                 <CredentialStatsCard
                                     isDarkMode={isDarkMode}
                                     data={credentialData}
+                                    timeSeries={credentialTimeSeries}
+                                    dateRange={dateRange}
                                     isLoading={credentialLoading}
                                     setupRequired={credentialSetupRequired}
                                     onRowClick={(item, type) => {
                                         if (!item?.models || Object.keys(item.models).length === 0) return
-                                        const label = type === 'api_key' ? item.api_key_name : (item.email || item.source || 'Unknown')
+                                        const label = type === 'api_key'
+                                            ? shortenApiKeyLabel(item.api_key_name)
+                                            : (item.email || item.source || 'Unknown')
                                         const modelRows = Object.entries(item.models)
                                             .map(([name, m]) => ({
                                                 _key: name,
@@ -1694,6 +1712,8 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                         <SkillsPanel
                             skillRuns={skillRuns}
                             skillDailyStats={skillDailyStats}
+                            dateRange={dateRange}
+                            customRange={customRange}
                             isDarkMode={isDarkMode}
                         />
                     ) : (

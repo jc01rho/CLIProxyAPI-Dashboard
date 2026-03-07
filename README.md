@@ -84,6 +84,30 @@ docker compose pull
 docker compose up -d
 ```
 
+### Release Boot Order (expected)
+
+After `docker compose up -d`, startup is constrained in this order:
+1. `postgres` becomes `healthy`
+2. `collector` starts and becomes `healthy` (DB init + migrations done)
+3. `postgrest` starts (after `collector` healthy)
+4. `frontend` starts (after `collector` healthy + `postgrest` started)
+
+### Release Smoke Checklist
+
+```bash
+docker compose ps
+docker compose logs --tail=200 collector postgrest frontend
+curl http://localhost:8417/api/collector/health
+curl "http://localhost:8417/rest/v1/daily_stats?select=date,total_requests&order=date.desc&limit=1"
+curl -X POST http://localhost:8417/api/collector/trigger
+```
+
+Success signals:
+- Collector logs show migrations applied/skipped without errors
+- No PostgREST runtime errors about missing column/table
+- `/api/collector/health` returns healthy response
+- `/rest/v1/daily_stats` returns data after startup and after trigger
+
 ---
 
 ## Configuration Reference

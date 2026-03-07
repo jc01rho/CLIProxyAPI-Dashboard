@@ -14,6 +14,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename } from 'node:path';
 import { request as httpRequest } from 'node:http';
@@ -138,6 +139,66 @@ function parseTranscriptMetrics(transcriptPath) {
   return { inputTokens, outputTokens, toolCalls, durationMs, model };
 }
 
+function sha1(value) {
+  return createHash('sha1').update(String(value)).digest('hex');
+}
+
+function pickFirstInt(sources, keys) {
+  for (const src of sources) {
+    if (!src || typeof src !== 'object') continue;
+    for (const key of keys) {
+      const raw = src[key];
+      const n = Number(raw);
+      if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+    }
+  }
+  return 0;
+}
+
+function pickFirstString(sources, keys) {
+  for (const src of sources) {
+    if (!src || typeof src !== 'object') continue;
+    for (const key of keys) {
+      const value = src[key];
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+  }
+  return null;
+}
+
+function extractEventMetrics(payload, transcriptMetrics) {
+  const toolResponse = payload?.tool_response;
+  const message = payload?.message;
+  const usage = payload?.usage;
+  const result = toolResponse?.result;
+
+  const sources = [
+    payload,
+    toolResponse,
+    result,
+    usage,
+    message,
+    message?.usage,
+    toolResponse?.usage,
+    toolResponse?.message,
+    toolResponse?.message?.usage,
+  ];
+
+  const inputTokens = pickFirstInt(sources, ['input_tokens', 'inputTokens', 'tokens_used']);
+  const outputTokens = pickFirstInt(sources, ['output_tokens', 'outputTokens']);
+  const toolCalls = pickFirstInt(sources, ['tool_calls', 'toolCalls']);
+  const durationMs = pickFirstInt(sources, ['duration_ms', 'durationMs', 'elapsed_ms', 'elapsedMs']);
+  const model = pickFirstString(sources, ['model']) || transcriptMetrics.model;
+
+  return {
+    inputTokens: inputTokens || transcriptMetrics.inputTokens || 0,
+    outputTokens: outputTokens || transcriptMetrics.outputTokens || 0,
+    toolCalls: toolCalls || transcriptMetrics.toolCalls || 0,
+    durationMs: durationMs || transcriptMetrics.durationMs || 0,
+    model,
+  };
+}
+
 /**
  * POST events to the collector.  Fire-and-forget with a timeout.
  */
@@ -196,16 +257,65 @@ async function main() {
   const cwd = String(data.cwd || '').trim();
   const projectDir = cwd ? basename(cwd) : '';
 
-  // Parse transcript for metrics
-  const metrics = parseTranscriptMetrics(data.transcript_path);
+  // Parse transcript for metrics and merge with hook payload metrics
+  const transcriptMetrics = parseTranscriptMetrics(data.transcript_path);
+  const metrics = extractEventMetrics(data, transcriptMetrics);
+
+  const statusRaw = String(
+    data?.tool_response?.status
+    || data?.status
+    || data?.tool_response?.result?.status
+    || ''
+  ).toLowerCase();
+  const status = statusRaw === 'failure' || statusRaw === 'error' ? 'failure' : 'success';
+
+  const errorType = String(
+    data?.tool_response?.error_type
+    || data?.tool_response?.error?.type
+    || data?.tool_response?.result?.error_type
+    || ''
+  ).trim() || null;
+
+  const errorMessage = String(
+    data?.tool_response?.error_message
+    || data?.tool_response?.error?.message
+    || data?.tool_response?.result?.error_message
+    || data?.tool_response?.stderr
+    || ''
+  ).trim() || null;
+
+  const attemptNoRaw = Number(
+    data?.attempt_no
+    || data?.tool_response?.attempt_no
+    || data?.tool_response?.result?.attempt_no
+    || 1
+  );
+  const attemptNo = Number.isFinite(attemptNoRaw) && attemptNoRaw > 0 ? Math.floor(attemptNoRaw) : 1;
+
+  const toolUseId = String(data.tool_use_id || '').trim() || null;
+  const triggeredAt = new Date().toISOString();
+  const eventUidBase = [
+    MACHINE_ID,
+    sessionId,
+    skillName,
+    toolUseId || '',
+    String(attemptNo),
+  ].join('|');
 
   const event = {
+    event_uid: sha1(eventUidBase),
+    tool_use_id: toolUseId,
     machine_id: MACHINE_ID,
-    sqlite_id: hashInt(data.tool_use_id || `${sessionId}-${skillName}-${Date.now()}`),
+    source: 'plugin',
+    sqlite_id: hashInt(toolUseId || `${sessionId}-${skillName}-${triggeredAt}`),
     skill_name: skillName,
     session_id: sessionId,
     trigger_type: 'explicit',
-    triggered_at: new Date().toISOString(),
+    triggered_at: triggeredAt,
+    status,
+    error_type: errorType,
+    error_message: errorMessage,
+    attempt_no: attemptNo,
     arguments: toolInput.args || null,
     tokens_used: metrics.inputTokens,
     output_tokens: metrics.outputTokens,

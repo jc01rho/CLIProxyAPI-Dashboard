@@ -6,6 +6,7 @@ Polls the CLIProxy Management API and stores usage data in PostgreSQL
 
 import os
 import time
+import hashlib
 import logging
 import threading
 from datetime import datetime, date, timezone, timedelta
@@ -96,6 +97,9 @@ CORS(flask_app)
 api_bp = Blueprint('api', __name__, url_prefix='/api/collector')
 
 # --- API Endpoints ---
+SKILL_DEFAULT_PRICING = {'input': 3.00, 'output': 15.00}
+
+
 @api_bp.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint."""
@@ -150,34 +154,54 @@ def ingest_skill_events():
             continue
 
         sqlite_id = evt.get('sqlite_id')
+        tool_use_id = str(evt.get('tool_use_id', '')).strip()[:255]
+        attempt_no = max(_safe_int(evt.get('attempt_no'), 1), 1)
+        event_uid = str(evt.get('event_uid', '')).strip()[:255]
+        if not event_uid:
+            event_uid = _derive_skill_event_uid(machine_id, session_id, skill_name, tool_use_id, attempt_no)
+
+        status = _normalize_skill_status(evt.get('status'))
         is_skeleton = bool(evt.get('is_skeleton', False))
-        tokens_used = int(evt.get('tokens_used', 0) or 0)
-        output_tokens = int(evt.get('output_tokens', 0) or 0)
+        tokens_used = _safe_int(evt.get('tokens_used'), 0)
+        output_tokens = _safe_int(evt.get('output_tokens'), 0)
+        tool_calls = _safe_int(evt.get('tool_calls'), 0)
+        duration_ms = _safe_int(evt.get('duration_ms'), 0)
+        model = evt.get('model')
 
         record = {
+            'event_uid': event_uid,
             'machine_id': machine_id,
+            'source': str(evt.get('source') or 'manual')[:50],
             'sqlite_id': sqlite_id,
+            'tool_use_id': tool_use_id or None,
             'skill_name': skill_name,
             'session_id': session_id,
             'trigger_type': str(evt.get('trigger_type') or 'explicit')[:50],
-            'triggered_at': evt.get('triggered_at') or datetime.utcnow().isoformat(),
+            'triggered_at': _to_iso_utc(evt.get('triggered_at')),
+            'status': status,
+            'error_type': str(evt.get('error_type') or '')[:100] or None,
+            'error_message': str(evt.get('error_message') or '')[:1000] or None,
+            'attempt_no': attempt_no,
             'arguments': evt.get('arguments'),
             'tokens_used': tokens_used,
             'output_tokens': output_tokens,
-            'tool_calls': int(evt.get('tool_calls', 0) or 0),
-            'duration_ms': int(evt.get('duration_ms', 0) or 0),
+            'tool_calls': tool_calls,
+            'duration_ms': duration_ms,
+            'estimated_cost_usd': _calculate_skill_estimated_cost(model, tokens_used, output_tokens),
             'skill_version_hash': evt.get('skill_version_hash'),
-            'model': evt.get('model'),
+            'model': model,
             'is_skeleton': is_skeleton,
             'synced_at': datetime.utcnow().isoformat(),
             'project_dir': str(evt.get('project_dir', '')).strip()[:255],
         }
 
         try:
-            result = db_client.table('skill_runs').upsert(
-                record,
-                on_conflict=['machine_id', 'sqlite_id', 'session_id', 'skill_name']
-            ).execute()
+            result = db_client.table('skill_runs').upsert(record, on_conflict='event_uid').execute()
+            if result.data is None:
+                result = db_client.table('skill_runs').upsert(
+                    record,
+                    on_conflict=['machine_id', 'sqlite_id', 'session_id', 'skill_name']
+                ).execute()
             if result.data is not None:
                 upserted += 1
         except Exception as e:
@@ -647,11 +671,59 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
         return False
 
 
+def _normalize_skill_status(value: Any) -> str:
+    raw = str(value or '').strip().lower()
+    return 'failure' if raw in ('failure', 'error') else 'success'
+
+
+def _derive_skill_event_uid(machine_id: str, session_id: str, skill_name: str, tool_use_id: str, attempt_no: int) -> str:
+    key = f"{machine_id}|{session_id}|{skill_name}|{tool_use_id}|{attempt_no}"
+    return hashlib.sha1(key.encode('utf-8')).hexdigest()
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        return default
+
+
+def _to_iso_utc(value: Any) -> str:
+    raw = str(value or '').strip()
+    if not raw:
+        return datetime.utcnow().isoformat()
+
+    normalized = raw.replace('Z', '+00:00') if raw.endswith('Z') else raw
+    try:
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    except Exception:
+        return datetime.utcnow().isoformat()
+
+
+def _calculate_skill_estimated_cost(model: Any, input_tokens: int, output_tokens: int) -> float:
+    pricing = SKILL_DEFAULT_PRICING
+    model_name = str(model or '').strip()
+    if model_name:
+        try:
+            full_pricing = get_model_pricing()
+            matched, _ = find_pricing_for_model(model_name, full_pricing)
+            pricing = matched or SKILL_DEFAULT_PRICING
+        except Exception:
+            pricing = SKILL_DEFAULT_PRICING
+
+    return round(calculate_cost(input_tokens, output_tokens, pricing), 6)
+
+
 def _upsert_skill_daily_stats(stat_date: str, skill_name: str, machine_id: str) -> None:
     if not db_client:
         return
 
-    rows = db_client.table('skill_runs').select('tokens_used,output_tokens,duration_ms') \
+    rows = db_client.table('skill_runs').select(
+        'tokens_used,output_tokens,duration_ms,tool_calls,status,estimated_cost_usd'
+    ) \
         .eq('skill_name', skill_name) \
         .eq('machine_id', machine_id) \
         .eq('is_skeleton', False) \
@@ -665,15 +737,23 @@ def _upsert_skill_daily_stats(stat_date: str, skill_name: str, machine_id: str) 
     total_tokens = sum(r.get('tokens_used', 0) or 0 for r in rows)
     total_output_tokens = sum(r.get('output_tokens', 0) or 0 for r in rows)
     total_duration_ms = sum(r.get('duration_ms', 0) or 0 for r in rows)
+    total_tool_calls = sum(r.get('tool_calls', 0) or 0 for r in rows)
+    total_cost_usd = round(sum(float(r.get('estimated_cost_usd', 0) or 0) for r in rows), 6)
+    success_count = sum(1 for r in rows if _normalize_skill_status(r.get('status')) == 'success')
+    failure_count = len(rows) - success_count
 
     db_client.table('skill_daily_stats').upsert({
         'stat_date': stat_date,
         'skill_name': skill_name,
         'machine_id': machine_id,
         'run_count': len(rows),
+        'success_count': success_count,
+        'failure_count': failure_count,
         'total_tokens': total_tokens,
         'total_output_tokens': total_output_tokens,
         'total_duration_ms': total_duration_ms,
+        'total_tool_calls': total_tool_calls,
+        'total_cost_usd': total_cost_usd,
         'updated_at': datetime.utcnow().isoformat(),
     }, on_conflict=['stat_date', 'skill_name', 'machine_id']).execute()
 

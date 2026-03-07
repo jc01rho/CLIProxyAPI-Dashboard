@@ -2,36 +2,149 @@
 
 Summary for AI agents: how skill run telemetry flows from clients → collector → PostgREST → dashboard.
 
-## Payload and endpoint
+## Endpoint and payload
 
 - **Endpoint:** `POST /api/collector/skill-events`
-- **Body:** `{ "events": [ { machine_id, sqlite_id, skill_name, session_id, triggered_at?, trigger_type?, arguments?, tokens_used?, output_tokens?, tool_calls?, duration_ms?, skill_version_hash?, model?, is_skeleton? } ] }`
-- **Validation:** requires `skill_name` and `session_id`; strings are trimmed to 100 chars. Empty/invalid rows are skipped and counted in `skipped`.
-- **Idempotency:** unique key `(machine_id, sqlite_id, session_id, skill_name)`; upsert prevents duplicates coming from local SQLite mirrors.
+- **Body:** `{ "events": [ { ... } ] }`
+- **Minimum required fields:** `skill_name`, `session_id`
+- **Primary idempotency key:** `event_uid` (fallback conflict key remains `(machine_id, sqlite_id, session_id, skill_name)` for backward compatibility)
 
-## Storage
+## 2-phase telemetry lifecycle
 
-- **Tables:**
-  - `skill_runs`: raw events with token/tool/duration/model info and `synced_at`.
-  - `skill_daily_stats`: aggregated per `(stat_date, skill_name, machine_id)` with totals and `avg_tokens` computed column.
-- **Migration:** `collector/migrations/0002_add_skill_tracking.sql` (applied automatically by `db.run_migrations()` on collector start). Grants `SELECT` to `web_anon` for PostgREST.
+### Phase 1 — Early skeleton (`PostToolUse` on `Skill`)
 
-## Backend aggregation
+Client plugin sends an early event immediately after `Skill` tool returns prompt text.
 
-After ingest:
-1) Upsert each event into `skill_runs`.
-2) For every `(date, skill_name, machine_id)` seen in non-skeleton events, recalc daily totals from `skill_runs` and upsert into `skill_daily_stats`.
-3) Errors per event are logged and counted but do not abort the batch.
+Typical properties:
+- `is_skeleton = true`
+- Stable identity fields already present (`event_uid`, `session_id`, `skill_name`, ...)
+- Metrics may be missing/low (`tokens_used`, `duration_ms`, `tool_calls`, `model`)
+
+Purpose:
+- Prevent losing trace identity when the session ends before full execution is available.
+
+### Phase 2 — Final enrichment (`Stop` hook)
+
+At session stop, plugin re-parses transcript and sends enriched event with the **same `event_uid`**.
+
+Typical properties:
+- `is_skeleton = false`
+- Better metrics from completed execution window
+- Final status/error fields
+
+Purpose:
+- Improve analytics quality while preserving idempotent identity.
+
+## Data contract
+
+### Immutable fields (must not change across phases)
+
+- `event_uid`
+- `machine_id`
+- `session_id`
+- `skill_name`
+- `tool_use_id`
+- `attempt_no`
+- `triggered_at`
+
+### Enrichable fields (phase 2 can improve)
+
+- `tokens_used`
+- `output_tokens`
+- `tool_calls`
+- `duration_ms`
+- `model`
+- `status`
+- `error_type`
+- `error_message`
+- `is_skeleton`
+- `synced_at`
+
+## Collector merge policy (phase-aware)
+
+Ingest logic reads existing row by `event_uid` before upsert and applies safe merge:
+
+- **Incoming skeleton + existing final:** do not downgrade final metrics/status/model.
+- **Incoming final:** enrich over skeleton and keep best known metrics (prefer non-empty/non-zero; numeric fields keep max).
+- **Out-of-order arrival:** late skeleton cannot revert an already-final row.
+
+Estimated cost is recalculated from merged model/tokens.
+
+## Aggregation behavior
+
+- `skill_daily_stats` is updated only for rows resolved as final (`is_skeleton = false`).
+- Skeleton rows are stored for traceability but excluded from aggregates.
 
 ## Frontend consumption
 
-- **Sources:**
-  - `skill_runs` → recent runs table + per-skill rollups (run counts, token totals, machine count).
-  - `skill_daily_stats` → daily time-series chart.
-- **Component:** `frontend/src/components/SkillsPanel.jsx` renders metrics/charts. Estimated cost is derived client-side at $3/1M input + $15/1M output (no server-side pricing yet).
+- `skill_runs` drives recent runs and per-skill rollups.
+- `skill_daily_stats` drives daily charts.
+- Dashboard behavior stays stable because analytics focus on final rows.
 
-## Operational notes
+## Operational SQL checks
 
-- `is_skeleton=true` rows are stored but excluded from daily aggregates to avoid noise from scaffolding runs.
-- Time fields are stored in UTC ISO strings; daily grouping uses the date portion of `triggered_at` in UTC.
-- If a machine replays historical events, upserts keep only the latest copy but daily aggregates recompute totals each ingest, so backfills are safe.
+### Duplicate check
+
+```sql
+SELECT event_uid, COUNT(*)
+FROM skill_runs
+WHERE event_uid IS NOT NULL
+GROUP BY event_uid
+HAVING COUNT(*) > 1;
+```
+
+### Skeleton backlog (possible missing final enrichment)
+
+```sql
+SELECT event_uid, skill_name, session_id, triggered_at
+FROM skill_runs
+WHERE is_skeleton = true
+  AND triggered_at < NOW() - INTERVAL '15 minutes'
+ORDER BY triggered_at DESC
+LIMIT 100;
+```
+
+### Data quality on final rows (24h)
+
+```sql
+SELECT
+  COUNT(*) AS total_final,
+  COUNT(*) FILTER (WHERE COALESCE(tokens_used,0)=0 AND COALESCE(output_tokens,0)=0) AS zero_token_final,
+  COUNT(*) FILTER (WHERE model IS NULL OR model='') AS missing_model_final
+FROM skill_runs
+WHERE is_skeleton = false
+  AND triggered_at >= NOW() - INTERVAL '24 hours';
+```
+
+### Aggregate consistency (`skill_runs` final vs `skill_daily_stats`)
+
+```sql
+WITH raw AS (
+  SELECT DATE(triggered_at) AS stat_date, skill_name, machine_id,
+         COUNT(*) AS run_count,
+         SUM(tokens_used) AS total_tokens,
+         SUM(output_tokens) AS total_output_tokens,
+         SUM(duration_ms) AS total_duration_ms,
+         SUM(tool_calls) AS total_tool_calls,
+         SUM(estimated_cost_usd) AS total_cost_usd
+  FROM skill_runs
+  WHERE is_skeleton = false
+  GROUP BY 1,2,3
+)
+SELECT r.stat_date, r.skill_name, r.machine_id,
+       r.run_count AS raw_run_count, d.run_count AS daily_run_count,
+       r.total_tokens AS raw_tokens, d.total_tokens AS daily_tokens
+FROM raw r
+JOIN skill_daily_stats d
+  ON d.stat_date = r.stat_date
+ AND d.skill_name = r.skill_name
+ AND d.machine_id = r.machine_id
+WHERE r.run_count <> d.run_count
+   OR r.total_tokens <> d.total_tokens;
+```
+
+## Rollback
+
+1. Plugin rollback: remove `Stop` hook (back to phase 1-only).
+2. Collector rollback: revert phase-aware merge logic.
+3. Monitor 24–48h using skeleton backlog + data quality queries.

@@ -161,38 +161,116 @@ def ingest_skill_events():
             event_uid = _derive_skill_event_uid(machine_id, session_id, skill_name, tool_use_id, attempt_no)
 
         status = _normalize_skill_status(evt.get('status'))
-        is_skeleton = bool(evt.get('is_skeleton', False))
+        incoming_is_skeleton = bool(evt.get('is_skeleton', False))
         tokens_used = _safe_int(evt.get('tokens_used'), 0)
         output_tokens = _safe_int(evt.get('output_tokens'), 0)
         tool_calls = _safe_int(evt.get('tool_calls'), 0)
         duration_ms = _safe_int(evt.get('duration_ms'), 0)
-        model = evt.get('model')
+        model = str(evt.get('model') or '').strip() or None
+
+        existing = None
+        try:
+            existing = db_client.table('skill_runs').select(
+                'event_uid,machine_id,source,sqlite_id,tool_use_id,skill_name,session_id,trigger_type,triggered_at,'
+                'status,error_type,error_message,attempt_no,arguments,tokens_used,output_tokens,tool_calls,duration_ms,'
+                'skill_version_hash,model,is_skeleton,project_dir'
+            ).eq('event_uid', event_uid).single().execute().data
+        except Exception as e:
+            logger.error(f"Failed to read existing skill event by event_uid={event_uid}: {e}", exc_info=True)
+
+        existing_is_skeleton = bool(existing.get('is_skeleton', False)) if existing else None
+        is_final_update = (not incoming_is_skeleton)
+
+        merged_tokens_used = tokens_used
+        merged_output_tokens = output_tokens
+        merged_tool_calls = tool_calls
+        merged_duration_ms = duration_ms
+        merged_model = model
+        merged_status = status
+        merged_error_type = str(evt.get('error_type') or '')[:100] or None
+        merged_error_message = str(evt.get('error_message') or '')[:1000] or None
+
+        if existing:
+            existing_tokens_used = _safe_int(existing.get('tokens_used'), 0)
+            existing_output_tokens = _safe_int(existing.get('output_tokens'), 0)
+            existing_tool_calls = _safe_int(existing.get('tool_calls'), 0)
+            existing_duration_ms = _safe_int(existing.get('duration_ms'), 0)
+            existing_model = str(existing.get('model') or '').strip() or None
+            existing_status = _normalize_skill_status(existing.get('status'))
+            existing_error_type = str(existing.get('error_type') or '')[:100] or None
+            existing_error_message = str(existing.get('error_message') or '')[:1000] or None
+
+            if incoming_is_skeleton and existing_is_skeleton is False:
+                merged_tokens_used = existing_tokens_used
+                merged_output_tokens = existing_output_tokens
+                merged_tool_calls = existing_tool_calls
+                merged_duration_ms = existing_duration_ms
+                merged_model = existing_model
+                merged_status = existing_status
+                merged_error_type = existing_error_type
+                merged_error_message = existing_error_message
+            elif is_final_update:
+                merged_tokens_used = max(tokens_used, existing_tokens_used)
+                merged_output_tokens = max(output_tokens, existing_output_tokens)
+                merged_tool_calls = max(tool_calls, existing_tool_calls)
+                merged_duration_ms = max(duration_ms, existing_duration_ms)
+                merged_model = model or existing_model
+                if merged_status == 'success' and existing_status == 'failure':
+                    merged_status = existing_status
+                merged_error_type = merged_error_type or existing_error_type
+                merged_error_message = merged_error_message or existing_error_message
+            else:
+                merged_tokens_used = max(tokens_used, existing_tokens_used)
+                merged_output_tokens = max(output_tokens, existing_output_tokens)
+                merged_tool_calls = max(tool_calls, existing_tool_calls)
+                merged_duration_ms = max(duration_ms, existing_duration_ms)
+                merged_model = model or existing_model
+                merged_error_type = merged_error_type or existing_error_type
+                merged_error_message = merged_error_message or existing_error_message
+
+        final_is_skeleton = incoming_is_skeleton
+        if existing and existing_is_skeleton is False:
+            final_is_skeleton = False
+        if is_final_update:
+            final_is_skeleton = False
+
+        immutable_triggered_at = _to_iso_utc(evt.get('triggered_at'))
+        if existing and existing.get('triggered_at'):
+            immutable_triggered_at = _to_iso_utc(existing.get('triggered_at'))
+
+        immutable_tool_use_id = tool_use_id or None
+        if existing and existing.get('tool_use_id'):
+            immutable_tool_use_id = str(existing.get('tool_use_id')).strip()[:255] or immutable_tool_use_id
+
+        immutable_attempt_no = attempt_no
+        if existing and _safe_int(existing.get('attempt_no'), 0) > 0:
+            immutable_attempt_no = _safe_int(existing.get('attempt_no'), attempt_no)
 
         record = {
             'event_uid': event_uid,
             'machine_id': machine_id,
             'source': str(evt.get('source') or 'manual')[:50],
             'sqlite_id': sqlite_id,
-            'tool_use_id': tool_use_id or None,
+            'tool_use_id': immutable_tool_use_id,
             'skill_name': skill_name,
             'session_id': session_id,
             'trigger_type': str(evt.get('trigger_type') or 'explicit')[:50],
-            'triggered_at': _to_iso_utc(evt.get('triggered_at')),
-            'status': status,
-            'error_type': str(evt.get('error_type') or '')[:100] or None,
-            'error_message': str(evt.get('error_message') or '')[:1000] or None,
-            'attempt_no': attempt_no,
-            'arguments': evt.get('arguments'),
-            'tokens_used': tokens_used,
-            'output_tokens': output_tokens,
-            'tool_calls': tool_calls,
-            'duration_ms': duration_ms,
-            'estimated_cost_usd': _calculate_skill_estimated_cost(model, tokens_used, output_tokens),
-            'skill_version_hash': evt.get('skill_version_hash'),
-            'model': model,
-            'is_skeleton': is_skeleton,
+            'triggered_at': immutable_triggered_at,
+            'status': merged_status,
+            'error_type': merged_error_type,
+            'error_message': merged_error_message,
+            'attempt_no': immutable_attempt_no,
+            'arguments': evt.get('arguments') if evt.get('arguments') is not None else (existing.get('arguments') if existing else None),
+            'tokens_used': merged_tokens_used,
+            'output_tokens': merged_output_tokens,
+            'tool_calls': merged_tool_calls,
+            'duration_ms': merged_duration_ms,
+            'estimated_cost_usd': _calculate_skill_estimated_cost(merged_model, merged_tokens_used, merged_output_tokens),
+            'skill_version_hash': evt.get('skill_version_hash') if evt.get('skill_version_hash') is not None else (existing.get('skill_version_hash') if existing else None),
+            'model': merged_model,
+            'is_skeleton': final_is_skeleton,
             'synced_at': datetime.utcnow().isoformat(),
-            'project_dir': str(evt.get('project_dir', '')).strip()[:255],
+            'project_dir': str(evt.get('project_dir', '')).strip()[:255] or (str(existing.get('project_dir', '')).strip()[:255] if existing else ''),
         }
 
         try:
@@ -209,7 +287,7 @@ def ingest_skill_events():
             skipped += 1
             continue
 
-        if not is_skeleton and tokens_used >= 0:
+        if final_is_skeleton is False and merged_tokens_used >= 0:
             stat_date = str(record['triggered_at'])[:10]
             daily_keys.add((stat_date, skill_name, machine_id))
 

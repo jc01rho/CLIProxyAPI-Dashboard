@@ -46,8 +46,17 @@ const getProviderHex = (provider) => {
 
 const getCredKey = (cred) => cred.auth_index || cred.source || cred.email
 const getCredDisplayName = (cred) => cred.name || cred.label || cred.email || cred.source || getCredKey(cred)
+const getConfigProviderName = (cred) => {
+  const source = cred?.source || ''
+  const match = source.match(/^config:([^\[\]\s]+)\[/i)
+  return match?.[1] || ''
+}
 const getProviderSubtitle = (provider, cred) => {
   const normalizedProvider = (provider || '').toLowerCase()
+  const configProviderName = getConfigProviderName(cred)
+  if (configProviderName) {
+    return configProviderName
+  }
   if (['api-key', 'unknown', 'oauth'].includes(normalizedProvider) && cred) {
     return getCredDisplayName(cred)
   }

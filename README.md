@@ -139,7 +139,7 @@ Inside Claude Code:
 
 ```claude
 /plugin marketplace add leolionart/claude-skills-tracker
-/plugin install cliproxy-skill-tracker
+/plugin install claude-skill-tracker
 ```
 
 Optional endpoint override (if dashboard is not local):

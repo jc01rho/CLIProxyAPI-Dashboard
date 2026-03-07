@@ -150,7 +150,7 @@ function SetupGuide({ isDarkMode }) {
                             Tracker distribution now comes from the shared <code>claude-skills-tracker</code> repository via this marketplace.
                         </div>
                         <CodeBlock isDarkMode={isDarkMode} language="claude" code={`/plugin marketplace add leolionart/claude-skills-tracker`} />
-                        <CodeBlock isDarkMode={isDarkMode} language="claude" code={`/plugin install cliproxy-skill-tracker`} />
+                        <CodeBlock isDarkMode={isDarkMode} language="claude" code={`/plugin install claude-skill-tracker`} />
                     </div>
                 </div>
             </div>
@@ -175,7 +175,7 @@ function SetupGuide({ isDarkMode }) {
                             at <code>localhost:8417</code>, this step is optional — that's the default URL.
                         </div>
                         <div className="guide-tip" style={{ marginTop: 10 }}>
-                            <strong>Important dedupe note:</strong> if you already installed <code>cliproxy-skill-tracker</code> from marketplace,
+                            <strong>Important dedupe note:</strong> if you already installed <code>claude-skill-tracker</code> from marketplace,
                             do <strong>not</strong> keep a manual <code>PostToolUse: Skill</code> hook at the same time. Running both can send duplicate events.
                         </div>
                     </div>

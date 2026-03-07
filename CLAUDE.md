@@ -4,12 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-CLIProxy Dashboard is a real-time monitoring system that tracks API usage from CLIProxy (an AI API proxy). It consists of:
+CLIProxy Dashboard là hệ thống monitoring gồm hai phần chính:
 
-- **Collector** (Python/Flask): Polls the CLIProxy Management API every 5 minutes, processes usage data, calculates costs, and stores to PostgreSQL via psycopg2
-- **Frontend** (React/Nginx): Visualizes usage analytics with charts, cost breakdowns, and credential tracking
-- **PostgreSQL**: Self-hosted database, auto-initialized from `init-db/schema.sql` on first boot
-- **PostgREST**: REST API layer for frontend reads (anonymous, SELECT-only via `web_anon` role)
+### 1. Dashboard (Docker services)
+
+Theo dõi API usage từ CLIProxy (AI API proxy) theo thời gian thực:
+
+- **Collector** (Python/Flask): Polls CLIProxy Management API mỗi 5 phút, tính cost, lưu vào PostgreSQL
+- **Frontend** (React/Nginx): Hiển thị analytics, cost breakdown, credential tracking
+- **PostgreSQL**: Self-hosted DB, auto-initialized từ `init-db/schema.sql`
+- **PostgREST**: REST API layer cho frontend đọc (anonymous, SELECT-only via `web_anon` role)
 
 **Data Flow:**
 ```
@@ -17,6 +21,26 @@ CLIProxy API → Collector (Python/Flask) → PostgreSQL:5432
 Browser → Nginx:8417 → /rest/v1/* → PostgREST:3000 → PostgreSQL (reads)
                       → /api/collector/* → collector:5001 (writes + triggers)
 ```
+
+### 2. Claude Code Plugins (`plugin/`)
+
+Các plugin mở rộng khả năng của Claude Code, gửi telemetry về dashboard:
+
+- **`plugin/claude-skills-tracker`** (git submodule): Hook `PostToolUse` trên `Skill` tool, thu thập metrics (tokens, duration, model, project) và gửi về `/api/collector/skill-events`. Plugin được phân phối qua marketplace của dashboard.
+
+**Plugin Data Flow:**
+```
+Claude Code → Skill tool called
+           → PostToolUse hook fires (scripts/on-skill-use.mjs)
+           → POST /api/collector/skill-events → collector:5001
+           → INSERT INTO skill_runs (PostgreSQL)
+           → Hiển thị trên tab Skills của dashboard
+```
+
+> **⚠️ Lưu ý về plugin metrics:**
+> Hook `PostToolUse` fires ngay khi Skill tool trả về prompt — TRƯỚC khi Claude thực thi skill.
+> Vì vậy `tokens_used` thường phản ánh turn gọi skill (nhỏ), không phải toàn bộ execution.
+> Xem chi tiết: `plugin/claude-skills-tracker/README.md#known-limitations`
 
 ## Common Commands
 
@@ -187,3 +211,38 @@ Images are published to GHCR (`ghcr.io/leolionart/cliproxy-*`) via GitHub Action
 **Date Range Showing Wrong Data:**
 - Verify `TIMEZONE_OFFSET_HOURS` matches your timezone
 - `daily_stats` must have entries for the date range
+
+**Skill Tracker: tokens = 0 / model = NULL:**
+- `tokens_used = 0` là bình thường với hầu hết skills (xem Known Limitations trong plugin README)
+- `model = NULL` ở data cũ: bug đã fix trong v1.0.1, data mới sẽ có model
+- Nếu `ON CONFLICT` error trong postgres logs: bảng `skill_runs` thiếu UNIQUE constraint trên `event_uid` — chạy: `ALTER TABLE skill_runs ADD CONSTRAINT skill_runs_event_uid_key UNIQUE (event_uid);`
+
+## Plugin Architecture (`plugin/`)
+
+Thư mục `plugin/` chứa các git submodule — mỗi submodule là một plugin Claude Code độc lập:
+
+```
+plugin/
+└── claude-skills-tracker/    # git submodule: leolionart/claude-skills-tracker
+    ├── hooks/hooks.json       # PostToolUse hook registration
+    ├── scripts/on-skill-use.mjs  # hook script (Node.js, zero deps)
+    └── README.md
+```
+
+### Collector Skill Events Endpoint
+
+Collector nhận events từ plugin qua:
+
+```
+POST /api/collector/skill-events
+Body: { events: [{ skill_name, session_id, tokens_used, ... }] }
+```
+
+Ghi vào bảng `skill_runs` (PostgreSQL). Schema của bảng này được quản lý bởi migration trong `collector/migrations/`.
+
+### Phát triển plugin mới
+
+Để thêm plugin mới:
+1. Tạo repo riêng với cấu trúc tương tự `claude-skills-tracker`
+2. Thêm làm submodule: `git submodule add <url> plugin/<name>`
+3. Nếu cần endpoint collector mới: thêm route vào `collector/main.py` và migration tương ứng

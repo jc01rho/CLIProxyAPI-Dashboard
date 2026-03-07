@@ -94,7 +94,8 @@ Expected startup order:
 
 ---
 
-## Verification
+<details>
+<summary><h2>Verification</h2></summary>
 
 ```bash
 docker compose ps
@@ -107,9 +108,12 @@ Success signals:
 - collector health endpoint responds
 - manual trigger returns success
 
+</details>
+
 ---
 
-## Alternative: deploy from raw compose files only
+<details>
+<summary><h2>Alternative: deploy from raw compose files only</h2></summary>
 
 If you don't want to clone the full repo:
 
@@ -122,9 +126,12 @@ cp .env.example .env
 docker compose up -d
 ```
 
+</details>
+
 ---
 
-## Skill Tracker Plugin Setup
+<details>
+<summary><h2>Skill Tracker Plugin Setup</h2></summary>
 
 Tracker plugin marketplace is now maintained in the dedicated tracker repository.
 
@@ -143,9 +150,12 @@ export CLIPROXY_COLLECTOR_URL="https://your-domain/api/collector/skill-events"
 
 **Dedupe note:** do not run both marketplace plugin hook and a manual `PostToolUse: Skill` hook at the same time.
 
+</details>
+
 ---
 
-## Common operations
+<details>
+<summary><h2>Common operations</h2></summary>
 
 ### Update services
 
@@ -164,9 +174,12 @@ curl "http://localhost:8417/rest/v1/daily_stats?select=date,total_requests&order
 curl -X POST http://localhost:8417/api/collector/trigger
 ```
 
+</details>
+
 ---
 
-## Development
+<details>
+<summary><h2>Development</h2></summary>
 
 ### Frontend (hot reload)
 
@@ -187,9 +200,12 @@ pip install -r requirements.txt
 python main.py
 ```
 
+</details>
+
 ---
 
-## Troubleshooting
+<details>
+<summary><h2>Troubleshooting</h2></summary>
 
 ### Collector cannot reach CLIProxy
 
@@ -208,16 +224,21 @@ python main.py
 - Confirm postgres is healthy before postgrest starts: `docker compose ps`
 - If using an old pre-initialized volume, apply schema manually from `init-db/schema.sql`
 
+</details>
+
 ---
 
-## Key paths
+<details>
+<summary><h2>Key paths</h2></summary>
 
 - `collector/main.py` – collector + Flask endpoints
 - `collector/db.py` – PostgreSQL client + migrations runner
 - `collector/migrations/` – DB migrations (required for schema changes)
 - `frontend/src/` – dashboard UI
-- `.claude-plugin/marketplace.json` – plugin marketplace definition
-- `plugin/claude-skills-tracker/` – tracker plugin submodule
+- `plugin/claude-skills-tracker/` – tracker plugin submodule (source mirror for dashboard development)
+- Tracker marketplace source of truth: `leolionart/claude-skills-tracker`
+
+</details>
 
 ---
 

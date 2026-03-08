@@ -261,14 +261,14 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
         const isSingleDayRange = dateRange === 'today' || dateRange === 'yesterday' || isCustomSingleDay
 
         if (isSingleDayRange) {
-            if (hourlySeries.length > 0) {
+            if (trendTime !== 'hour') {
                 setTrendTime('hour')
             }
             return
         }
 
         // Multi-day ranges should default to day view
-        if (trendTime !== 'day') {
+        if (trendTime !== 'day' && dailySeries.length > 0) {
             setTrendTime('day')
             return
         }
@@ -280,6 +280,14 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
     }, [dateRange, customRange, trendTime, dailySeries.length, hourlySeries.length])
 
     const trendSeries = trendTime === 'hour' ? hourlySeries : dailySeries
+    const hasTokenSignal = trendSeries.some(p => (p.input_tokens || 0) > 0 || (p.output_tokens || 0) > 0)
+    const useRunFallbackSeries = trendSeries.length > 0 && !hasTokenSignal
+
+    const isCustomSingleDay = dateRange === 'custom'
+            && customRange?.startDate
+            && customRange?.endDate
+            && customRange.startDate === customRange.endDate
+    const isSingleDayRange = dateRange === 'today' || dateRange === 'yesterday' || isCustomSingleDay
 
     const renderCell = (r, key) => {
         switch (key) {
@@ -377,7 +385,7 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
                         <h3>Skill Funnel & Token Usage Over Time</h3>
                         <div className="chart-tabs">
                             <button className={`tab ${trendTime === 'hour' ? 'active' : ''}`} onClick={() => setTrendTime('hour')}>Hour</button>
-                            <button className={`tab ${trendTime === 'day' ? 'active' : ''}`} onClick={() => setTrendTime('day')}>Day</button>
+                            {!isSingleDayRange && <button className={`tab ${trendTime === 'day' ? 'active' : ''}`} onClick={() => setTrendTime('day')}>Day</button>}
                         </div>
                     </div>
                     <div className="chart-body chart-body-dark">
@@ -404,12 +412,19 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
                                                 <div style={CHART_TYPOGRAPHY.tooltipItem}>Failure: {(item.failure_count || 0).toLocaleString()}</div>
                                                 <div style={CHART_TYPOGRAPHY.tooltipItem}>Input: {formatNumber(item.input_tokens)}</div>
                                                 <div style={CHART_TYPOGRAPHY.tooltipItem}>Output: {formatNumber(item.output_tokens)}</div>
+                                                {useRunFallbackSeries && <div style={CHART_TYPOGRAPHY.tooltipItem}>Runs: {formatNumber(item.run_count)}</div>}
                                                 <div style={{ ...CHART_TYPOGRAPHY.tooltipItem, color: '#10b981' }}>Cost: {formatCost(item.estimated_cost)}</div>
                                             </div>
                                         )
                                     }} />
-                                    <Area type="monotone" dataKey="input_tokens" name="Input" stroke="#3b82f6" fill="url(#gradSkillTokens)" strokeWidth={2} />
-                                    <Area type="monotone" dataKey="output_tokens" name="Output" stroke="#8b5cf6" fillOpacity={0.2} fill="#8b5cf6" strokeWidth={2} />
+                                    {useRunFallbackSeries ? (
+                                        <Area type="monotone" dataKey="run_count" name="Runs" stroke="#f59e0b" fillOpacity={0.25} fill="#f59e0b" strokeWidth={2} />
+                                    ) : (
+                                        <>
+                                            <Area type="monotone" dataKey="input_tokens" name="Input" stroke="#3b82f6" fill="url(#gradSkillTokens)" strokeWidth={2} />
+                                            <Area type="monotone" dataKey="output_tokens" name="Output" stroke="#8b5cf6" fillOpacity={0.2} fill="#8b5cf6" strokeWidth={2} />
+                                        </>
+                                    )}
                                 </AreaChart>
                             </ResponsiveContainer>
                         ) : (

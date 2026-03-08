@@ -264,9 +264,10 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
 
     // Auto-switch time range when dateRange changes
     useEffect(() => {
-        const newTimeRange = (dateRange === 'today' || dateRange === 'yesterday') ? 'hour' : 'day'
+        const isCustomSingleDay = dateRange === 'custom' && customRange?.startDate && customRange?.endDate && customRange.startDate === customRange.endDate;
+        const newTimeRange = (dateRange === 'today' || dateRange === 'yesterday' || isCustomSingleDay) ? 'hour' : 'day'
         setUsageTrendTime(newTimeRange)
-    }, [dateRange])
+    }, [dateRange, customRange])
 
     useEffect(() => {
         const timer = setTimeout(() => setChartAnimated(true), 300)
@@ -275,10 +276,11 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
 
     // Auto-reset to 'hour' granularity when switching to single-day ranges
     useEffect(() => {
-        if (dateRange === 'today' || dateRange === 'yesterday') {
+        const isCustomSingleDay = dateRange === 'custom' && customRange?.startDate && customRange?.endDate && customRange.startDate === customRange.endDate;
+        if (dateRange === 'today' || dateRange === 'yesterday' || isCustomSingleDay) {
             setUsageTrendTime('hour')
         }
-    }, [dateRange])
+    }, [dateRange, customRange])
 
     // Re-trigger chart animation when switching views
     useEffect(() => {
@@ -1031,7 +1033,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                 <button className={`tab ${usageTrendView === 'models' ? 'active' : ''}`} onClick={() => setUsageTrendView('models')}>Models</button>
                                                 <button className={`tab ${usageTrendView === 'tokenTypes' ? 'active' : ''}`} onClick={() => setUsageTrendView('tokenTypes')}>Token Types</button>
                                             </div>
-                                            {usageTrendView === 'models' && !['today', 'yesterday'].includes(dateRange) && (
+                                            {usageTrendView === 'models' && !['today', 'yesterday'].includes(dateRange) && !(dateRange === 'custom' && customRange?.startDate && customRange?.endDate && customRange.startDate === customRange.endDate) && (
                                                 <div className="chart-tabs">
                                                     <button className={`tab ${usageTrendTime === 'hour' ? 'active' : ''}`} onClick={() => setUsageTrendTime('hour')}>Hour</button>
                                                     <button className={`tab ${usageTrendTime === 'day' ? 'active' : ''}`} onClick={() => setUsageTrendTime('day')}>Day</button>

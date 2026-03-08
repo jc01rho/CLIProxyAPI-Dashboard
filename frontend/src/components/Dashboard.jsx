@@ -492,18 +492,18 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
         }))
     }, [filteredDailyStats])
 
-    // Top 5 Models for Trends
+    // Top 10 Models for Trends
     const topRequestModels = useMemo(() => {
         return [...filteredModelUsage]
             .sort((a, b) => (b.request_count || 0) - (a.request_count || 0))
-            .slice(0, 5)
+            .slice(0, 10)
             .map(m => m.model_name)
     }, [filteredModelUsage])
 
     const topTokenModels = useMemo(() => {
         return [...filteredModelUsage]
             .sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0))
-            .slice(0, 5)
+            .slice(0, 10)
             .map(m => m.model_name)
     }, [filteredModelUsage])
 
@@ -511,7 +511,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
     const activeTopModels = useMemo(() => {
         return [...filteredModelUsage]
             .sort((a, b) => (b.request_count || 0) - (a.request_count || 0))
-            .slice(0, 5)
+            .slice(0, 10)
             .map(m => m.model_name)
     }, [filteredModelUsage])
 
@@ -622,28 +622,28 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
     const sparklineData = hourlyChartData.slice(-12)
     const costSparkline = dailyChartData.length >= 2 ? dailyChartData : [...Array(7)].map((_, i) => ({ cost: i === 6 ? totalCost : totalCost * (i * 0.1) }))
 
-    // Cost breakdown datasets (same top 5 model scope as Usage Trends)
-    const top5ModelSet = useMemo(() => new Set(activeTopModels), [activeTopModels])
+    // Cost breakdown datasets
+    const topModelSet = useMemo(() => new Set(activeTopModels), [activeTopModels])
 
-    const costBreakdownBase = useMemo(() => {
-        const top5Models = (filteredModelUsage || []).filter(m => top5ModelSet.has(m.model_name))
-        const top5TotalCost = top5Models.reduce((sum, m) => sum + (m.estimated_cost_usd || 0), 0)
-
-        return top5Models.map((m) => ({
+    // Full dataset for Details tab (unlimited)
+    const costBreakdownAllBase = useMemo(() => {
+        return (filteredModelUsage || []).map((m) => ({
             ...m,
-            percentage: top5TotalCost > 0 ? ((m.estimated_cost_usd || 0) / top5TotalCost * 100).toFixed(0) : '0',
+            percentage: totalCost > 0 ? ((m.estimated_cost_usd || 0) / totalCost * 100).toFixed(0) : '0',
             color: getModelColor(m.model_name)
         }))
-    }, [filteredModelUsage, top5ModelSet])
+    }, [filteredModelUsage, totalCost])
 
-    // Legend always sorted by cost (desc)
+    // Chart/legend dataset follows same top model scope as Usage Trends
     const costLegend = useMemo(() => {
-        return [...costBreakdownBase].sort((a, b) => (b.estimated_cost_usd || 0) - (a.estimated_cost_usd || 0))
-    }, [costBreakdownBase])
+        return costBreakdownAllBase
+            .filter(m => topModelSet.has(m.model_name))
+            .sort((a, b) => (b.estimated_cost_usd || 0) - (a.estimated_cost_usd || 0))
+    }, [costBreakdownAllBase, topModelSet])
 
     // Table sorting honors user-selected column/direction
     const costBreakdown = useMemo(() => {
-        return [...costBreakdownBase].sort((a, b) => {
+        return [...costBreakdownAllBase].sort((a, b) => {
             let aVal = a[tableSort.column]
             let bVal = b[tableSort.column]
 
@@ -657,7 +657,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
 
             return tableSort.direction === 'asc' ? aVal - bVal : bVal - aVal
         })
-    }, [costBreakdownBase, tableSort])
+    }, [costBreakdownAllBase, tableSort])
 
     // Handle table sort
     const handleSort = (column) => {
@@ -1150,7 +1150,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                         gap: '4px',
                                                         paddingRight: '4px'
                                                     }}>
-                                                        <span>Top 5 Models</span>
+                                                        <span>Top 10 Models</span>
                                                         <span style={{ textAlign: 'right' }}>Req</span>
                                                         <span style={{ textAlign: 'right' }}>Tokens</span>
                                                         <span style={{ textAlign: 'right', color: isDarkMode ? '#10b981' : '#059669' }}>Cost</span>
@@ -1448,7 +1448,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                             justifyContent: 'space-between',
                                                             paddingRight: '8px'
                                                         }}>
-                                                            <span>Top 5 Models</span>
+                                                            <span>Top 10 Models</span>
                                                             <span>Cost / %</span>
                                                         </div>
                                                         {costLegend.map((model, index) => (

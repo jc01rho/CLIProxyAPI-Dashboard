@@ -622,14 +622,19 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
     const sparklineData = hourlyChartData.slice(-12)
     const costSparkline = dailyChartData.length >= 2 ? dailyChartData : [...Array(7)].map((_, i) => ({ cost: i === 6 ? totalCost : totalCost * (i * 0.1) }))
 
-    // Cost breakdown datasets
+    // Cost breakdown datasets (same top 5 model scope as Usage Trends)
+    const top5ModelSet = useMemo(() => new Set(activeTopModels), [activeTopModels])
+
     const costBreakdownBase = useMemo(() => {
-        return (filteredModelUsage || []).map((m) => ({
+        const top5Models = (filteredModelUsage || []).filter(m => top5ModelSet.has(m.model_name))
+        const top5TotalCost = top5Models.reduce((sum, m) => sum + (m.estimated_cost_usd || 0), 0)
+
+        return top5Models.map((m) => ({
             ...m,
-            percentage: totalCost > 0 ? ((m.estimated_cost_usd || 0) / totalCost * 100).toFixed(0) : '0',
+            percentage: top5TotalCost > 0 ? ((m.estimated_cost_usd || 0) / top5TotalCost * 100).toFixed(0) : '0',
             color: getModelColor(m.model_name)
         }))
-    }, [filteredModelUsage, totalCost])
+    }, [filteredModelUsage, top5ModelSet])
 
     // Legend always sorted by cost (desc)
     const costLegend = useMemo(() => {
@@ -1145,7 +1150,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                         gap: '4px',
                                                         paddingRight: '4px'
                                                     }}>
-                                                        <span>Model</span>
+                                                        <span>Top 5 Models</span>
                                                         <span style={{ textAlign: 'right' }}>Req</span>
                                                         <span style={{ textAlign: 'right' }}>Tokens</span>
                                                         <span style={{ textAlign: 'right', color: isDarkMode ? '#10b981' : '#059669' }}>Cost</span>
@@ -1443,7 +1448,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                             justifyContent: 'space-between',
                                                             paddingRight: '8px'
                                                         }}>
-                                                            <span>Model</span>
+                                                            <span>Top 5 Models</span>
                                                             <span>Cost / %</span>
                                                         </div>
                                                         {costLegend.map((model, index) => (

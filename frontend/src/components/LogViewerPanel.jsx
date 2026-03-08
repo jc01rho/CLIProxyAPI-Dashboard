@@ -122,7 +122,6 @@ function LogViewerPanel({ appLogs = [], skillRuns = [], dateRange, customRange }
     }, [filteredLogs])
 
     const selectedRows = useMemo(() => filteredLogs.filter(r => selectedIds.has(r.id)), [filteredLogs, selectedIds])
-    const activeRow = selectedRows[0] || visibleLogs[0] || null
 
     const toggleSelected = (id) => {
         setSelectedIds((prev) => {
@@ -236,12 +235,6 @@ function LogViewerPanel({ appLogs = [], skillRuns = [], dateRange, customRange }
                     </div>
                 </div>
 
-                {activeRow ? (
-                    <div className="terminal-details">
-                        <div className="details-title">Selected log details</div>
-                        <pre>{activeRow.details || '(no details)'}</pre>
-                    </div>
-                ) : null}
             </div>
         </div>
     )

@@ -1893,7 +1893,8 @@ body {
 }
 
 .terminal-lines {
-  max-height: 460px;
+  height: min(78vh, calc(100vh - 250px));
+  min-height: 520px;
   overflow: auto;
   padding: 8px 0;
 }

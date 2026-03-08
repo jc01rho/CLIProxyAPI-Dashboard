@@ -98,6 +98,107 @@ api_bp = Blueprint('api', __name__, url_prefix='/api/collector')
 
 # --- API Endpoints ---
 SKILL_DEFAULT_PRICING = {'input': 3.00, 'output': 15.00}
+LOG_ALLOWED_SEVERITY = {'debug', 'info', 'warn', 'error'}
+LOG_ALLOWED_CATEGORY = {'skill', 'sync', 'credential', 'api', 'db', 'system', 'other'}
+
+
+def _normalize_log_severity(value: Any) -> str:
+    raw = str(value or '').strip().lower()
+    if raw == 'warning':
+        raw = 'warn'
+    if raw in ('fatal', 'critical'):
+        raw = 'error'
+    return raw if raw in LOG_ALLOWED_SEVERITY else 'info'
+
+
+def _normalize_log_category(value: Any) -> str:
+    raw = str(value or '').strip().lower()
+    return raw if raw in LOG_ALLOWED_CATEGORY else 'other'
+
+
+def _safe_text(value: Any, max_len: int = 1000) -> str:
+    return str(value or '').strip()[:max_len]
+
+
+def _current_local_day_bounds_utc() -> tuple[str, str]:
+    now_local = datetime.now(APP_TIMEZONE)
+    start_local = datetime(now_local.year, now_local.month, now_local.day, tzinfo=APP_TIMEZONE)
+    end_local = start_local + timedelta(days=1)
+    return start_local.astimezone(timezone.utc).isoformat(), end_local.astimezone(timezone.utc).isoformat()
+
+
+def _cleanup_old_app_logs() -> int:
+    if not db_client:
+        return 0
+
+    start_today_utc, _ = _current_local_day_bounds_utc()
+    conn = db_client._pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute('DELETE FROM app_logs WHERE logged_at < %s', (start_today_utc,))
+            deleted = cur.rowcount or 0
+        conn.commit()
+        return deleted
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Failed to cleanup old app logs: {e}", exc_info=True)
+        return 0
+    finally:
+        db_client._pool.putconn(conn)
+
+
+def _normalize_app_log_event(evt: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(evt, dict):
+        return None
+
+    message = _safe_text(evt.get('message'), 4000)
+    if not message:
+        return None
+
+    details = evt.get('details')
+    if details is not None and not isinstance(details, (dict, list, str, int, float, bool)):
+        details = str(details)
+
+    return {
+        'event_uid': _safe_text(evt.get('event_uid'), 255) or None,
+        'logged_at': _to_iso_utc(evt.get('logged_at')),
+        'source': _safe_text(evt.get('source') or 'collector', 100) or 'collector',
+        'category': _normalize_log_category(evt.get('category') or 'system'),
+        'severity': _normalize_log_severity(evt.get('severity') or 'info'),
+        'title': _safe_text(evt.get('title'), 255) or None,
+        'message': message,
+        'details': details,
+        'session_id': _safe_text(evt.get('session_id'), 255) or None,
+        'machine_id': _safe_text(evt.get('machine_id'), 255) or None,
+        'project_dir': _safe_text(evt.get('project_dir'), 500) or None,
+        'created_at': datetime.utcnow().isoformat(),
+    }
+
+
+def _log_app_event(*, source: str, category: str, severity: str, title: str, message: str, details: Optional[Dict[str, Any]] = None, event_uid: Optional[str] = None) -> None:
+    if not db_client:
+        return
+
+    evt = _normalize_app_log_event({
+        'event_uid': event_uid,
+        'logged_at': datetime.utcnow().isoformat(),
+        'source': source,
+        'category': category,
+        'severity': severity,
+        'title': title,
+        'message': message,
+        'details': details,
+    })
+    if not evt:
+        return
+
+    try:
+        if evt.get('event_uid'):
+            db_client.table('app_logs').upsert(evt, on_conflict='event_uid').execute()
+        else:
+            db_client.table('app_logs').insert(evt).execute()
+    except Exception as e:
+        logger.error(f"Failed to write app log event: {e}", exc_info=True)
 
 
 @api_bp.route('/health', methods=['GET'])
@@ -124,10 +225,52 @@ def trigger_credential_stats_sync():
             logger.info(f"Credential stats sync completed: {stats}")
         except Exception as e:
             logger.error(f"Credential stats sync failed: {e}", exc_info=True)
+            _log_app_event(
+                source='collector',
+                category='credential',
+                severity='error',
+                title='Credential sync failed',
+                message=f'Credential stats sync failed: {e}',
+                details={'error': str(e)}
+            )
 
     sync_thread = threading.Thread(target=credential_stats_task)
     sync_thread.start()
     return jsonify({"message": "Credential stats sync triggered."}), 202
+
+
+@api_bp.route('/log-events', methods=['POST'])
+def ingest_log_events():
+    if not db_client:
+        return jsonify({'error': 'database not initialized'}), 500
+
+    body = request.get_json(force=True, silent=True)
+    if not body or 'events' not in body or not isinstance(body.get('events'), list):
+        return jsonify({'error': 'missing events'}), 400
+
+    events = body['events']
+    upserted = 0
+    skipped = 0
+
+    for raw_evt in events:
+        evt = _normalize_app_log_event(raw_evt)
+        if not evt:
+            skipped += 1
+            continue
+
+        try:
+            if evt.get('event_uid'):
+                result = db_client.table('app_logs').upsert(evt, on_conflict='event_uid').execute()
+                if result.data is None:
+                    db_client.table('app_logs').insert(evt).execute()
+            else:
+                db_client.table('app_logs').insert(evt).execute()
+            upserted += 1
+        except Exception as e:
+            logger.error(f"Failed to ingest app log event: {e}", exc_info=True)
+            skipped += 1
+
+    return jsonify({'status': 'ok', 'upserted': upserted, 'skipped': skipped})
 
 
 @api_bp.route('/skill-events', methods=['POST'])
@@ -305,9 +448,25 @@ def run_full_sync_once():
     logger.info("Fetching usage data...")
     data = fetch_usage_data()
     if data:
-        store_usage_data(data)
+        ok = store_usage_data(data)
+        if not ok:
+            _log_app_event(
+                source='collector',
+                category='sync',
+                severity='error',
+                title='Usage sync failed',
+                message='Failed to store usage snapshot into database.',
+            )
     else:
         logger.warning("No data received from CLIProxy.")
+        _log_app_event(
+            source='collector',
+            category='api',
+            severity='warn',
+            title='No usage data',
+            message='No usage data received from CLIProxy API.',
+            details={'cliproxy_url': CLIPROXY_URL}
+        )
 
 # --- Core Logic Functions (fetch_remote_pricing, init_db, etc.) ---
 # These functions remain largely the same as before.
@@ -353,6 +512,14 @@ def fetch_usage_data() -> Optional[Dict[str, Any]]:
         return response.json()
     except requests.exceptions.RequestException as e:
         logger.error(f"Failed to fetch usage data: {e}")
+        _log_app_event(
+            source='collector',
+            category='api',
+            severity='error',
+            title='Usage API request failed',
+            message=f'Failed to fetch usage data: {e}',
+            details={'cliproxy_url': CLIPROXY_URL}
+        )
         return None
 
 def get_model_pricing() -> Dict[str, Dict[str, float]]:
@@ -746,6 +913,14 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
         return True
     except Exception as e:
         logger.error(f"Failed to store usage data: {e}")
+        _log_app_event(
+            source='collector',
+            category='db',
+            severity='error',
+            title='Store usage failed',
+            message=f'Failed to store usage data: {e}',
+            details={'error': str(e)}
+        )
         return False
 
 
@@ -846,6 +1021,9 @@ def main():
         db_client = init_db()
         logger.info("PostgreSQL client initialized.")
         db_client.run_migrations()
+        deleted = _cleanup_old_app_logs()
+        if deleted > 0:
+            logger.info(f"Initial app logs cleanup removed {deleted} rows older than today.")
     except Exception as e:
         logger.critical(f"CRITICAL: Failed to initialize PostgreSQL: {e}", exc_info=True)
         return
@@ -868,9 +1046,19 @@ def main():
         next_run_time=datetime.now() + timedelta(seconds=10)  # Run 10s after startup
     )
 
+    # Keep only current local-day logs, clear periodically
+    scheduler.add_job(
+        _cleanup_old_app_logs,
+        'interval',
+        minutes=30,
+        id='app_logs_cleanup',
+        next_run_time=datetime.now() + timedelta(seconds=20)
+    )
+
     scheduler.start()
     logger.info(f"Background sync scheduled every {COLLECTOR_INTERVAL} seconds.")
     logger.info(f"Credential stats sync scheduled every {COLLECTOR_INTERVAL} seconds.")
+    logger.info("App logs cleanup scheduled every 30 minutes (keep today only).")
 
     # Start the Flask app using Waitress
     logger.info(f"Flask server starting on http://0.0.0.0:{TRIGGER_PORT}")

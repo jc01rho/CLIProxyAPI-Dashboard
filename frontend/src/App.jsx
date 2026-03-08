@@ -126,6 +126,7 @@ function App() {
     const [hourlyStats, setHourlyStats] = useState([]) // NEW: hourly breakdown
     const [skillRuns, setSkillRuns] = useState([])
     const [skillDailyStats, setSkillDailyStats] = useState([])
+    const [appLogs, setAppLogs] = useState([])
     const [loading, setLoading] = useState(true) // Only for initial load
     const [isRefreshing, setIsRefreshing] = useState(false) // For date range changes
     const [lastUpdated, setLastUpdated] = useState(null)
@@ -1092,13 +1093,28 @@ function App() {
                 skillDailyQuery = skillDailyQuery.lt('stat_date', endDate)
             }
 
-            const [{ data: skillRunsData }, { data: skillDailyData }] = await Promise.all([
+            let appLogsQuery = supabase
+                .from('app_logs')
+                .select('id,event_uid,logged_at,source,category,severity,title,message,details,session_id,machine_id,project_dir')
+                .order('logged_at', { ascending: false })
+                .limit(1000)
+
+            if (startTime) {
+                appLogsQuery = appLogsQuery.gte('logged_at', startTime)
+            }
+            if (endTime) {
+                appLogsQuery = appLogsQuery.lt('logged_at', endTime)
+            }
+
+            const [{ data: skillRunsData }, { data: skillDailyData }, { data: appLogsData }] = await Promise.all([
                 skillRunsQuery,
                 skillDailyQuery,
+                appLogsQuery,
             ])
 
             setSkillRuns(skillRunsData || [])
             setSkillDailyStats(skillDailyData || [])
+            setAppLogs(appLogsData || [])
 
             setLoading(false)
             setIsRefreshing(false)
@@ -1215,6 +1231,7 @@ function App() {
                 credentialSetupRequired={credentialSetupRequired}
                 skillRuns={skillRuns}
                 skillDailyStats={skillDailyStats}
+                appLogs={appLogs}
             />
         </div>
     )

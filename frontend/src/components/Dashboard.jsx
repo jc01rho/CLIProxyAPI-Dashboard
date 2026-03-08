@@ -9,6 +9,7 @@ import CredentialStatsCard from './CredentialStatsCard'
 import ChartDialog from './ChartDialog'
 import DrilldownPanel from './DrilldownPanel'
 import SkillsPanel from './SkillsPanel'
+import LogViewerPanel from './LogViewerPanel'
 import SetupGuide from './SkillWebhookHelp'
 import { getModelColor, CHART_TYPOGRAPHY } from '../lib/brandColors'
 import 'react-date-range/dist/styles.css'
@@ -215,7 +216,7 @@ const TREND_CONFIG = {
     cost: { stroke: '#f59e0b', name: 'Cost' },
 }
 
-function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefreshing, lastUpdated, dateRange, onDateRangeChange, customRange, onCustomRangeApply, endpointUsage: rawEndpointUsage, credentialData, credentialTimeSeries, credentialLoading, credentialSetupRequired, skillRuns, skillDailyStats }) {
+function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefreshing, lastUpdated, dateRange, onDateRangeChange, customRange, onCustomRangeApply, endpointUsage: rawEndpointUsage, credentialData, credentialTimeSeries, credentialLoading, credentialSetupRequired, skillRuns, skillDailyStats, appLogs }) {
     // Auto-select time range based on dateRange: hour for today/yesterday, day for longer ranges
     const defaultTimeRange = (dateRange === 'today' || dateRange === 'yesterday') ? 'hour' : 'day'
 
@@ -869,6 +870,23 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                             </svg>
                         </span>
                         <span className="drawer-nav-label">Claude Skills</span>
+                    </button>
+                    <button
+                        className={activeTab === 'logs' ? 'active' : ''}
+                        onClick={() => { handleNavigate('logs'); setMenuOpen(false) }}
+                        role="menuitem"
+                        aria-current={activeTab === 'logs' ? 'page' : undefined}
+                        title="Log Viewer"
+                    >
+                        <span className="drawer-nav-icon">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M3 4h18" />
+                                <path d="M3 10h18" />
+                                <path d="M3 16h18" />
+                                <path d="M3 22h18" />
+                            </svg>
+                        </span>
+                        <span className="drawer-nav-label">Log Viewer</span>
                     </button>
                     <button
                         className={activeTab === 'webhook' ? 'active' : ''}
@@ -1708,6 +1726,13 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                             dateRange={dateRange}
                             customRange={customRange}
                             isDarkMode={isDarkMode}
+                        />
+                    ) : activeTab === 'logs' ? (
+                        <LogViewerPanel
+                            appLogs={appLogs}
+                            skillRuns={skillRuns}
+                            dateRange={dateRange}
+                            customRange={customRange}
                         />
                     ) : (
                         <SetupGuide isDarkMode={isDarkMode} />

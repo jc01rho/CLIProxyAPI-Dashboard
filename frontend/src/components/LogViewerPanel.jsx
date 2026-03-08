@@ -63,7 +63,7 @@ function LogViewerPanel({ appLogs = [], skillRuns = [], dateRange, customRange }
 
         const fromSkillRuns = (Array.isArray(skillRuns) ? skillRuns : []).map((row, idx) => {
             const status = (row.status || 'success').toLowerCase()
-            const severity = status === 'failure' ? 'error' : 'info'
+            const severity = status === 'failure' ? 'warn' : 'info'
             const message = status === 'failure'
                 ? (row.error_message || `Skill run failed: ${row.skill_name || 'unknown skill'}`)
                 : `Skill run succeeded: ${row.skill_name || 'unknown skill'}`

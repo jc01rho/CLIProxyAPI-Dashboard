@@ -383,10 +383,6 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
                 <div className="chart-card chart-full">
                     <div className="chart-header">
                         <h3>Skill Funnel & Token Usage Over Time</h3>
-                        <div className="chart-tabs">
-                            <button className={`tab ${trendTime === 'hour' ? 'active' : ''}`} onClick={() => setTrendTime('hour')}>Hour</button>
-                            {!isSingleDayRange && <button className={`tab ${trendTime === 'day' ? 'active' : ''}`} onClick={() => setTrendTime('day')}>Day</button>}
-                        </div>
                     </div>
                     <div className="chart-body chart-body-dark">
                         {trendSeries.length > 0 ? (

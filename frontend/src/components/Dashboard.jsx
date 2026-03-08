@@ -274,14 +274,6 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
         return () => clearTimeout(timer)
     }, [])
 
-    // Auto-reset to 'hour' granularity when switching to single-day ranges
-    useEffect(() => {
-        const isCustomSingleDay = dateRange === 'custom' && customRange?.startDate && customRange?.endDate && customRange.startDate === customRange.endDate;
-        if (dateRange === 'today' || dateRange === 'yesterday' || isCustomSingleDay) {
-            setUsageTrendTime('hour')
-        }
-    }, [dateRange, customRange])
-
     // Re-trigger chart animation when switching views
     useEffect(() => {
         setChartAnimated(false)
@@ -1033,12 +1025,6 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                                 <button className={`tab ${usageTrendView === 'models' ? 'active' : ''}`} onClick={() => setUsageTrendView('models')}>Models</button>
                                                 <button className={`tab ${usageTrendView === 'tokenTypes' ? 'active' : ''}`} onClick={() => setUsageTrendView('tokenTypes')}>Token Types</button>
                                             </div>
-                                            {usageTrendView === 'models' && !['today', 'yesterday'].includes(dateRange) && !(dateRange === 'custom' && customRange?.startDate && customRange?.endDate && customRange.startDate === customRange.endDate) && (
-                                                <div className="chart-tabs">
-                                                    <button className={`tab ${usageTrendTime === 'hour' ? 'active' : ''}`} onClick={() => setUsageTrendTime('hour')}>Hour</button>
-                                                    <button className={`tab ${usageTrendTime === 'day' ? 'active' : ''}`} onClick={() => setUsageTrendTime('day')}>Day</button>
-                                                </div>
-                                            )}
                                         </div>
                                     </div>
                                     <div className="chart-body chart-body-dark">

@@ -2,6 +2,9 @@ import { useState, useEffect, useCallback } from 'react'
 import { supabase } from './lib/supabase'
 import Dashboard from './components/Dashboard'
 
+const APP_LOGS_PAGE_SIZE = Number(import.meta.env.VITE_APP_LOGS_PAGE_SIZE || 500)
+const FRONTEND_AUTO_REFRESH_MS = Math.max(1000, Number(import.meta.env.VITE_AUTO_REFRESH_SECONDS || 60) * 1000)
+
 // Helper to get date boundaries based on range ID
 // Uses local timezone for date display, converts to UTC for timestamp queries
 const getDateBoundaries = (rangeId, customRange) => {
@@ -1097,7 +1100,8 @@ function App() {
                 .from('app_logs')
                 .select('id,event_uid,logged_at,source,category,severity,title,message,details,session_id,machine_id,project_dir')
                 .order('logged_at', { ascending: false })
-                .limit(1000)
+                .order('id', { ascending: false })
+                .limit(APP_LOGS_PAGE_SIZE)
 
             if (startTime) {
                 appLogsQuery = appLogsQuery.gte('logged_at', startTime)
@@ -1112,9 +1116,11 @@ function App() {
                 appLogsQuery,
             ])
 
+            const appRows = appLogsData || []
+
             setSkillRuns(skillRunsData || [])
             setSkillDailyStats(skillDailyData || [])
-            setAppLogs(appLogsData || [])
+            setAppLogs(appRows)
 
             setLoading(false)
             setIsRefreshing(false)
@@ -1132,11 +1138,10 @@ function App() {
     }, [dateRange, fetchData, fetchCredentialStats])
 
     useEffect(() => {
-        // Refresh every 5 minutes
         const interval = setInterval(() => {
             fetchData(dateRange)
             fetchCredentialStats(dateRange)
-        }, 5 * 60 * 1000)
+        }, FRONTEND_AUTO_REFRESH_MS)
 
         return () => {
             clearInterval(interval)
@@ -1202,6 +1207,25 @@ function App() {
         setDateRange(days)
     }
 
+    const clearAllAppLogs = useCallback(async () => {
+        const isProduction = import.meta.env.PROD
+        const collectorBase = isProduction
+            ? '/api/collector'
+            : (import.meta.env.VITE_COLLECTOR_URL || 'http://localhost:5001')
+
+        const response = await fetch(`${collectorBase}/logs/clear`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scope: 'all' })
+        })
+
+        if (!response.ok) {
+            throw new Error(`Clear logs failed: ${response.status}`)
+        }
+
+        await fetchData(dateRange)
+    }, [dateRange, fetchData])
+
     const handleCustomRangeApply = (range) => {
         setCustomRange({
             startDate: range.startDate || null,
@@ -1232,6 +1256,7 @@ function App() {
                 skillRuns={skillRuns}
                 skillDailyStats={skillDailyStats}
                 appLogs={appLogs}
+                onClearAllLogs={clearAllAppLogs}
             />
         </div>
     )

@@ -1855,6 +1855,11 @@ body {
   box-shadow: 0 0 8px #22c55e;
 }
 
+.live-state.paused .dot {
+  background: #f59e0b;
+  box-shadow: 0 0 8px #f59e0b;
+}
+
 .terminal-window {
   border: 1px solid var(--color-border-glass);
   border-radius: 12px;
@@ -1892,11 +1897,33 @@ body {
   font-size: 12px;
 }
 
+.terminal-lines-wrap {
+  position: relative;
+}
+
 .terminal-lines {
   height: min(78vh, calc(100vh - 250px));
   min-height: 520px;
   overflow: auto;
   padding: 8px 0;
+}
+
+.jump-latest-btn {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  border: 1px solid var(--color-border-glass);
+  border-radius: 8px;
+  background: rgba(28, 30, 40, 0.95);
+  color: #c8ccd6;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.jump-latest-btn:hover {
+  background: rgba(38, 42, 56, 0.95);
 }
 
 .terminal-line {
@@ -2055,6 +2082,17 @@ body {
 
 .dashboard.light .terminal-line.selected {
   background: rgba(59, 130, 246, 0.16);
+}
+
+.dashboard.light .jump-latest-btn {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+  color: #334155;
+}
+
+.dashboard.light .jump-latest-btn:hover {
+  background: #eef3f9;
+  border-color: #94a3b8;
 }
 
 .dashboard.light .line-time {
@@ -3600,6 +3638,12 @@ body {
   border-color: transparent;
 }
 
+.guide-copy-btn.copied {
+  background: rgba(16, 185, 129, 0.2);
+  border-color: rgba(16, 185, 129, 0.45);
+  color: #34d399;
+}
+
 .guide-tip {
   margin-top: var(--space-md);
   padding: var(--space-md);
@@ -3663,6 +3707,12 @@ body {
   background: #f1f5f9;
   border-color: #e2e8f0;
   color: #475569;
+}
+
+.dashboard.light .guide-copy-btn.copied {
+  background: #ecfdf5;
+  border-color: #86efac;
+  color: #15803d;
 }
 
 .dashboard.light .guide-tip {

@@ -215,6 +215,9 @@ CREATE TABLE IF NOT EXISTS app_logs (
 CREATE INDEX IF NOT EXISTS idx_app_logs_logged_at
     ON app_logs(logged_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_app_logs_logged_at_id_desc
+    ON app_logs(logged_at DESC, id DESC);
+
 CREATE INDEX IF NOT EXISTS idx_app_logs_severity_logged_at
     ON app_logs(severity, logged_at DESC);
 

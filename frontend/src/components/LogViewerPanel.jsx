@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 const PAGE_SIZE = 500
 const COPY_MAX_ROWS = 300
 const COPY_MAX_CHARS = 30000
 const SEVERITY_OPTIONS = ['all', 'debug', 'info', 'warn', 'error']
+const SCROLL_BOTTOM_THRESHOLD = 24
 
 const formatTime = (iso) => {
     if (!iso) return '--:--:--'
@@ -41,12 +42,17 @@ const redactSensitive = (text) => {
     return out
 }
 
-function LogViewerPanel({ appLogs = [], skillRuns = [], dateRange, customRange }) {
+function LogViewerPanel({ appLogs = [], skillRuns = [], dateRange, customRange, onClearAllLogs }) {
     const [severityFilter, setSeverityFilter] = useState('all')
     const [searchText, setSearchText] = useState('')
     const [paused, setPaused] = useState(false)
     const [frozenLogs, setFrozenLogs] = useState([])
     const [selectedIds, setSelectedIds] = useState(new Set())
+    const [lastSelectedId, setLastSelectedId] = useState(null)
+    const [clearedAtMs, setClearedAtMs] = useState(null)
+    const [showJumpToLatest, setShowJumpToLatest] = useState(false)
+    const linesRef = useRef(null)
+    const wasNearBottomRef = useRef(true)
 
     const mergedLogs = useMemo(() => {
         const fromAppLogs = (Array.isArray(appLogs) ? appLogs : []).map((row) => ({
@@ -104,14 +110,18 @@ function LogViewerPanel({ appLogs = [], skillRuns = [], dateRange, customRange }
     const filteredLogs = useMemo(() => {
         const q = searchText.trim().toLowerCase()
         return displayLogs.filter((r) => {
+            if (clearedAtMs) {
+                const t = new Date(r.time).getTime()
+                if (!Number.isFinite(t) || t <= clearedAtMs) return false
+            }
             if (severityFilter !== 'all' && r.severity !== severityFilter) return false
             if (!q) return true
             const hay = `${r.title} ${r.message} ${r.context} ${r.details} ${r.source} ${r.category}`.toLowerCase()
             return hay.includes(q)
         })
-    }, [displayLogs, severityFilter, searchText])
+    }, [displayLogs, severityFilter, searchText, clearedAtMs])
 
-    const visibleLogs = useMemo(() => filteredLogs.slice(0, PAGE_SIZE), [filteredLogs])
+    const visibleLogs = useMemo(() => filteredLogs.slice().reverse().slice(-PAGE_SIZE), [filteredLogs])
 
     const summary = useMemo(() => {
         const bySeverity = {}
@@ -121,21 +131,72 @@ function LogViewerPanel({ appLogs = [], skillRuns = [], dateRange, customRange }
         return { bySeverity }
     }, [filteredLogs])
 
-    const selectedRows = useMemo(() => filteredLogs.filter(r => selectedIds.has(r.id)), [filteredLogs, selectedIds])
+    const selectedRows = useMemo(() => visibleLogs.filter(r => selectedIds.has(r.id)), [visibleLogs, selectedIds])
 
-    const toggleSelected = (id) => {
+    const isNearBottom = (el) => (el.scrollHeight - el.scrollTop - el.clientHeight) <= SCROLL_BOTTOM_THRESHOLD
+
+    const scrollToLatest = () => {
+        const el = linesRef.current
+        if (!el) return
+        el.scrollTop = el.scrollHeight
+        wasNearBottomRef.current = true
+        setShowJumpToLatest(false)
+    }
+
+    const handleLinesScroll = () => {
+        const el = linesRef.current
+        if (!el) return
+        const nearBottom = isNearBottom(el)
+        wasNearBottomRef.current = nearBottom
+        setShowJumpToLatest(!nearBottom)
+    }
+
+    const toggleSelected = (id, withRange = false) => {
         setSelectedIds((prev) => {
             const next = new Set(prev)
+
+            if (withRange && lastSelectedId) {
+                const start = visibleLogs.findIndex((row) => row.id === lastSelectedId)
+                const end = visibleLogs.findIndex((row) => row.id === id)
+                if (start >= 0 && end >= 0) {
+                    const [from, to] = start <= end ? [start, end] : [end, start]
+                    for (let i = from; i <= to; i++) {
+                        next.add(visibleLogs[i].id)
+                    }
+                    return next
+                }
+            }
+
             if (next.has(id)) next.delete(id)
             else next.add(id)
             return next
         })
+
+        setLastSelectedId(id)
     }
 
-    const clearView = () => {
+    const selectSingle = (id) => {
+        setSelectedIds(new Set([id]))
+        setLastSelectedId(id)
+    }
+
+    const clearView = async () => {
         setSeverityFilter('all')
         setSearchText('')
         setSelectedIds(new Set())
+        setLastSelectedId(null)
+
+        if (dateRange === 'all' && onClearAllLogs) {
+            try {
+                await onClearAllLogs()
+                setClearedAtMs(null)
+            } catch {
+                setClearedAtMs(Date.now())
+            }
+            return
+        }
+
+        setClearedAtMs(Date.now())
     }
 
     const buildCopyPayload = (rows, modeLabel) => {
@@ -176,6 +237,23 @@ function LogViewerPanel({ appLogs = [], skillRuns = [], dateRange, customRange }
         try { await navigator.clipboard.writeText(text) } catch { /* no-op */ }
     }
 
+    useEffect(() => {
+        if (paused) return
+        const el = linesRef.current
+        if (!el) return
+
+        if (wasNearBottomRef.current) {
+            el.scrollTop = el.scrollHeight
+            wasNearBottomRef.current = true
+            setShowJumpToLatest(false)
+            return
+        }
+
+        const nearBottomNow = isNearBottom(el)
+        wasNearBottomRef.current = nearBottomNow
+        setShowJumpToLatest(!nearBottomNow)
+    }, [visibleLogs, paused])
+
     return (
         <div className="skills-panel log-viewer-panel">
             <div className="terminal-log-shell">
@@ -205,7 +283,7 @@ function LogViewerPanel({ appLogs = [], skillRuns = [], dateRange, customRange }
                         <button className="terminal-btn" onClick={clearView}>Clear</button>
                         <button className="terminal-btn" onClick={() => copyText(buildCopyPayload(selectedRows, 'selected'))}>Copy Selected</button>
                         <button className="terminal-btn" onClick={() => copyText(buildCopyPayload(filteredLogs, 'top-filtered'))}>Copy Filtered</button>
-                        <div className="live-state"><span className="dot" />{paused ? 'Paused' : 'Live'} · {filteredLogs.length} entries</div>
+                        <div className={`live-state ${paused ? 'paused' : 'live'}`}><span className="dot" />{paused ? 'Paused' : 'Live'}{clearedAtMs ? ' · Cleared' : ''}</div>
                     </div>
                 </div>
 
@@ -215,22 +293,29 @@ function LogViewerPanel({ appLogs = [], skillRuns = [], dateRange, customRange }
                         <div className="terminal-title">log-viewer</div>
                     </div>
 
-                    <div className="terminal-lines">
-                        {visibleLogs.length > 0 ? visibleLogs.map((r) => {
-                            const line = `${r.source} → ${r.title ? `${r.title} · ` : ''}${r.message}${r.context ? ` · ${r.context}` : ''}`
-                            return (
-                                <button
-                                    key={r.id}
-                                    className={`terminal-line ${selectedIds.has(r.id) ? 'selected' : ''}`}
-                                    onClick={() => toggleSelected(r.id)}
-                                >
-                                    <span className="line-time">{formatTime(r.time)}</span>
-                                    <span className={`line-sev sev-${r.severity}`}>{r.severity.toUpperCase()}</span>
-                                    <span className="line-msg">{line}</span>
-                                </button>
-                            )
-                        }) : (
-                            <div className="terminal-empty">No logs found in this range</div>
+                    <div className="terminal-lines-wrap">
+                        <div className="terminal-lines" ref={linesRef} onScroll={handleLinesScroll}>
+                            {visibleLogs.length > 0 ? visibleLogs.map((r) => {
+                                const line = `${r.source} → ${r.title ? `${r.title} · ` : ''}${r.message}${r.context ? ` · ${r.context}` : ''}`
+                                return (
+                                    <button
+                                        key={r.id}
+                                        className={`terminal-line ${selectedIds.has(r.id) ? 'selected' : ''}`}
+                                        onClick={(e) => toggleSelected(r.id, e.shiftKey)}
+                                        onDoubleClick={() => selectSingle(r.id)}
+                                    >
+                                        <span className="line-time">{formatTime(r.time)}</span>
+                                        <span className={`line-sev sev-${r.severity}`}>{r.severity.toUpperCase()}</span>
+                                        <span className="line-msg">{line}</span>
+                                    </button>
+                                )
+                            }) : (
+                                <div className="terminal-empty">No logs found in this range</div>
+                            )}
+                        </div>
+
+                        {showJumpToLatest && (
+                            <button className="jump-latest-btn" onClick={scrollToLatest}>Latest</button>
                         )}
                     </div>
                 </div>

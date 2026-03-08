@@ -9,8 +9,9 @@ import time
 import hashlib
 import logging
 import threading
+from uuid import uuid4
 from datetime import datetime, date, timezone, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from pathlib import Path
 
 import requests
@@ -39,12 +40,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def _env_int(name: str, default: int, min_value: int = 1) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        return max(min_value, int(raw))
+    except Exception:
+        return max(min_value, default)
+
+
 # Configuration from environment
 DATABASE_URL = os.getenv('DATABASE_URL', '')
 CLIPROXY_URL = os.getenv('CLIPROXY_URL', 'http://localhost:8317')
 CLIPROXY_MANAGEMENT_KEY = os.getenv('CLIPROXY_MANAGEMENT_KEY', '')
-COLLECTOR_INTERVAL = int(os.getenv('COLLECTOR_INTERVAL_SECONDS', '300'))
-TRIGGER_PORT = int(os.getenv('COLLECTOR_TRIGGER_PORT', '5001'))
+COLLECTOR_INTERVAL = _env_int('COLLECTOR_INTERVAL_SECONDS', 60)
+CREDENTIAL_SYNC_INTERVAL = _env_int('CREDENTIAL_SYNC_INTERVAL_SECONDS', COLLECTOR_INTERVAL)
+APP_LOG_CLEANUP_INTERVAL_MINUTES = _env_int('APP_LOG_CLEANUP_INTERVAL_MINUTES', 30)
+TRIGGER_PORT = _env_int('COLLECTOR_TRIGGER_PORT', 5001)
+
+LOG_VERBOSITY = str(os.getenv('LOG_VERBOSITY', 'normal')).strip().lower()
+if LOG_VERBOSITY not in {'minimal', 'normal', 'debug'}:
+    LOG_VERBOSITY = 'normal'
+LOG_DEBUG_EVENTS = str(os.getenv('LOG_DEBUG_EVENTS', 'false')).strip().lower() in {'1', 'true', 'yes', 'on'}
+LOG_DEBUG_EVENTS_MAX_PER_SYNC = _env_int('LOG_DEBUG_EVENTS_MAX_PER_SYNC', 200, min_value=0)
+APP_LOG_RETENTION_DAYS = _env_int('APP_LOG_RETENTION_DAYS', 30)
 
 
 # Default pricing (USD per 1M tokens) - Updated Dec 2024
@@ -102,6 +120,36 @@ LOG_ALLOWED_SEVERITY = {'debug', 'info', 'warn', 'error'}
 LOG_ALLOWED_CATEGORY = {'skill', 'sync', 'credential', 'api', 'db', 'system', 'other'}
 
 
+def _should_log_event(severity: str, is_debug_event: bool = False) -> bool:
+    sev = _normalize_log_severity(severity)
+    if LOG_VERBOSITY == 'minimal':
+        return sev in {'warn', 'error'}
+    if sev == 'debug' and LOG_VERBOSITY != 'debug':
+        return False
+    if is_debug_event and (LOG_VERBOSITY != 'debug' or not LOG_DEBUG_EVENTS):
+        return False
+    return True
+
+
+def _log_sync_event(*, run_id: str, source: str, category: str, severity: str, title: str, message: str, details: Optional[Dict[str, Any]] = None, event_uid: Optional[str] = None, is_debug_event: bool = False) -> None:
+    if not _should_log_event(severity, is_debug_event=is_debug_event):
+        return
+
+    merged_details = {'run_id': run_id}
+    if isinstance(details, dict):
+        merged_details.update(details)
+
+    _log_app_event(
+        source=source,
+        category=category,
+        severity=severity,
+        title=title,
+        message=message,
+        details=merged_details,
+        event_uid=event_uid,
+    )
+
+
 def _normalize_log_severity(value: Any) -> str:
     raw = str(value or '').strip().lower()
     if raw == 'warning':
@@ -131,11 +179,14 @@ def _cleanup_old_app_logs() -> int:
     if not db_client:
         return 0
 
-    start_today_utc, _ = _current_local_day_bounds_utc()
+    now_local = datetime.now(APP_TIMEZONE)
+    cutoff_local = now_local - timedelta(days=APP_LOG_RETENTION_DAYS)
+    cutoff_utc = cutoff_local.astimezone(timezone.utc).isoformat()
+
     conn = db_client._pool.getconn()
     try:
         with conn.cursor() as cur:
-            cur.execute('DELETE FROM app_logs WHERE logged_at < %s', (start_today_utc,))
+            cur.execute('DELETE FROM app_logs WHERE logged_at < %s', (cutoff_utc,))
             deleted = cur.rowcount or 0
         conn.commit()
         return deleted
@@ -237,6 +288,41 @@ def trigger_credential_stats_sync():
     sync_thread = threading.Thread(target=credential_stats_task)
     sync_thread.start()
     return jsonify({"message": "Credential stats sync triggered."}), 202
+
+
+@api_bp.route('/logs/clear', methods=['POST'])
+def clear_logs_endpoint():
+    if not db_client:
+        return jsonify({'error': 'database not initialized'}), 500
+
+    body = request.get_json(force=True, silent=True) or {}
+    clear_scope = str(body.get('scope') or '').strip().lower()
+    if clear_scope != 'all':
+        return jsonify({'error': 'scope must be all'}), 400
+
+    conn = db_client._pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute('DELETE FROM app_logs')
+            deleted = cur.rowcount or 0
+        conn.commit()
+
+        _log_app_event(
+            source='collector',
+            category='system',
+            severity='warn',
+            title='App logs cleared',
+            message='App logs were cleared from dashboard clear action.',
+            details={'deleted_rows': deleted, 'scope': 'all'}
+        )
+
+        return jsonify({'status': 'ok', 'deleted': deleted})
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Failed to clear app logs: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db_client._pool.putconn(conn)
 
 
 @api_bp.route('/log-events', methods=['POST'])
@@ -445,28 +531,96 @@ def ingest_skill_events():
 # --- Sync Functions ---
 def run_full_sync_once():
     """Helper function to run a single full sync process (data collection)."""
+    run_id = uuid4().hex[:12]
+    sync_started_at = time.time()
+
+    _log_sync_event(
+        run_id=run_id,
+        source='collector',
+        category='sync',
+        severity='info',
+        title='Sync started',
+        message='Collector full sync started.',
+        details={'cliproxy_url': CLIPROXY_URL, 'verbosity': LOG_VERBOSITY}
+    )
+
     logger.info("Fetching usage data...")
-    data = fetch_usage_data()
+    _log_sync_event(
+        run_id=run_id,
+        source='collector',
+        category='api',
+        severity='info',
+        title='Fetch usage started',
+        message='Starting usage fetch from CLIProxy management API.',
+    )
+
+    data, fetch_meta = fetch_usage_data()
     if data:
-        ok = store_usage_data(data)
-        if not ok:
-            _log_app_event(
+        _log_sync_event(
+            run_id=run_id,
+            source='collector',
+            category='api',
+            severity='info',
+            title='Fetch usage ok',
+            message='Usage data fetched successfully from CLIProxy API.',
+            details=fetch_meta
+        )
+
+        _log_sync_event(
+            run_id=run_id,
+            source='collector',
+            category='db',
+            severity='info',
+            title='Store usage started',
+            message='Starting persistence of usage snapshot to database.',
+        )
+
+        ok, store_summary = store_usage_data(data, run_id=run_id)
+        if ok:
+            _log_sync_event(
+                run_id=run_id,
                 source='collector',
-                category='sync',
+                category='db',
+                severity='info',
+                title='Store usage ok',
+                message='Usage snapshot persisted successfully.',
+                details=store_summary
+            )
+        else:
+            _log_sync_event(
+                run_id=run_id,
+                source='collector',
+                category='db',
                 severity='error',
-                title='Usage sync failed',
+                title='Store usage failed',
                 message='Failed to store usage snapshot into database.',
+                details=store_summary,
             )
     else:
         logger.warning("No data received from CLIProxy.")
-        _log_app_event(
+        _log_sync_event(
+            run_id=run_id,
             source='collector',
             category='api',
             severity='warn',
-            title='No usage data',
+            title='Fetch usage failed',
             message='No usage data received from CLIProxy API.',
-            details={'cliproxy_url': CLIPROXY_URL}
+            details=fetch_meta or {'cliproxy_url': CLIPROXY_URL}
         )
+
+    duration_ms = int((time.time() - sync_started_at) * 1000)
+    _log_sync_event(
+        run_id=run_id,
+        source='collector',
+        category='sync',
+        severity='info',
+        title='Sync completed',
+        message='Collector full sync completed.',
+        details={
+            'duration_ms': duration_ms,
+            'result': 'success' if data else 'partial',
+        }
+    )
 
 # --- Core Logic Functions (fetch_remote_pricing, init_db, etc.) ---
 # These functions remain largely the same as before.
@@ -502,15 +656,26 @@ def init_db() -> PostgreSQLClient:
         raise ValueError("DATABASE_URL must be set")
     return PostgreSQLClient(DATABASE_URL)
 
-def fetch_usage_data() -> Optional[Dict[str, Any]]:
+def fetch_usage_data() -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     # (Implementation from before)
     url = f"{CLIPROXY_URL}/v0/management/usage"
     headers = {'Authorization': f'Bearer {CLIPROXY_MANAGEMENT_KEY}'} if CLIPROXY_MANAGEMENT_KEY else {}
+    started = time.time()
     try:
         response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
-        return response.json()
+        payload = response.json()
+        duration_ms = int((time.time() - started) * 1000)
+        meta = {
+            'cliproxy_url': CLIPROXY_URL,
+            'http_status': response.status_code,
+            'latency_ms': duration_ms,
+            'payload_bytes': len(response.content or b''),
+            'has_usage': isinstance(payload, dict) and 'usage' in payload,
+        }
+        return payload, meta
     except requests.exceptions.RequestException as e:
+        duration_ms = int((time.time() - started) * 1000)
         logger.error(f"Failed to fetch usage data: {e}")
         _log_app_event(
             source='collector',
@@ -518,9 +683,9 @@ def fetch_usage_data() -> Optional[Dict[str, Any]]:
             severity='error',
             title='Usage API request failed',
             message=f'Failed to fetch usage data: {e}',
-            details={'cliproxy_url': CLIPROXY_URL}
+            details={'cliproxy_url': CLIPROXY_URL, 'latency_ms': duration_ms}
         )
-        return None
+        return None, {'cliproxy_url': CLIPROXY_URL, 'latency_ms': duration_ms, 'error': str(e)}
 
 def get_model_pricing() -> Dict[str, Dict[str, float]]:
     # (Implementation from before)
@@ -543,14 +708,25 @@ def calculate_cost(input_tokens: int, output_tokens: int, pricing: Dict[str, flo
     # (Implementation from before)
     return ((input_tokens / 1_000_000) * pricing['input']) + ((output_tokens / 1_000_000) * pricing['output'])
 
-def store_usage_data(data: Dict[str, Any]) -> bool:
+def store_usage_data(data: Dict[str, Any], run_id: Optional[str] = None) -> Tuple[bool, Dict[str, Any]]:
     """Store usage data in PostgreSQL database with proper daily delta calculation."""
     if not db_client or not data or 'usage' not in data:
-        return False
+        return False, {'error': 'missing database client or usage payload', 'run_id': run_id}
     usage = data['usage']
     pricing = get_model_pricing()
-    
+    debug_budget = LOG_DEBUG_EVENTS_MAX_PER_SYNC
+    debug_dropped = 0
+    anomaly_debug_events = []
+
     try:
+        started_at = time.time()
+        db_timings_ms = {
+            'snapshot_insert': 0,
+            'model_usage_insert': 0,
+            'snapshot_cost_update': 0,
+            'daily_stats_upsert': 0,
+        }
+
         # Current cumulative values from CLIProxy
         current_requests = usage.get('total_requests', 0)
         current_success = usage.get('success_count', 0)
@@ -574,7 +750,9 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
         last_cost_total = float(last_cost_resp.data[0].get('cumulative_cost_usd', 0) or 0) if last_cost_resp.data else 0.0
         snapshot_data['cumulative_cost_usd'] = last_cost_total  # placeholder, updated after cost calc
 
+        t0 = time.time()
         snapshot_result = db_client.table('usage_snapshots').insert(snapshot_data).execute()
+        db_timings_ms['snapshot_insert'] = int((time.time() - t0) * 1000)
         snapshot_id = snapshot_result.data[0]['id']
         
         # Process model-level data
@@ -603,11 +781,15 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                 })
         
         if model_records:
+            t0 = time.time()
             db_client.table('model_usage').insert(model_records).execute()
+            db_timings_ms['model_usage_insert'] = int((time.time() - t0) * 1000)
 
         # Update snapshot cumulative cost
         cumulative_cost = last_cost_total + total_cost
+        t0 = time.time()
         db_client.table('usage_snapshots').update({'cumulative_cost_usd': cumulative_cost}).eq('id', snapshot_id).execute()
+        db_timings_ms['snapshot_cost_update'] = int((time.time() - t0) * 1000)
 
         # === Calculate daily delta stats (Incremental Approach) ===
         # Robust against restarts: Calculate delta since LAST snapshot and add to daily_stats
@@ -637,6 +819,22 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
             # Detect restart (negative delta) -> Treat current value as the full increment
             if inc_requests < 0 or inc_tokens < 0:
                 logger.warning(f"Restart detected! Prev Req: {prev_snap.get('total_requests')}, Curr Req: {current_requests}")
+                if run_id:
+                    _log_sync_event(
+                        run_id=run_id,
+                        source='collector',
+                        category='sync',
+                        severity='warn',
+                        title='Restart detected',
+                        message='Detected counter reset while calculating daily incremental delta.',
+                        details={
+                            'snapshot_id': snapshot_id,
+                            'prev_total_requests': prev_snap.get('total_requests', 0),
+                            'prev_total_tokens': prev_snap.get('total_tokens', 0),
+                            'current_total_requests': current_requests,
+                            'current_total_tokens': current_tokens,
+                        }
+                    )
                 inc_requests = current_requests
                 inc_success = current_success
                 inc_failure = current_failure
@@ -717,6 +915,23 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
 
                 # Granular restart detection
                 if d_req < 0 or d_tok < 0:
+                    if run_id:
+                        _log_sync_event(
+                            run_id=run_id,
+                            source='collector',
+                            category='sync',
+                            severity='warn',
+                            title='Per-model restart detected',
+                            message='Detected negative per-model delta and replaced with current cumulative values.',
+                            details={
+                                'snapshot_id': snapshot_id,
+                                'model_endpoint_key': key,
+                                'delta_requests': d_req,
+                                'delta_tokens': d_tok,
+                                'current_requests': c_req,
+                                'current_tokens': c_tok,
+                            }
+                        )
                     d_req = c_req
                     d_tok = c_tok
                     d_cost = c_cost
@@ -731,6 +946,23 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                     # If delta is roughly equal to Current (Cumulative), it's a False Start.
                     if abs(d_cost - c_cost) < 0.1:
                         logger.warning(f"Skipping False Start: ${d_cost:.2f} for key {key} (Snap {snapshot_id}). Removing from global stats.")
+                        if run_id:
+                            _log_sync_event(
+                                run_id=run_id,
+                                source='collector',
+                                category='sync',
+                                severity='warn',
+                                title='False start filtered',
+                                message='Large first-seen cumulative model usage was filtered from daily delta.',
+                                details={
+                                    'snapshot_id': snapshot_id,
+                                    'model_endpoint_key': key,
+                                    'delta_requests': d_req,
+                                    'delta_tokens': d_tok,
+                                    'delta_cost_usd': d_cost,
+                                    'current_cost_usd': c_cost,
+                                }
+                            )
                         # Adjust global increments to remove this false start
                         inc_requests -= d_req
                         inc_tokens -= d_tok
@@ -833,6 +1065,21 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
 
                 if ratio < 0.99: # Only adjust if there's a significant difference
                     logger.warning(f"Adjusting global stats due to breakdown mismatch (False Starts likely). Ratio: {ratio:.4f}")
+                    if run_id:
+                        _log_sync_event(
+                            run_id=run_id,
+                            source='collector',
+                            category='sync',
+                            severity='warn',
+                            title='Breakdown mismatch adjusted',
+                            message='Adjusted success/failure counts due to mismatch between global and breakdown deltas.',
+                            details={
+                                'snapshot_id': snapshot_id,
+                                'ratio': ratio,
+                                'original_incremental_requests': inc_requests,
+                                'safe_incremental_requests': safe_inc_requests,
+                            }
+                        )
                     inc_success = int(inc_success * ratio)
                     inc_failure = int(inc_failure * ratio)
 
@@ -907,10 +1154,96 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
             'breakdown': existing_breakdown # Save the updated breakdown
         }
 
+        t0 = time.time()
         db_client.table('daily_stats').upsert(daily_data, on_conflict='stat_date').execute()
+        db_timings_ms['daily_stats_upsert'] = int((time.time() - t0) * 1000)
+
+        if run_id:
+            debug_candidates = sorted(
+                [
+                    {
+                        'model_name': model,
+                        'requests': stats.get('requests', 0),
+                        'tokens': stats.get('tokens', 0),
+                        'cost': round(float(stats.get('cost', 0) or 0), 6),
+                    }
+                    for model, stats in (breakdown_deltas.get('models') or {}).items()
+                ],
+                key=lambda item: (item['cost'], item['tokens'], item['requests']),
+                reverse=True,
+            )
+
+            for entry in debug_candidates:
+                if debug_budget <= 0:
+                    debug_dropped += 1
+                    continue
+                anomaly_debug_events.append(entry)
+                debug_budget -= 1
+
+            for entry in anomaly_debug_events:
+                _log_sync_event(
+                    run_id=run_id,
+                    source='collector',
+                    category='sync',
+                    severity='debug',
+                    title='Per-model delta snapshot',
+                    message=f"Model delta: {entry['model_name']}",
+                    details=entry,
+                    is_debug_event=True,
+                )
+
+            if debug_dropped > 0:
+                _log_sync_event(
+                    run_id=run_id,
+                    source='collector',
+                    category='sync',
+                    severity='debug',
+                    title='Debug event cap reached',
+                    message='Some debug model-delta events were dropped due to per-sync cap.',
+                    details={
+                        'dropped_events': debug_dropped,
+                        'cap': LOG_DEBUG_EVENTS_MAX_PER_SYNC,
+                    },
+                    is_debug_event=True,
+                )
+
+            _log_sync_event(
+                run_id=run_id,
+                source='collector',
+                category='sync',
+                severity='info',
+                title='Delta summary',
+                message='Daily delta summary for current sync has been computed.',
+                details={
+                    'snapshot_id': snapshot_id,
+                    'incremental_requests': inc_requests,
+                    'incremental_success': inc_success,
+                    'incremental_failure': inc_failure,
+                    'incremental_tokens': inc_tokens,
+                    'incremental_cost_usd': round(float(inc_cost or 0), 6),
+                    'daily_total_requests': daily_data['total_requests'],
+                    'daily_total_tokens': daily_data['total_tokens'],
+                    'daily_total_cost_usd': round(float(daily_data['estimated_cost_usd'] or 0), 6),
+                    'model_rows_inserted': len(model_records),
+                    'db_timings_ms': db_timings_ms,
+                    'duration_ms': int((time.time() - started_at) * 1000),
+                },
+            )
 
         logger.info(f"Stored snapshot {snapshot_id}. Incremental: {inc_requests} req. Daily Total: {daily_data['total_requests']}")
-        return True
+        return True, {
+            'run_id': run_id,
+            'snapshot_id': snapshot_id,
+            'model_rows_inserted': len(model_records),
+            'incremental_requests': inc_requests,
+            'incremental_tokens': inc_tokens,
+            'incremental_cost_usd': round(float(inc_cost or 0), 6),
+            'daily_total_requests': daily_data['total_requests'],
+            'daily_total_tokens': daily_data['total_tokens'],
+            'daily_total_cost_usd': round(float(daily_data['estimated_cost_usd'] or 0), 6),
+            'db_timings_ms': db_timings_ms,
+            'duration_ms': int((time.time() - started_at) * 1000),
+        }
     except Exception as e:
         logger.error(f"Failed to store usage data: {e}")
         _log_app_event(
@@ -919,9 +1252,9 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
             severity='error',
             title='Store usage failed',
             message=f'Failed to store usage data: {e}',
-            details={'error': str(e)}
+            details={'error': str(e), 'run_id': run_id}
         )
-        return False
+        return False, {'run_id': run_id, 'error': str(e)}
 
 
 def _normalize_skill_status(value: Any) -> str:
@@ -1037,28 +1370,28 @@ def main():
     # Schedule usage data collection (every COLLECTOR_INTERVAL seconds)
     scheduler.add_job(run_full_sync_once, 'interval', seconds=COLLECTOR_INTERVAL)
 
-    # Schedule credential usage stats sync (runs with usage collection)
+    # Schedule credential usage stats sync
     scheduler.add_job(
         lambda: sync_credential_stats(CLIPROXY_URL, CLIPROXY_MANAGEMENT_KEY, db_client, app_timezone=APP_TIMEZONE),
         'interval',
-        seconds=COLLECTOR_INTERVAL,
+        seconds=CREDENTIAL_SYNC_INTERVAL,
         id='credential_stats_sync',
         next_run_time=datetime.now() + timedelta(seconds=10)  # Run 10s after startup
     )
 
-    # Keep only current local-day logs, clear periodically
+    # Keep app logs by retention window, clear periodically
     scheduler.add_job(
         _cleanup_old_app_logs,
         'interval',
-        minutes=30,
+        minutes=APP_LOG_CLEANUP_INTERVAL_MINUTES,
         id='app_logs_cleanup',
         next_run_time=datetime.now() + timedelta(seconds=20)
     )
 
     scheduler.start()
     logger.info(f"Background sync scheduled every {COLLECTOR_INTERVAL} seconds.")
-    logger.info(f"Credential stats sync scheduled every {COLLECTOR_INTERVAL} seconds.")
-    logger.info("App logs cleanup scheduled every 30 minutes (keep today only).")
+    logger.info(f"Credential stats sync scheduled every {CREDENTIAL_SYNC_INTERVAL} seconds.")
+    logger.info(f"App logs cleanup scheduled every {APP_LOG_CLEANUP_INTERVAL_MINUTES} minute(s) (retention={APP_LOG_RETENTION_DAYS} day(s)).")
 
     # Start the Flask app using Waitress
     logger.info(f"Flask server starting on http://0.0.0.0:{TRIGGER_PORT}")

@@ -6,10 +6,12 @@ Polls the CLIProxy Management API and stores usage data in PostgreSQL
 
 import os
 import time
+import hashlib
 import logging
 import threading
+from uuid import uuid4
 from datetime import datetime, date, timezone, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from pathlib import Path
 
 import jwt
@@ -38,22 +40,48 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _env_int(name: str, default: int, min_value: int = 1) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        return max(min_value, int(raw))
+    except Exception:
+        return max(min_value, default)
+
+
 # Configuration from environment
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 CLIPROXY_URL = os.getenv("CLIPROXY_URL", "http://localhost:8317")
 CLIPROXY_MANAGEMENT_KEY = os.getenv("CLIPROXY_MANAGEMENT_KEY", "")
-COLLECTOR_INTERVAL = int(os.getenv("COLLECTOR_INTERVAL_SECONDS", "300"))
-TRIGGER_PORT = int(os.getenv("COLLECTOR_TRIGGER_PORT", "5001"))
+COLLECTOR_INTERVAL = _env_int("COLLECTOR_INTERVAL_SECONDS", 60)
+CREDENTIAL_SYNC_INTERVAL = _env_int(
+    "CREDENTIAL_SYNC_INTERVAL_SECONDS", COLLECTOR_INTERVAL
+)
+APP_LOG_CLEANUP_INTERVAL_MINUTES = _env_int("APP_LOG_CLEANUP_INTERVAL_MINUTES", 30)
+TRIGGER_PORT = _env_int("COLLECTOR_TRIGGER_PORT", 5001)
+
+LOG_VERBOSITY = str(os.getenv("LOG_VERBOSITY", "normal")).strip().lower()
+if LOG_VERBOSITY not in {"minimal", "normal", "debug"}:
+    LOG_VERBOSITY = "normal"
+LOG_DEBUG_EVENTS = str(os.getenv("LOG_DEBUG_EVENTS", "false")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+LOG_DEBUG_EVENTS_MAX_PER_SYNC = _env_int(
+    "LOG_DEBUG_EVENTS_MAX_PER_SYNC", 200, min_value=0
+)
+APP_LOG_RETENTION_DAYS = _env_int("APP_LOG_RETENTION_DAYS", 30)
 
 # Authentication settings
-AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "")  # If empty, auth is disabled
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "")
 JWT_SECRET = os.getenv(
     "JWT_SECRET", "cliproxy-dashboard-secret-key-change-in-production"
 )
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_HOURS = int(
-    os.getenv("JWT_EXPIRATION_HOURS", "8760")
-)  # Default: 365 days (365 * 24 = 8760)
+JWT_EXPIRATION_HOURS = _env_int("JWT_EXPIRATION_HOURS", 8760)
+
 
 # Default pricing (USD per 1M tokens) - Updated Dec 2024
 DEFAULT_PRICING = {
@@ -94,7 +122,6 @@ DEFAULT_PRICING = {
 }
 OPENROUTER_PRICES_URL = "https://openrouter.ai/api/v1/models"
 LLM_PRICES_URL = "https://www.llm-prices.com/current-v1.json"
-PRICING_CACHE_TTL_SECONDS = 3600
 
 # --- Globals ---
 db_client: Optional[PostgreSQLClient] = None
@@ -108,49 +135,203 @@ flask_app = Flask(__name__)
 CORS(flask_app)
 api_bp = Blueprint("api", __name__, url_prefix="/api/collector")
 
-
 # --- API Endpoints ---
+SKILL_DEFAULT_PRICING = {"input": 3.00, "output": 15.00}
+LOG_ALLOWED_SEVERITY = {"debug", "info", "warn", "error"}
+LOG_ALLOWED_CATEGORY = {"skill", "sync", "credential", "api", "db", "system", "other"}
+
+
+def _should_log_event(severity: str, is_debug_event: bool = False) -> bool:
+    sev = _normalize_log_severity(severity)
+    if LOG_VERBOSITY == "minimal":
+        return sev in {"warn", "error"}
+    if sev == "debug" and LOG_VERBOSITY != "debug":
+        return False
+    if is_debug_event and (LOG_VERBOSITY != "debug" or not LOG_DEBUG_EVENTS):
+        return False
+    return True
+
+
+def _log_sync_event(
+    *,
+    run_id: str,
+    source: str,
+    category: str,
+    severity: str,
+    title: str,
+    message: str,
+    details: Optional[Dict[str, Any]] = None,
+    event_uid: Optional[str] = None,
+    is_debug_event: bool = False,
+) -> None:
+    if not _should_log_event(severity, is_debug_event=is_debug_event):
+        return
+
+    merged_details = {"run_id": run_id}
+    if isinstance(details, dict):
+        merged_details.update(details)
+
+    _log_app_event(
+        source=source,
+        category=category,
+        severity=severity,
+        title=title,
+        message=message,
+        details=merged_details,
+        event_uid=event_uid,
+    )
+
+
+def _normalize_log_severity(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw == "warning":
+        raw = "warn"
+    if raw in ("fatal", "critical"):
+        raw = "error"
+    return raw if raw in LOG_ALLOWED_SEVERITY else "info"
+
+
+def _normalize_log_category(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    return raw if raw in LOG_ALLOWED_CATEGORY else "other"
+
+
+def _safe_text(value: Any, max_len: int = 1000) -> str:
+    return str(value or "").strip()[:max_len]
+
+
+def _current_local_day_bounds_utc() -> tuple[str, str]:
+    now_local = datetime.now(APP_TIMEZONE)
+    start_local = datetime(
+        now_local.year, now_local.month, now_local.day, tzinfo=APP_TIMEZONE
+    )
+    end_local = start_local + timedelta(days=1)
+    return start_local.astimezone(timezone.utc).isoformat(), end_local.astimezone(
+        timezone.utc
+    ).isoformat()
+
+
+def _cleanup_old_app_logs() -> int:
+    if not db_client:
+        return 0
+
+    now_local = datetime.now(APP_TIMEZONE)
+    cutoff_local = now_local - timedelta(days=APP_LOG_RETENTION_DAYS)
+    cutoff_utc = cutoff_local.astimezone(timezone.utc).isoformat()
+
+    conn = db_client._pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM app_logs WHERE logged_at < %s", (cutoff_utc,))
+            deleted = cur.rowcount or 0
+        conn.commit()
+        return deleted
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Failed to cleanup old app logs: {e}", exc_info=True)
+        return 0
+    finally:
+        db_client._pool.putconn(conn)
+
+
+def _normalize_app_log_event(evt: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(evt, dict):
+        return None
+
+    message = _safe_text(evt.get("message"), 4000)
+    if not message:
+        return None
+
+    details = evt.get("details")
+    if details is not None and not isinstance(
+        details, (dict, list, str, int, float, bool)
+    ):
+        details = str(details)
+
+    return {
+        "event_uid": _safe_text(evt.get("event_uid"), 255) or None,
+        "logged_at": _to_iso_utc(evt.get("logged_at")),
+        "source": _safe_text(evt.get("source") or "collector", 100) or "collector",
+        "category": _normalize_log_category(evt.get("category") or "system"),
+        "severity": _normalize_log_severity(evt.get("severity") or "info"),
+        "title": _safe_text(evt.get("title"), 255) or None,
+        "message": message,
+        "details": details,
+        "session_id": _safe_text(evt.get("session_id"), 255) or None,
+        "machine_id": _safe_text(evt.get("machine_id"), 255) or None,
+        "project_dir": _safe_text(evt.get("project_dir"), 500) or None,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+
+def _log_app_event(
+    *,
+    source: str,
+    category: str,
+    severity: str,
+    title: str,
+    message: str,
+    details: Optional[Dict[str, Any]] = None,
+    event_uid: Optional[str] = None,
+) -> None:
+    if not db_client:
+        return
+
+    evt = _normalize_app_log_event(
+        {
+            "event_uid": event_uid,
+            "logged_at": datetime.utcnow().isoformat(),
+            "source": source,
+            "category": category,
+            "severity": severity,
+            "title": title,
+            "message": message,
+            "details": details,
+        }
+    )
+    if not evt:
+        return
+
+    try:
+        if evt.get("event_uid"):
+            db_client.table("app_logs").upsert(evt, on_conflict="event_uid").execute()
+        else:
+            db_client.table("app_logs").insert(evt).execute()
+    except Exception as e:
+        logger.error(f"Failed to write app log event: {e}", exc_info=True)
+
+
 @api_bp.route("/health", methods=["GET"])
 def health_check():
+    """Health check endpoint."""
     return jsonify(
         {"status": "healthy", "timestamp": datetime.now(APP_TIMEZONE).isoformat()}
     )
 
 
-# --- Authentication Endpoints ---
 @api_bp.route("/auth/login", methods=["POST"])
 def auth_login():
-    """Login endpoint - validates password and returns JWT token."""
-    from flask import request
-
-    # If no password configured, auth is disabled
     if not AUTH_PASSWORD:
         return jsonify({"error": "Authentication not configured"}), 400
 
-    data = request.get_json()
-    if not data or "password" not in data:
+    data = request.get_json(silent=True) or {}
+    if "password" not in data:
         return jsonify({"error": "Password required"}), 400
 
     if data["password"] != AUTH_PASSWORD:
         return jsonify({"error": "Invalid password"}), 401
 
-    # Generate JWT token
     expiration = datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS)
     token = jwt.encode(
         {"exp": expiration, "iat": datetime.now(timezone.utc)},
         JWT_SECRET,
         algorithm=JWT_ALGORITHM,
     )
-
     return jsonify({"token": token, "expires": expiration.isoformat()})
 
 
 @api_bp.route("/auth/verify", methods=["GET"])
 def auth_verify():
-    """Verify JWT token validity."""
-    from flask import request
-
-    # If no password configured, auth is disabled - return success
     if not AUTH_PASSWORD:
         return jsonify({"valid": True, "auth_enabled": False})
 
@@ -158,8 +339,7 @@ def auth_verify():
     if not auth_header.startswith("Bearer "):
         return jsonify({"valid": False, "error": "No token provided"}), 401
 
-    token = auth_header[7:]  # Remove 'Bearer ' prefix
-
+    token = auth_header[7:]
     try:
         jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         return jsonify({"valid": True, "auth_enabled": True})
@@ -171,7 +351,6 @@ def auth_verify():
 
 @api_bp.route("/auth/status", methods=["GET"])
 def auth_status():
-    """Check if authentication is enabled."""
     return jsonify(
         {
             "auth_enabled": bool(AUTH_PASSWORD),
@@ -207,10 +386,91 @@ def trigger_credential_stats_sync():
             logger.info(f"Credential stats sync completed: {stats}")
         except Exception as e:
             logger.error(f"Credential stats sync failed: {e}", exc_info=True)
+            _log_app_event(
+                source="collector",
+                category="credential",
+                severity="error",
+                title="Credential sync failed",
+                message=f"Credential stats sync failed: {e}",
+                details={"error": str(e)},
+            )
 
     sync_thread = threading.Thread(target=credential_stats_task)
     sync_thread.start()
     return jsonify({"message": "Credential stats sync triggered."}), 202
+
+
+@api_bp.route("/logs/clear", methods=["POST"])
+def clear_logs_endpoint():
+    if not db_client:
+        return jsonify({"error": "database not initialized"}), 500
+
+    body = request.get_json(force=True, silent=True) or {}
+    clear_scope = str(body.get("scope") or "").strip().lower()
+    if clear_scope != "all":
+        return jsonify({"error": "scope must be all"}), 400
+
+    conn = db_client._pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM app_logs")
+            deleted = cur.rowcount or 0
+        conn.commit()
+
+        _log_app_event(
+            source="collector",
+            category="system",
+            severity="warn",
+            title="App logs cleared",
+            message="App logs were cleared from dashboard clear action.",
+            details={"deleted_rows": deleted, "scope": "all"},
+        )
+
+        return jsonify({"status": "ok", "deleted": deleted})
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Failed to clear app logs: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        db_client._pool.putconn(conn)
+
+
+@api_bp.route("/log-events", methods=["POST"])
+def ingest_log_events():
+    if not db_client:
+        return jsonify({"error": "database not initialized"}), 500
+
+    body = request.get_json(force=True, silent=True)
+    if not body or "events" not in body or not isinstance(body.get("events"), list):
+        return jsonify({"error": "missing events"}), 400
+
+    events = body["events"]
+    upserted = 0
+    skipped = 0
+
+    for raw_evt in events:
+        evt = _normalize_app_log_event(raw_evt)
+        if not evt:
+            skipped += 1
+            continue
+
+        try:
+            if evt.get("event_uid"):
+                result = (
+                    db_client.table("app_logs")
+                    .upsert(evt, on_conflict="event_uid")
+                    .execute()
+                )
+                if result.data is None:
+                    db_client.table("app_logs").insert(evt).execute()
+            else:
+                db_client.table("app_logs").insert(evt).execute()
+            upserted += 1
+        except Exception as e:
+            logger.error(f"Failed to ingest app log event: {e}", exc_info=True)
+            skipped += 1
+
+    return jsonify({"status": "ok", "upserted": upserted, "skipped": skipped})
 
 
 @api_bp.route("/skill-events", methods=["POST"])
@@ -237,38 +497,170 @@ def ingest_skill_events():
             continue
 
         sqlite_id = evt.get("sqlite_id")
-        is_skeleton = bool(evt.get("is_skeleton", False))
-        tokens_used = int(evt.get("tokens_used", 0) or 0)
-        output_tokens = int(evt.get("output_tokens", 0) or 0)
+        tool_use_id = str(evt.get("tool_use_id", "")).strip()[:255]
+        attempt_no = max(_safe_int(evt.get("attempt_no"), 1), 1)
+        event_uid = str(evt.get("event_uid", "")).strip()[:255]
+        if not event_uid:
+            event_uid = _derive_skill_event_uid(
+                machine_id, session_id, skill_name, tool_use_id, attempt_no
+            )
+
+        status = _normalize_skill_status(evt.get("status"))
+        incoming_is_skeleton = bool(evt.get("is_skeleton", False))
+        tokens_used = _safe_int(evt.get("tokens_used"), 0)
+        output_tokens = _safe_int(evt.get("output_tokens"), 0)
+        tool_calls = _safe_int(evt.get("tool_calls"), 0)
+        duration_ms = _safe_int(evt.get("duration_ms"), 0)
+        model = str(evt.get("model") or "").strip() or None
+
+        existing = None
+        try:
+            existing = (
+                db_client.table("skill_runs")
+                .select(
+                    "event_uid,machine_id,source,sqlite_id,tool_use_id,skill_name,session_id,trigger_type,triggered_at,"
+                    "status,error_type,error_message,attempt_no,arguments,tokens_used,output_tokens,tool_calls,duration_ms,"
+                    "skill_version_hash,model,is_skeleton,project_dir"
+                )
+                .eq("event_uid", event_uid)
+                .single()
+                .execute()
+                .data
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to read existing skill event by event_uid={event_uid}: {e}",
+                exc_info=True,
+            )
+
+        existing_is_skeleton = (
+            bool(existing.get("is_skeleton", False)) if existing else None
+        )
+        is_final_update = not incoming_is_skeleton
+
+        merged_tokens_used = tokens_used
+        merged_output_tokens = output_tokens
+        merged_tool_calls = tool_calls
+        merged_duration_ms = duration_ms
+        merged_model = model
+        merged_status = status
+        merged_error_type = str(evt.get("error_type") or "")[:100] or None
+        merged_error_message = str(evt.get("error_message") or "")[:1000] or None
+
+        if existing:
+            existing_tokens_used = _safe_int(existing.get("tokens_used"), 0)
+            existing_output_tokens = _safe_int(existing.get("output_tokens"), 0)
+            existing_tool_calls = _safe_int(existing.get("tool_calls"), 0)
+            existing_duration_ms = _safe_int(existing.get("duration_ms"), 0)
+            existing_model = str(existing.get("model") or "").strip() or None
+            existing_status = _normalize_skill_status(existing.get("status"))
+            existing_error_type = str(existing.get("error_type") or "")[:100] or None
+            existing_error_message = (
+                str(existing.get("error_message") or "")[:1000] or None
+            )
+
+            if incoming_is_skeleton and existing_is_skeleton is False:
+                merged_tokens_used = existing_tokens_used
+                merged_output_tokens = existing_output_tokens
+                merged_tool_calls = existing_tool_calls
+                merged_duration_ms = existing_duration_ms
+                merged_model = existing_model
+                merged_status = existing_status
+                merged_error_type = existing_error_type
+                merged_error_message = existing_error_message
+            elif is_final_update:
+                merged_tokens_used = max(tokens_used, existing_tokens_used)
+                merged_output_tokens = max(output_tokens, existing_output_tokens)
+                merged_tool_calls = max(tool_calls, existing_tool_calls)
+                merged_duration_ms = max(duration_ms, existing_duration_ms)
+                merged_model = model or existing_model
+                if merged_status == "success" and existing_status == "failure":
+                    merged_status = existing_status
+                merged_error_type = merged_error_type or existing_error_type
+                merged_error_message = merged_error_message or existing_error_message
+            else:
+                merged_tokens_used = max(tokens_used, existing_tokens_used)
+                merged_output_tokens = max(output_tokens, existing_output_tokens)
+                merged_tool_calls = max(tool_calls, existing_tool_calls)
+                merged_duration_ms = max(duration_ms, existing_duration_ms)
+                merged_model = model or existing_model
+                merged_error_type = merged_error_type or existing_error_type
+                merged_error_message = merged_error_message or existing_error_message
+
+        final_is_skeleton = incoming_is_skeleton
+        if existing and existing_is_skeleton is False:
+            final_is_skeleton = False
+        if is_final_update:
+            final_is_skeleton = False
+
+        immutable_triggered_at = _to_iso_utc(evt.get("triggered_at"))
+        if existing and existing.get("triggered_at"):
+            immutable_triggered_at = _to_iso_utc(existing.get("triggered_at"))
+
+        immutable_tool_use_id = tool_use_id or None
+        if existing and existing.get("tool_use_id"):
+            immutable_tool_use_id = (
+                str(existing.get("tool_use_id")).strip()[:255] or immutable_tool_use_id
+            )
+
+        immutable_attempt_no = attempt_no
+        if existing and _safe_int(existing.get("attempt_no"), 0) > 0:
+            immutable_attempt_no = _safe_int(existing.get("attempt_no"), attempt_no)
 
         record = {
+            "event_uid": event_uid,
             "machine_id": machine_id,
+            "source": str(evt.get("source") or "manual")[:50],
             "sqlite_id": sqlite_id,
+            "tool_use_id": immutable_tool_use_id,
             "skill_name": skill_name,
             "session_id": session_id,
             "trigger_type": str(evt.get("trigger_type") or "explicit")[:50],
-            "triggered_at": evt.get("triggered_at") or datetime.utcnow().isoformat(),
-            "arguments": evt.get("arguments"),
-            "tokens_used": tokens_used,
-            "output_tokens": output_tokens,
-            "tool_calls": int(evt.get("tool_calls", 0) or 0),
-            "duration_ms": int(evt.get("duration_ms", 0) or 0),
-            "skill_version_hash": evt.get("skill_version_hash"),
-            "model": evt.get("model"),
-            "is_skeleton": is_skeleton,
+            "triggered_at": immutable_triggered_at,
+            "status": merged_status,
+            "error_type": merged_error_type,
+            "error_message": merged_error_message,
+            "attempt_no": immutable_attempt_no,
+            "arguments": evt.get("arguments")
+            if evt.get("arguments") is not None
+            else (existing.get("arguments") if existing else None),
+            "tokens_used": merged_tokens_used,
+            "output_tokens": merged_output_tokens,
+            "tool_calls": merged_tool_calls,
+            "duration_ms": merged_duration_ms,
+            "estimated_cost_usd": _calculate_skill_estimated_cost(
+                merged_model, merged_tokens_used, merged_output_tokens
+            ),
+            "skill_version_hash": evt.get("skill_version_hash")
+            if evt.get("skill_version_hash") is not None
+            else (existing.get("skill_version_hash") if existing else None),
+            "model": merged_model,
+            "is_skeleton": final_is_skeleton,
             "synced_at": datetime.utcnow().isoformat(),
-            "project_dir": str(evt.get("project_dir", "")).strip()[:255],
+            "project_dir": str(evt.get("project_dir", "")).strip()[:255]
+            or (str(existing.get("project_dir", "")).strip()[:255] if existing else ""),
         }
 
         try:
             result = (
                 db_client.table("skill_runs")
-                .upsert(
-                    record,
-                    on_conflict=["machine_id", "sqlite_id", "session_id", "skill_name"],
-                )
+                .upsert(record, on_conflict="event_uid")
                 .execute()
             )
+            if result.data is None:
+                result = (
+                    db_client.table("skill_runs")
+                    .upsert(
+                        record,
+                        on_conflict=[
+                            "machine_id",
+                            "sqlite_id",
+                            "session_id",
+                            "skill_name",
+                        ],
+                    )
+                    .execute()
+                )
             if result.data is not None:
                 upserted += 1
         except Exception as e:
@@ -276,7 +668,7 @@ def ingest_skill_events():
             skipped += 1
             continue
 
-        if not is_skeleton and tokens_used >= 0:
+        if final_is_skeleton is False and merged_tokens_used >= 0:
             stat_date = str(record["triggered_at"])[:10]
             daily_keys.add((stat_date, skill_name, machine_id))
 
@@ -295,12 +687,96 @@ def ingest_skill_events():
 # --- Sync Functions ---
 def run_full_sync_once():
     """Helper function to run a single full sync process (data collection)."""
+    run_id = uuid4().hex[:12]
+    sync_started_at = time.time()
+
+    _log_sync_event(
+        run_id=run_id,
+        source="collector",
+        category="sync",
+        severity="info",
+        title="Sync started",
+        message="Collector full sync started.",
+        details={"cliproxy_url": CLIPROXY_URL, "verbosity": LOG_VERBOSITY},
+    )
+
     logger.info("Fetching usage data...")
-    data = fetch_usage_data()
+    _log_sync_event(
+        run_id=run_id,
+        source="collector",
+        category="api",
+        severity="info",
+        title="Fetch usage started",
+        message="Starting usage fetch from CLIProxy management API.",
+    )
+
+    data, fetch_meta = fetch_usage_data()
     if data:
-        store_usage_data(data)
+        _log_sync_event(
+            run_id=run_id,
+            source="collector",
+            category="api",
+            severity="info",
+            title="Fetch usage ok",
+            message="Usage data fetched successfully from CLIProxy API.",
+            details=fetch_meta,
+        )
+
+        _log_sync_event(
+            run_id=run_id,
+            source="collector",
+            category="db",
+            severity="info",
+            title="Store usage started",
+            message="Starting persistence of usage snapshot to database.",
+        )
+
+        ok, store_summary = store_usage_data(data, run_id=run_id)
+        if ok:
+            _log_sync_event(
+                run_id=run_id,
+                source="collector",
+                category="db",
+                severity="info",
+                title="Store usage ok",
+                message="Usage snapshot persisted successfully.",
+                details=store_summary,
+            )
+        else:
+            _log_sync_event(
+                run_id=run_id,
+                source="collector",
+                category="db",
+                severity="error",
+                title="Store usage failed",
+                message="Failed to store usage snapshot into database.",
+                details=store_summary,
+            )
     else:
         logger.warning("No data received from CLIProxy.")
+        _log_sync_event(
+            run_id=run_id,
+            source="collector",
+            category="api",
+            severity="warn",
+            title="Fetch usage failed",
+            message="No usage data received from CLIProxy API.",
+            details=fetch_meta or {"cliproxy_url": CLIPROXY_URL},
+        )
+
+    duration_ms = int((time.time() - sync_started_at) * 1000)
+    _log_sync_event(
+        run_id=run_id,
+        source="collector",
+        category="sync",
+        severity="info",
+        title="Sync completed",
+        message="Collector full sync completed.",
+        details={
+            "duration_ms": duration_ms,
+            "result": "success" if data else "partial",
+        },
+    )
 
 
 # --- Core Logic Functions (fetch_remote_pricing, init_db, etc.) ---
@@ -309,25 +785,21 @@ def fetch_openrouter_pricing() -> Dict[str, Dict[str, float]]:
     global openrouter_pricing_cache, openrouter_pricing_last_fetch
     if (
         openrouter_pricing_cache
-        and (time.time() - openrouter_pricing_last_fetch) < PRICING_CACHE_TTL_SECONDS
+        and (time.time() - openrouter_pricing_last_fetch) < 3600
     ):
         return openrouter_pricing_cache
-
     try:
         logger.info("Fetching latest pricing from OpenRouter...")
         response = requests.get(OPENROUTER_PRICES_URL, timeout=30)
         response.raise_for_status()
         data = response.json()
-
         pricing: Dict[str, Dict[str, float]] = {}
         for item in data.get("data", []):
             model_id = str(item.get("id") or "").strip().lower()
             prompt_price = item.get("pricing", {}).get("prompt")
             completion_price = item.get("pricing", {}).get("completion")
-
             if not model_id or prompt_price is None or completion_price is None:
                 continue
-
             try:
                 normalized_price = {
                     "input": float(prompt_price) * 1_000_000,
@@ -335,39 +807,31 @@ def fetch_openrouter_pricing() -> Dict[str, Dict[str, float]]:
                 }
             except (TypeError, ValueError):
                 logger.warning(
-                    "Skipping OpenRouter pricing for %s due to invalid prompt/completion values",
-                    model_id,
+                    "Skipping OpenRouter pricing for %s due to invalid values", model_id
                 )
                 continue
-
             pricing[model_id] = normalized_price
-
             if "/" in model_id:
                 bare_model_id = model_id.split("/", 1)[1]
                 pricing.setdefault(bare_model_id, normalized_price)
                 if ":" in bare_model_id:
                     pricing.setdefault(bare_model_id.split(":", 1)[0], normalized_price)
-
         if pricing:
             openrouter_pricing_cache = pricing
             openrouter_pricing_last_fetch = time.time()
             return pricing
     except Exception as e:
         logger.warning(f"Could not fetch OpenRouter pricing: {e}")
-
     return {}
 
 
 def fetch_remote_pricing() -> Dict[str, Dict[str, float]]:
+    # (Implementation from before)
     global remote_pricing_cache, remote_pricing_last_fetch
-    if (
-        remote_pricing_cache
-        and (time.time() - remote_pricing_last_fetch) < PRICING_CACHE_TTL_SECONDS
-    ):
+    if remote_pricing_cache and (time.time() - remote_pricing_last_fetch) < 3600:
         return remote_pricing_cache
-
     try:
-        logger.info("Fetching fallback pricing from llm-prices.com...")
+        logger.info("Fetching latest pricing from llm-prices.com...")
         response = requests.get(LLM_PRICES_URL, timeout=30)
         response.raise_for_status()
         data = response.json()
@@ -397,7 +861,7 @@ def init_db() -> PostgreSQLClient:
     return PostgreSQLClient(DATABASE_URL)
 
 
-def fetch_usage_data() -> Optional[Dict[str, Any]]:
+def fetch_usage_data() -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     # (Implementation from before)
     url = f"{CLIPROXY_URL}/v0/management/usage"
     headers = (
@@ -405,20 +869,42 @@ def fetch_usage_data() -> Optional[Dict[str, Any]]:
         if CLIPROXY_MANAGEMENT_KEY
         else {}
     )
+    started = time.time()
     try:
         response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
-        return response.json()
+        payload = response.json()
+        duration_ms = int((time.time() - started) * 1000)
+        meta = {
+            "cliproxy_url": CLIPROXY_URL,
+            "http_status": response.status_code,
+            "latency_ms": duration_ms,
+            "payload_bytes": len(response.content or b""),
+            "has_usage": isinstance(payload, dict) and "usage" in payload,
+        }
+        return payload, meta
     except requests.exceptions.RequestException as e:
+        duration_ms = int((time.time() - started) * 1000)
         logger.error(f"Failed to fetch usage data: {e}")
-        return None
+        _log_app_event(
+            source="collector",
+            category="api",
+            severity="error",
+            title="Usage API request failed",
+            message=f"Failed to fetch usage data: {e}",
+            details={"cliproxy_url": CLIPROXY_URL, "latency_ms": duration_ms},
+        )
+        return None, {
+            "cliproxy_url": CLIPROXY_URL,
+            "latency_ms": duration_ms,
+            "error": str(e),
+        }
 
 
 def get_model_pricing() -> Dict[str, Dict[str, float]]:
     openrouter_pricing = fetch_openrouter_pricing()
     if openrouter_pricing:
         return {**DEFAULT_PRICING, **openrouter_pricing}
-
     remote_pricing = fetch_remote_pricing()
     if remote_pricing:
         return {**DEFAULT_PRICING, **remote_pricing}
@@ -431,7 +917,6 @@ def find_pricing_for_model(
     model_lower = model_name.lower()
     if model_lower in pricing:
         return pricing[model_lower], True
-
     if "/" in model_lower:
         bare_model_name = model_lower.split("/", 1)[1]
         if bare_model_name in pricing:
@@ -440,12 +925,10 @@ def find_pricing_for_model(
             normalized_model_name = bare_model_name.split(":", 1)[0]
             if normalized_model_name in pricing:
                 return pricing[normalized_model_name], True
-
     if ":" in model_lower:
         normalized_model_name = model_lower.split(":", 1)[0]
         if normalized_model_name in pricing:
             return pricing[normalized_model_name], True
-
     for pattern, prices in pricing.items():
         if pattern != "_default" and (pattern in model_lower or model_lower in pattern):
             return prices, True
@@ -461,14 +944,30 @@ def calculate_cost(
     )
 
 
-def store_usage_data(data: Dict[str, Any]) -> bool:
+def store_usage_data(
+    data: Dict[str, Any], run_id: Optional[str] = None
+) -> Tuple[bool, Dict[str, Any]]:
     """Store usage data in PostgreSQL database with proper daily delta calculation."""
     if not db_client or not data or "usage" not in data:
-        return False
+        return False, {
+            "error": "missing database client or usage payload",
+            "run_id": run_id,
+        }
     usage = data["usage"]
     pricing = get_model_pricing()
+    debug_budget = LOG_DEBUG_EVENTS_MAX_PER_SYNC
+    debug_dropped = 0
+    anomaly_debug_events = []
 
     try:
+        started_at = time.time()
+        db_timings_ms = {
+            "snapshot_insert": 0,
+            "model_usage_insert": 0,
+            "snapshot_cost_update": 0,
+            "daily_stats_upsert": 0,
+        }
+
         # Current cumulative values from CLIProxy
         current_requests = usage.get("total_requests", 0)
         current_success = usage.get("success_count", 0)
@@ -500,9 +999,11 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
             last_cost_total  # placeholder, updated after cost calc
         )
 
+        t0 = time.time()
         snapshot_result = (
             db_client.table("usage_snapshots").insert(snapshot_data).execute()
         )
+        db_timings_ms["snapshot_insert"] = int((time.time() - t0) * 1000)
         snapshot_id = snapshot_result.data[0]["id"]
 
         # Process model-level data
@@ -545,13 +1046,17 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                 )
 
         if model_records:
+            t0 = time.time()
             db_client.table("model_usage").insert(model_records).execute()
+            db_timings_ms["model_usage_insert"] = int((time.time() - t0) * 1000)
 
         # Update snapshot cumulative cost
         cumulative_cost = last_cost_total + total_cost
+        t0 = time.time()
         db_client.table("usage_snapshots").update(
             {"cumulative_cost_usd": cumulative_cost}
         ).eq("id", snapshot_id).execute()
+        db_timings_ms["snapshot_cost_update"] = int((time.time() - t0) * 1000)
 
         # === Calculate daily delta stats (Incremental Approach) ===
         # Robust against restarts: Calculate delta since LAST snapshot and add to daily_stats
@@ -589,6 +1094,22 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                 logger.warning(
                     f"Restart detected! Prev Req: {prev_snap.get('total_requests')}, Curr Req: {current_requests}"
                 )
+                if run_id:
+                    _log_sync_event(
+                        run_id=run_id,
+                        source="collector",
+                        category="sync",
+                        severity="warn",
+                        title="Restart detected",
+                        message="Detected counter reset while calculating daily incremental delta.",
+                        details={
+                            "snapshot_id": snapshot_id,
+                            "prev_total_requests": prev_snap.get("total_requests", 0),
+                            "prev_total_tokens": prev_snap.get("total_tokens", 0),
+                            "current_total_requests": current_requests,
+                            "current_total_tokens": current_tokens,
+                        },
+                    )
                 inc_requests = current_requests
                 inc_success = current_success
                 inc_failure = current_failure
@@ -689,6 +1210,23 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
 
                 # Granular restart detection
                 if d_req < 0 or d_tok < 0:
+                    if run_id:
+                        _log_sync_event(
+                            run_id=run_id,
+                            source="collector",
+                            category="sync",
+                            severity="warn",
+                            title="Per-model restart detected",
+                            message="Detected negative per-model delta and replaced with current cumulative values.",
+                            details={
+                                "snapshot_id": snapshot_id,
+                                "model_endpoint_key": key,
+                                "delta_requests": d_req,
+                                "delta_tokens": d_tok,
+                                "current_requests": c_req,
+                                "current_tokens": c_tok,
+                            },
+                        )
                     d_req = c_req
                     d_tok = c_tok
                     d_cost = c_cost
@@ -705,6 +1243,23 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                         logger.warning(
                             f"Skipping False Start: ${d_cost:.2f} for key {key} (Snap {snapshot_id}). Removing from global stats."
                         )
+                        if run_id:
+                            _log_sync_event(
+                                run_id=run_id,
+                                source="collector",
+                                category="sync",
+                                severity="warn",
+                                title="False start filtered",
+                                message="Large first-seen cumulative model usage was filtered from daily delta.",
+                                details={
+                                    "snapshot_id": snapshot_id,
+                                    "model_endpoint_key": key,
+                                    "delta_requests": d_req,
+                                    "delta_tokens": d_tok,
+                                    "delta_cost_usd": d_cost,
+                                    "current_cost_usd": c_cost,
+                                },
+                            )
                         # Adjust global increments to remove this false start
                         inc_requests -= d_req
                         inc_tokens -= d_tok
@@ -850,6 +1405,21 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
                     logger.warning(
                         f"Adjusting global stats due to breakdown mismatch (False Starts likely). Ratio: {ratio:.4f}"
                     )
+                    if run_id:
+                        _log_sync_event(
+                            run_id=run_id,
+                            source="collector",
+                            category="sync",
+                            severity="warn",
+                            title="Breakdown mismatch adjusted",
+                            message="Adjusted success/failure counts due to mismatch between global and breakdown deltas.",
+                            details={
+                                "snapshot_id": snapshot_id,
+                                "ratio": ratio,
+                                "original_incremental_requests": inc_requests,
+                                "safe_incremental_requests": safe_inc_requests,
+                            },
+                        )
                     inc_success = int(inc_success * ratio)
                     inc_failure = int(inc_failure * ratio)
 
@@ -974,17 +1544,165 @@ def store_usage_data(data: Dict[str, Any]) -> bool:
             "breakdown": existing_breakdown,  # Save the updated breakdown
         }
 
+        t0 = time.time()
         db_client.table("daily_stats").upsert(
             daily_data, on_conflict="stat_date"
         ).execute()
+        db_timings_ms["daily_stats_upsert"] = int((time.time() - t0) * 1000)
+
+        if run_id:
+            debug_candidates = sorted(
+                [
+                    {
+                        "model_name": model,
+                        "requests": stats.get("requests", 0),
+                        "tokens": stats.get("tokens", 0),
+                        "cost": round(float(stats.get("cost", 0) or 0), 6),
+                    }
+                    for model, stats in (breakdown_deltas.get("models") or {}).items()
+                ],
+                key=lambda item: (item["cost"], item["tokens"], item["requests"]),
+                reverse=True,
+            )
+
+            for entry in debug_candidates:
+                if debug_budget <= 0:
+                    debug_dropped += 1
+                    continue
+                anomaly_debug_events.append(entry)
+                debug_budget -= 1
+
+            for entry in anomaly_debug_events:
+                _log_sync_event(
+                    run_id=run_id,
+                    source="collector",
+                    category="sync",
+                    severity="debug",
+                    title="Per-model delta snapshot",
+                    message=f"Model delta: {entry['model_name']}",
+                    details=entry,
+                    is_debug_event=True,
+                )
+
+            if debug_dropped > 0:
+                _log_sync_event(
+                    run_id=run_id,
+                    source="collector",
+                    category="sync",
+                    severity="debug",
+                    title="Debug event cap reached",
+                    message="Some debug model-delta events were dropped due to per-sync cap.",
+                    details={
+                        "dropped_events": debug_dropped,
+                        "cap": LOG_DEBUG_EVENTS_MAX_PER_SYNC,
+                    },
+                    is_debug_event=True,
+                )
+
+            _log_sync_event(
+                run_id=run_id,
+                source="collector",
+                category="sync",
+                severity="info",
+                title="Delta summary",
+                message="Daily delta summary for current sync has been computed.",
+                details={
+                    "snapshot_id": snapshot_id,
+                    "incremental_requests": inc_requests,
+                    "incremental_success": inc_success,
+                    "incremental_failure": inc_failure,
+                    "incremental_tokens": inc_tokens,
+                    "incremental_cost_usd": round(float(inc_cost or 0), 6),
+                    "daily_total_requests": daily_data["total_requests"],
+                    "daily_total_tokens": daily_data["total_tokens"],
+                    "daily_total_cost_usd": round(
+                        float(daily_data["estimated_cost_usd"] or 0), 6
+                    ),
+                    "model_rows_inserted": len(model_records),
+                    "db_timings_ms": db_timings_ms,
+                    "duration_ms": int((time.time() - started_at) * 1000),
+                },
+            )
 
         logger.info(
             f"Stored snapshot {snapshot_id}. Incremental: {inc_requests} req. Daily Total: {daily_data['total_requests']}"
         )
-        return True
+        return True, {
+            "run_id": run_id,
+            "snapshot_id": snapshot_id,
+            "model_rows_inserted": len(model_records),
+            "incremental_requests": inc_requests,
+            "incremental_tokens": inc_tokens,
+            "incremental_cost_usd": round(float(inc_cost or 0), 6),
+            "daily_total_requests": daily_data["total_requests"],
+            "daily_total_tokens": daily_data["total_tokens"],
+            "daily_total_cost_usd": round(
+                float(daily_data["estimated_cost_usd"] or 0), 6
+            ),
+            "db_timings_ms": db_timings_ms,
+            "duration_ms": int((time.time() - started_at) * 1000),
+        }
     except Exception as e:
         logger.error(f"Failed to store usage data: {e}")
-        return False
+        _log_app_event(
+            source="collector",
+            category="db",
+            severity="error",
+            title="Store usage failed",
+            message=f"Failed to store usage data: {e}",
+            details={"error": str(e), "run_id": run_id},
+        )
+        return False, {"run_id": run_id, "error": str(e)}
+
+
+def _normalize_skill_status(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    return "failure" if raw in ("failure", "error") else "success"
+
+
+def _derive_skill_event_uid(
+    machine_id: str, session_id: str, skill_name: str, tool_use_id: str, attempt_no: int
+) -> str:
+    key = f"{machine_id}|{session_id}|{skill_name}|{tool_use_id}|{attempt_no}"
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        return default
+
+
+def _to_iso_utc(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return datetime.utcnow().isoformat()
+
+    normalized = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+    try:
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    except Exception:
+        return datetime.utcnow().isoformat()
+
+
+def _calculate_skill_estimated_cost(
+    model: Any, input_tokens: int, output_tokens: int
+) -> float:
+    pricing = SKILL_DEFAULT_PRICING
+    model_name = str(model or "").strip()
+    if model_name:
+        try:
+            full_pricing = get_model_pricing()
+            matched, _ = find_pricing_for_model(model_name, full_pricing)
+            pricing = matched or SKILL_DEFAULT_PRICING
+        except Exception:
+            pricing = SKILL_DEFAULT_PRICING
+
+    return round(calculate_cost(input_tokens, output_tokens, pricing), 6)
 
 
 def _upsert_skill_daily_stats(stat_date: str, skill_name: str, machine_id: str) -> None:
@@ -993,7 +1711,9 @@ def _upsert_skill_daily_stats(stat_date: str, skill_name: str, machine_id: str) 
 
     rows = (
         db_client.table("skill_runs")
-        .select("tokens_used,output_tokens,duration_ms")
+        .select(
+            "tokens_used,output_tokens,duration_ms,tool_calls,status,estimated_cost_usd"
+        )
         .eq("skill_name", skill_name)
         .eq("machine_id", machine_id)
         .eq("is_skeleton", False)
@@ -1009,6 +1729,14 @@ def _upsert_skill_daily_stats(stat_date: str, skill_name: str, machine_id: str) 
     total_tokens = sum(r.get("tokens_used", 0) or 0 for r in rows)
     total_output_tokens = sum(r.get("output_tokens", 0) or 0 for r in rows)
     total_duration_ms = sum(r.get("duration_ms", 0) or 0 for r in rows)
+    total_tool_calls = sum(r.get("tool_calls", 0) or 0 for r in rows)
+    total_cost_usd = round(
+        sum(float(r.get("estimated_cost_usd", 0) or 0) for r in rows), 6
+    )
+    success_count = sum(
+        1 for r in rows if _normalize_skill_status(r.get("status")) == "success"
+    )
+    failure_count = len(rows) - success_count
 
     db_client.table("skill_daily_stats").upsert(
         {
@@ -1016,9 +1744,13 @@ def _upsert_skill_daily_stats(stat_date: str, skill_name: str, machine_id: str) 
             "skill_name": skill_name,
             "machine_id": machine_id,
             "run_count": len(rows),
+            "success_count": success_count,
+            "failure_count": failure_count,
             "total_tokens": total_tokens,
             "total_output_tokens": total_output_tokens,
             "total_duration_ms": total_duration_ms,
+            "total_tool_calls": total_tool_calls,
+            "total_cost_usd": total_cost_usd,
             "updated_at": datetime.utcnow().isoformat(),
         },
         on_conflict=["stat_date", "skill_name", "machine_id"],
@@ -1036,6 +1768,11 @@ def main():
         db_client = init_db()
         logger.info("PostgreSQL client initialized.")
         db_client.run_migrations()
+        deleted = _cleanup_old_app_logs()
+        if deleted > 0:
+            logger.info(
+                f"Initial app logs cleanup removed {deleted} rows older than today."
+            )
     except Exception as e:
         logger.critical(
             f"CRITICAL: Failed to initialize PostgreSQL: {e}", exc_info=True
@@ -1051,20 +1788,34 @@ def main():
     # Schedule usage data collection (every COLLECTOR_INTERVAL seconds)
     scheduler.add_job(run_full_sync_once, "interval", seconds=COLLECTOR_INTERVAL)
 
-    # Schedule credential usage stats sync (runs with usage collection)
+    # Schedule credential usage stats sync
     scheduler.add_job(
         lambda: sync_credential_stats(
             CLIPROXY_URL, CLIPROXY_MANAGEMENT_KEY, db_client, app_timezone=APP_TIMEZONE
         ),
         "interval",
-        seconds=COLLECTOR_INTERVAL,
+        seconds=CREDENTIAL_SYNC_INTERVAL,
         id="credential_stats_sync",
         next_run_time=datetime.now() + timedelta(seconds=10),  # Run 10s after startup
     )
 
+    # Keep app logs by retention window, clear periodically
+    scheduler.add_job(
+        _cleanup_old_app_logs,
+        "interval",
+        minutes=APP_LOG_CLEANUP_INTERVAL_MINUTES,
+        id="app_logs_cleanup",
+        next_run_time=datetime.now() + timedelta(seconds=20),
+    )
+
     scheduler.start()
     logger.info(f"Background sync scheduled every {COLLECTOR_INTERVAL} seconds.")
-    logger.info(f"Credential stats sync scheduled every {COLLECTOR_INTERVAL} seconds.")
+    logger.info(
+        f"Credential stats sync scheduled every {CREDENTIAL_SYNC_INTERVAL} seconds."
+    )
+    logger.info(
+        f"App logs cleanup scheduled every {APP_LOG_CLEANUP_INTERVAL_MINUTES} minute(s) (retention={APP_LOG_RETENTION_DAYS} day(s))."
+    )
 
     # Start the Flask app using Waitress
     logger.info(f"Flask server starting on http://0.0.0.0:{TRIGGER_PORT}")

@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
-import { CHART_COLORS } from '../lib/brandColors'
+import { CHART_COLORS, CHART_TYPOGRAPHY } from '../lib/brandColors'
 
 const formatNumber = (num) => {
     if (num === undefined || num === null) return '0'
@@ -12,9 +12,6 @@ const formatCost = (cost) => {
     return cost < 1 ? `$${cost.toFixed(2)}` : `$${cost.toLocaleString('en-US', { maximumFractionDigits: 0 })}`
 }
 
-const estimateCost = (inputTokens, outputTokens) => {
-    return (inputTokens / 1_000_000) * 3 + (outputTokens / 1_000_000) * 15
-}
 
 const RECENT_COLUMNS = [
     { key: 'skill_name', label: 'Skill', sortable: true, getValue: r => r.skill_name || '' },
@@ -24,6 +21,10 @@ const RECENT_COLUMNS = [
     { key: 'tokens_used', label: 'Input Tokens', sortable: true, getValue: r => r.tokens_used || 0 },
     { key: 'output_tokens', label: 'Output Tokens', sortable: true, getValue: r => r.output_tokens || 0 },
     { key: 'duration_ms', label: 'Duration', sortable: true, getValue: r => r.duration_ms || 0 },
+    { key: 'status', label: 'Status', sortable: true, getValue: r => r.status || '' },
+    { key: 'attempt_no', label: 'Attempt', sortable: true, getValue: r => r.attempt_no || 1 },
+    { key: 'estimated_cost_usd', label: 'Cost', sortable: true, getValue: r => r.estimated_cost_usd || 0 },
+    { key: 'error_message', label: 'Error', sortable: true, getValue: r => r.error_message || '' },
     { key: 'model', label: 'Model', sortable: true, getValue: r => r.model || '' },
 ]
 
@@ -32,8 +33,9 @@ function SortIcon({ column, sortCol, sortDir }) {
     return <span className="sort-icon active">{sortDir === 'asc' ? ' ↑' : ' ↓'}</span>
 }
 
-function SkillsPanel({ skillRuns = [], skillDailyStats = [], isDarkMode }) {
+function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRange, isDarkMode }) {
     const [skillSort, setSkillSort] = useState('runs')
+    const [trendTime, setTrendTime] = useState('day')
     const [tableSortCol, setTableSortCol] = useState('triggered_at')
     const [tableSortDir, setTableSortDir] = useState('desc')
 
@@ -53,9 +55,13 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], isDarkMode }) {
         uniqueProjects,
         totalInputTokens,
         totalOutputTokens,
-        estimatedCost,
+        totalCost,
+        successCount,
+        failureCount,
+        successRate,
         topSkills,
         dailySeries,
+        hourlySeries,
         recentRuns,
     } = useMemo(() => {
         const runs = Array.isArray(skillRuns) ? skillRuns : []
@@ -63,6 +69,10 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], isDarkMode }) {
 
         const totalInputTokens = runs.reduce((sum, r) => sum + (r.tokens_used || 0), 0)
         const totalOutputTokens = runs.reduce((sum, r) => sum + (r.output_tokens || 0), 0)
+        const totalCost = runs.reduce((sum, r) => sum + (Number(r.estimated_cost_usd || 0)), 0)
+        const successCount = runs.filter(r => (r.status || 'success') === 'success').length
+        const failureCount = Math.max(0, runs.length - successCount)
+        const successRate = runs.length > 0 ? (successCount / runs.length) * 100 : 0
 
         const skillsMap = new Map()
         for (const r of runs) {
@@ -73,6 +83,7 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], isDarkMode }) {
                     run_count: 0,
                     input_tokens: 0,
                     output_tokens: 0,
+                    estimated_cost: 0,
                     machines: new Set(),
                 })
             }
@@ -80,6 +91,7 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], isDarkMode }) {
             row.run_count += 1
             row.input_tokens += r.tokens_used || 0
             row.output_tokens += r.output_tokens || 0
+            row.estimated_cost += Number(r.estimated_cost_usd || 0)
             if (r.machine_id) row.machines.add(r.machine_id)
         }
 
@@ -87,7 +99,7 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], isDarkMode }) {
             .map(s => ({
                 ...s,
                 machines: s.machines.size,
-                estimated_cost: estimateCost(s.input_tokens, s.output_tokens)
+                estimated_cost: s.estimated_cost || 0
             }))
             .sort((a, b) => (b.run_count - a.run_count) || (b.input_tokens - a.input_tokens))
             .slice(0, 15)
@@ -99,22 +111,102 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], isDarkMode }) {
                 dailyAgg.set(key, {
                     stat_date: key,
                     run_count: 0,
+                    success_count: 0,
+                    failure_count: 0,
                     input_tokens: 0,
                     output_tokens: 0,
+                    total_tool_calls: 0,
+                    total_cost_usd: 0,
                 })
             }
             const row = dailyAgg.get(key)
             row.run_count += d.run_count || 0
+            row.success_count += d.success_count || 0
+            row.failure_count += d.failure_count || 0
             row.input_tokens += d.total_tokens || 0
             row.output_tokens += d.total_output_tokens || 0
+            row.total_tool_calls += d.total_tool_calls || 0
+            row.total_cost_usd += Number(d.total_cost_usd || 0)
+        }
+
+        // Fallback: build daily series from raw runs when skill_daily_stats is empty
+        if (dailyAgg.size === 0) {
+            for (const r of runs) {
+                if (!r.triggered_at) continue
+                const dt = new Date(r.triggered_at)
+                if (Number.isNaN(dt.getTime())) continue
+                const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`
+                if (!dailyAgg.has(key)) {
+                    dailyAgg.set(key, {
+                        stat_date: key,
+                        run_count: 0,
+                        success_count: 0,
+                        failure_count: 0,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        total_tool_calls: 0,
+                        total_cost_usd: 0,
+                    })
+                }
+                const row = dailyAgg.get(key)
+                row.run_count += 1
+                row.success_count += (r.status || 'success') === 'success' ? 1 : 0
+                row.failure_count += (r.status || 'success') === 'failure' ? 1 : 0
+                row.input_tokens += r.tokens_used || 0
+                row.output_tokens += r.output_tokens || 0
+                row.total_tool_calls += r.tool_calls || 0
+                row.total_cost_usd += Number(r.estimated_cost_usd || 0)
+            }
         }
 
         const dailySeries = Array.from(dailyAgg.values())
             .sort((a, b) => a.stat_date.localeCompare(b.stat_date))
             .map(row => ({
                 ...row,
-                estimated_cost: estimateCost(row.input_tokens, row.output_tokens),
+                estimated_cost: Number(row.total_cost_usd || 0),
                 label: row.stat_date?.slice(5) || row.stat_date,
+            }))
+
+        const hourlyAgg = new Map()
+        for (const r of runs) {
+            if (!r.triggered_at) continue
+            const dt = new Date(r.triggered_at)
+            if (Number.isNaN(dt.getTime())) continue
+            const hourLabel = `${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')} ${String(dt.getHours()).padStart(2, '0')}:00`
+            if (!hourlyAgg.has(hourLabel)) {
+                hourlyAgg.set(hourLabel, {
+                    label: hourLabel,
+                    run_count: 0,
+                    success_count: 0,
+                    failure_count: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    total_tool_calls: 0,
+                    total_cost_usd: 0,
+                    _ts: dt.getTime() - (dt.getMinutes() * 60 + dt.getSeconds()) * 1000,
+                })
+            }
+            const row = hourlyAgg.get(hourLabel)
+            row.run_count += 1
+            row.success_count += (r.status || 'success') === 'success' ? 1 : 0
+            row.failure_count += (r.status || 'success') === 'failure' ? 1 : 0
+            row.input_tokens += r.tokens_used || 0
+            row.output_tokens += r.output_tokens || 0
+            row.total_tool_calls += r.tool_calls || 0
+            row.total_cost_usd += Number(r.estimated_cost_usd || 0)
+        }
+
+        const hourlySeries = Array.from(hourlyAgg.values())
+            .sort((a, b) => a._ts - b._ts)
+            .map(row => ({
+                label: row.label,
+                run_count: row.run_count,
+                success_count: row.success_count,
+                failure_count: row.failure_count,
+                input_tokens: row.input_tokens,
+                output_tokens: row.output_tokens,
+                total_tool_calls: row.total_tool_calls,
+                estimated_cost: Number(row.total_cost_usd || 0),
             }))
 
         const recentRuns = runs
@@ -129,9 +221,13 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], isDarkMode }) {
             uniqueProjects: new Set(runs.map(r => r.project_dir).filter(Boolean)).size,
             totalInputTokens,
             totalOutputTokens,
-            estimatedCost: estimateCost(totalInputTokens, totalOutputTokens),
+            totalCost,
+            successCount,
+            failureCount,
+            successRate,
             topSkills,
             dailySeries,
+            hourlySeries,
             recentRuns,
         }
     }, [skillRuns, skillDailyStats])
@@ -156,6 +252,43 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], isDarkMode }) {
         })
     }, [recentRuns, tableSortCol, tableSortDir])
 
+    useEffect(() => {
+        const isCustomSingleDay = dateRange === 'custom'
+            && customRange?.startDate
+            && customRange?.endDate
+            && customRange.startDate === customRange.endDate
+
+        const isSingleDayRange = dateRange === 'today' || dateRange === 'yesterday' || isCustomSingleDay
+
+        if (isSingleDayRange) {
+            if (trendTime !== 'hour') {
+                setTrendTime('hour')
+            }
+            return
+        }
+
+        // Multi-day ranges should default to day view
+        if (trendTime !== 'day' && dailySeries.length > 0) {
+            setTrendTime('day')
+            return
+        }
+
+        // If day view has no points, fallback to hour view
+        if (dailySeries.length === 0 && hourlySeries.length > 0) {
+            setTrendTime('hour')
+        }
+    }, [dateRange, customRange, trendTime, dailySeries.length, hourlySeries.length])
+
+    const trendSeries = trendTime === 'hour' ? hourlySeries : dailySeries
+    const hasTokenSignal = trendSeries.some(p => (p.input_tokens || 0) > 0 || (p.output_tokens || 0) > 0)
+    const useRunFallbackSeries = trendSeries.length > 0 && !hasTokenSignal
+
+    const isCustomSingleDay = dateRange === 'custom'
+            && customRange?.startDate
+            && customRange?.endDate
+            && customRange.startDate === customRange.endDate
+    const isSingleDayRange = dateRange === 'today' || dateRange === 'yesterday' || isCustomSingleDay
+
     const renderCell = (r, key) => {
         switch (key) {
             case 'skill_name': return r.skill_name || 'Unknown'
@@ -165,6 +298,13 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], isDarkMode }) {
             case 'tokens_used': return formatNumber(r.tokens_used || 0)
             case 'output_tokens': return formatNumber(r.output_tokens || 0)
             case 'duration_ms': return r.duration_ms ? `${formatNumber(r.duration_ms)}ms` : '—'
+            case 'status': return r.status === 'failure' ? 'FAILURE' : 'SUCCESS'
+            case 'attempt_no': return formatNumber(r.attempt_no || 1)
+            case 'estimated_cost_usd': return formatCost(Number(r.estimated_cost_usd || 0))
+            case 'error_message': {
+                const msg = r.error_message || ''
+                return msg ? (msg.length > 80 ? `${msg.slice(0, 80)}…` : msg) : '—'
+            }
             case 'model': return r.model || '—'
             default: return '—'
         }
@@ -184,14 +324,14 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], isDarkMode }) {
                     <div className="stat-meta">Avg {totalRuns > 0 ? formatNumber(Math.round(totalInputTokens / totalRuns)) : '0'} / run</div>
                 </div>
                 <div className="stat-card">
-                    <div className="stat-header"><span className="stat-label">TOKENS (OUTPUT)</span></div>
-                    <div className="stat-value">{formatNumber(totalOutputTokens)}</div>
-                    <div className="stat-meta">{totalRuns > 0 ? formatNumber(Math.round(totalOutputTokens / totalRuns)) : '0'} / run</div>
+                    <div className="stat-header"><span className="stat-label">SUCCESS RATE</span></div>
+                    <div className="stat-value">{successRate.toFixed(1)}%</div>
+                    <div className="stat-meta">{formatNumber(successCount)} success · {formatNumber(failureCount)} failures</div>
                 </div>
                 <div className="stat-card">
-                    <div className="stat-header"><span className="stat-label">EST. COST</span></div>
-                    <div className="stat-value"><span className="cost-value">{formatCost(estimatedCost)}</span></div>
-                    <div className="stat-meta">$3 / 1M input · $15 / 1M output</div>
+                    <div className="stat-header"><span className="stat-label">TOTAL COST</span></div>
+                    <div className="stat-value"><span className="cost-value">{formatCost(totalCost)}</span></div>
+                    <div className="stat-meta">Average {formatCost(totalRuns > 0 ? totalCost / totalRuns : 0)} / run</div>
                 </div>
             </div>
 
@@ -242,12 +382,12 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], isDarkMode }) {
             <div className="charts-row">
                 <div className="chart-card chart-full">
                     <div className="chart-header">
-                        <h3>Token Usage Over Time</h3>
+                        <h3>Skill Funnel & Token Usage Over Time</h3>
                     </div>
                     <div className="chart-body chart-body-dark">
-                        {dailySeries.length > 0 ? (
+                        {trendSeries.length > 0 ? (
                             <ResponsiveContainer width="100%" height={280}>
-                                <AreaChart data={dailySeries} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                                <AreaChart data={trendSeries} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                                     <defs>
                                         <linearGradient id="gradSkillTokens" x1="0" y1="0" x2="0" y2="1">
                                             <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.4} />
@@ -255,27 +395,36 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], isDarkMode }) {
                                         </linearGradient>
                                     </defs>
                                     <CartesianGrid strokeDasharray="4 4" stroke={isDarkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'} />
-                                    <XAxis dataKey="label" stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
-                                    <YAxis stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v.toLocaleString()} />
+                                    <XAxis dataKey="label" stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={CHART_TYPOGRAPHY.axisTick} axisLine={false} tickLine={false} />
+                                    <YAxis stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={CHART_TYPOGRAPHY.axisTick} axisLine={false} tickLine={false} tickFormatter={(v) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v.toLocaleString()} />
                                     <Tooltip content={({ active, payload, label }) => {
                                         if (!active || !payload?.length) return null
                                         const item = payload[0].payload
                                         return (
                                             <div style={{ padding: '8px 10px', background: isDarkMode ? 'rgba(15,23,42,0.95)' : 'white', border: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.08)' : '#e2e8f0'}`, borderRadius: 8 }}>
-                                                <div style={{ fontWeight: 700, marginBottom: 4 }}>{label}</div>
-                                                <div style={{ fontSize: 12 }}>Runs: {item.run_count.toLocaleString()}</div>
-                                                <div style={{ fontSize: 12 }}>Input: {formatNumber(item.input_tokens)}</div>
-                                                <div style={{ fontSize: 12 }}>Output: {formatNumber(item.output_tokens)}</div>
-                                                <div style={{ fontSize: 12, color: '#10b981' }}>Cost: {formatCost(item.estimated_cost)}</div>
+                                                <div style={{ ...CHART_TYPOGRAPHY.tooltipLabel, marginBottom: 4 }}>{label}</div>
+                                                <div style={CHART_TYPOGRAPHY.tooltipItem}>Attempts: {(item.run_count || 0).toLocaleString()}</div>
+                                                <div style={CHART_TYPOGRAPHY.tooltipItem}>Success: {(item.success_count || 0).toLocaleString()}</div>
+                                                <div style={CHART_TYPOGRAPHY.tooltipItem}>Failure: {(item.failure_count || 0).toLocaleString()}</div>
+                                                <div style={CHART_TYPOGRAPHY.tooltipItem}>Input: {formatNumber(item.input_tokens)}</div>
+                                                <div style={CHART_TYPOGRAPHY.tooltipItem}>Output: {formatNumber(item.output_tokens)}</div>
+                                                {useRunFallbackSeries && <div style={CHART_TYPOGRAPHY.tooltipItem}>Runs: {formatNumber(item.run_count)}</div>}
+                                                <div style={{ ...CHART_TYPOGRAPHY.tooltipItem, color: '#10b981' }}>Cost: {formatCost(item.estimated_cost)}</div>
                                             </div>
                                         )
                                     }} />
-                                    <Area type="monotone" dataKey="input_tokens" name="Input" stroke="#3b82f6" fill="url(#gradSkillTokens)" strokeWidth={2} />
-                                    <Area type="monotone" dataKey="output_tokens" name="Output" stroke="#8b5cf6" fillOpacity={0.2} fill="#8b5cf6" strokeWidth={2} />
+                                    {useRunFallbackSeries ? (
+                                        <Area type="monotone" dataKey="run_count" name="Runs" stroke="#f59e0b" fillOpacity={0.25} fill="#f59e0b" strokeWidth={2} />
+                                    ) : (
+                                        <>
+                                            <Area type="monotone" dataKey="input_tokens" name="Input" stroke="#3b82f6" fill="url(#gradSkillTokens)" strokeWidth={2} />
+                                            <Area type="monotone" dataKey="output_tokens" name="Output" stroke="#8b5cf6" fillOpacity={0.2} fill="#8b5cf6" strokeWidth={2} />
+                                        </>
+                                    )}
                                 </AreaChart>
                             </ResponsiveContainer>
                         ) : (
-                            <div className="empty-state">No daily stats yet</div>
+                            <div className="empty-state">No {trendTime}ly stats yet</div>
                         )}
                     </div>
                 </div>

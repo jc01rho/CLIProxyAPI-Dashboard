@@ -34,6 +34,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      collector:
+        condition: service_healthy
     restart: unless-stopped
 
   # ── Collector: polls CLIProxy, writes to postgres ───────────
@@ -77,6 +79,8 @@ services:
     depends_on:
       collector:
         condition: service_healthy
+      postgrest:
+        condition: service_started
     restart: unless-stopped
     labels:
       com.centurylinklabs.watchtower.enable: "true"

@@ -1,5 +1,6 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
-import { getProviderDisplay, BRAND_COLORS } from '../lib/brandColors'
+import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts'
+import { getProviderDisplay, BRAND_COLORS, CHART_TYPOGRAPHY } from '../lib/brandColors'
 import ChartDialog from './ChartDialog'
 import './CredentialStatsCard.css'
 
@@ -61,6 +62,12 @@ const getProviderSubtitle = (provider, cred) => {
     return getCredDisplayName(cred)
   }
   return getProviderDisplay(provider).name
+}
+
+const shortenApiKeyLabel = (key) => {
+  const v = String(key || '')
+  if (v.length <= 16) return v
+  return `${v.slice(0, 6)}...${v.slice(-4)}`
 }
 
 /** SVG Donut ring */
@@ -317,7 +324,9 @@ function TopoCardContent({ cred, providerColor }) {
         </div>
       )}
       {cred.api_keys?.length > 0 && (
-        <div className="cred-topo-card-hint">via {cred.api_keys.join(', ')}</div>
+        <div className="cred-topo-card-hint" title={cred.api_keys.join(', ')}>
+          via {cred.api_keys.map(shortenApiKeyLabel).join(', ')}
+        </div>
       )}
     </>
   )
@@ -394,7 +403,7 @@ function CredentialDetailContent({ cred }) {
       {cred.api_keys?.length > 0 && (
         <div className="cred-dialog-apikeys">
           <span className="cred-dialog-apikeys-label">API Keys:</span>
-          {cred.api_keys.map(k => <span key={k} className="cred-dialog-apikeys-tag">{k}</span>)}
+          {cred.api_keys.map(k => <span key={k} className="cred-dialog-apikeys-tag" title={k}>{shortenApiKeyLabel(k)}</span>)}
         </div>
       )}
 
@@ -477,8 +486,9 @@ function CredentialDetailPanel({ cred, onClose }) {
 /* ================================================================
    Main Exported Component
    ================================================================ */
-export default function CredentialStatsCard({ onRowClick, data, isLoading, setupRequired }) {
+export default function CredentialStatsCard({ onRowClick, data, timeSeries, dateRange, isLoading, setupRequired }) {
   const [activeView, setActiveView] = useState('credentials')
+  const [apiKeysSubView, setApiKeysSubView] = useState('overview')
   const [selectedCred, setSelectedCred] = useState(null)
   const [dialogCred, setDialogCred] = useState(null)
   const [sortConfig, setSortConfig] = useState({ key: 'total_requests', dir: 'desc' })
@@ -487,6 +497,9 @@ export default function CredentialStatsCard({ onRowClick, data, isLoading, setup
 
   const credentials = data?.credentials || []
   const apiKeys = data?.api_keys || []
+  const apiKeyDailySeries = timeSeries?.byDay || []
+  const apiKeyHourlySeries = timeSeries?.byHour || []
+  const hasRawSnapshots = timeSeries?.meta?.hasRawSnapshots !== false
 
   // Summary stats
   const summary = useMemo(() => {
@@ -588,7 +601,11 @@ export default function CredentialStatsCard({ onRowClick, data, isLoading, setup
       {/* Header */}
       <div className="chart-header">
         <h3>Credential Usage Statistics</h3>
-        <ViewTabs activeView={activeView} onSwitch={(v) => { setActiveView(v); setSelectedCred(null) }} />
+        <ViewTabs activeView={activeView} onSwitch={(v) => {
+          setActiveView(v)
+          setSelectedCred(null)
+          if (v !== 'api_keys') setApiKeysSubView('overview')
+        }} />
       </div>
 
       {/* Summary Stats Bar */}
@@ -659,16 +676,68 @@ export default function CredentialStatsCard({ onRowClick, data, isLoading, setup
         </div>
       ) : (
         <div className="cred-monitor-body">
-          <div className="table-wrapper cred-table-wrapper">
-            <ApiKeysTable
-              items={sortedApiKeys}
-              onSort={handleSort}
-              SortIcon={SortIcon}
-              expandedRow={onRowClick ? null : expandedApiKey}
-              setExpandedRow={setExpandedApiKey}
-              onRowClick={onRowClick}
-            />
+          <div className="cred-subtabs" role="tablist" aria-label="API Keys views">
+            <button
+              className={`cred-subtab ${apiKeysSubView === 'overview' ? 'active' : ''}`}
+              onClick={() => setApiKeysSubView('overview')}
+            >
+              Overview
+            </button>
+            <button
+              className={`cred-subtab ${apiKeysSubView === 'by_day' ? 'active' : ''}`}
+              onClick={() => setApiKeysSubView('by_day')}
+            >
+              By Day
+            </button>
+            <button
+              className={`cred-subtab ${apiKeysSubView === 'by_hour' ? 'active' : ''}`}
+              onClick={() => setApiKeysSubView('by_hour')}
+            >
+              By Hour
+            </button>
           </div>
+
+          {apiKeysSubView === 'overview' && (
+            <div className="table-wrapper cred-table-wrapper">
+              <ApiKeysTable
+                items={sortedApiKeys}
+                onSort={handleSort}
+                SortIcon={SortIcon}
+                expandedRow={onRowClick ? null : expandedApiKey}
+                setExpandedRow={setExpandedApiKey}
+                onRowClick={onRowClick}
+              />
+            </div>
+          )}
+
+          {apiKeysSubView === 'by_day' && (
+            <ApiKeyTimeSeriesChart
+              rows={apiKeyDailySeries}
+              bucketKey="stat_date"
+              emptyMessage="No daily API key data in selected range"
+            />
+          )}
+
+          {apiKeysSubView === 'by_hour' && (
+            <>
+              {!(dateRange === 'today' || dateRange === 'yesterday') && (
+                <div className="cred-time-hint">
+                  Tip: By Hour is most useful for today/yesterday to spot request peaks quickly.
+                </div>
+              )}
+              {!hasRawSnapshots ? (
+                <div className="cred-time-empty">
+                  Hourly view needs usage snapshots with raw_data. Overview and By Day are still available.
+                </div>
+              ) : (
+                <ApiKeyTimeSeriesChart
+                  rows={apiKeyHourlySeries}
+                  bucketKey="hour"
+                  emptyMessage="Not enough snapshot data to calculate hourly deltas"
+                />
+              )}
+            </>
+          )}
         </div>
       )}
 
@@ -685,6 +754,155 @@ export default function CredentialStatsCard({ onRowClick, data, isLoading, setup
       >
         <CredentialDetailContent cred={dialogCred} />
       </ChartDialog>
+    </div>
+  )
+}
+
+function ApiKeyTimeSeriesChart({ rows, bucketKey, emptyMessage }) {
+  const PALETTE = ['#22d3ee', '#60a5fa', '#a78bfa', '#34d399', '#f59e0b']
+
+  const topKeys = useMemo(() => {
+    const totals = {}
+    for (const row of (rows || [])) {
+      for (const k of (row.keys || [])) {
+        const name = k.api_key_name || 'unknown'
+        if (!totals[name]) totals[name] = { requests: 0, cost: 0 }
+        totals[name].requests += k.total_requests || 0
+        totals[name].cost += k.estimated_cost_usd || 0
+      }
+    }
+    return Object.entries(totals)
+      .sort(([, a], [, b]) => b.requests - a.requests)
+      .slice(0, 5)
+      .map(([name]) => name)
+  }, [rows])
+
+  const requestData = useMemo(() => {
+    if (!rows || !topKeys.length) return []
+    return rows.map((row) => {
+      const entry = { bucket: row[bucketKey] }
+      for (const key of topKeys) {
+        const keyRow = (row.keys || []).find((k) => k.api_key_name === key)
+        entry[key] = keyRow?.total_requests || 0
+      }
+      return entry
+    })
+  }, [rows, bucketKey, topKeys])
+
+  const costData = useMemo(() => {
+    if (!rows || !topKeys.length) return []
+    return rows.map((row) => {
+      const entry = { bucket: row[bucketKey] }
+      for (const key of topKeys) {
+        const keyRow = (row.keys || []).find((k) => k.api_key_name === key)
+        entry[key] = Number((keyRow?.estimated_cost_usd || 0).toFixed(4))
+      }
+      return entry
+    })
+  }, [rows, bucketKey, topKeys])
+
+  const tooltipBoxStyle = {
+    background: 'rgba(15, 23, 42, 0.95)',
+    border: '1px solid rgba(148, 163, 184, 0.25)',
+    borderRadius: 10,
+    padding: '10px 14px',
+    boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+    backdropFilter: 'blur(12px)',
+  }
+
+  if (!rows || rows.length === 0) {
+    return <div className="cred-time-empty">{emptyMessage}</div>
+  }
+
+  if (!topKeys.length) {
+    return <div className="cred-time-empty">No API key activity in selected range</div>
+  }
+
+  return (
+    <div className="cred-time-chart-wrap">
+      <div className="cred-u-chart-head">
+        <span className="cred-u-chart-side">Requests</span>
+        <span className="cred-u-chart-center">Time Range</span>
+        <span className="cred-u-chart-side">Cost</span>
+      </div>
+
+      <div className="cred-u-chart-grid">
+        <div className="cred-time-chart">
+          <ResponsiveContainer width="100%" height={320}>
+            <AreaChart data={requestData} margin={{ top: 10, right: 8, left: 8, bottom: 16 }}>
+              <defs>
+                {topKeys.map((key, idx) => (
+                  <linearGradient key={`req-${key}`} id={`req-grad-${idx}`} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={PALETTE[idx % PALETTE.length]} stopOpacity={0.32} />
+                    <stop offset="100%" stopColor={PALETTE[idx % PALETTE.length]} stopOpacity={0.02} />
+                  </linearGradient>
+                ))}
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.18)" />
+              <XAxis dataKey="bucket" tick={{ ...CHART_TYPOGRAPHY.axisTick, fill: '#94A3B8' }} interval="preserveStartEnd" axisLine={false} tickLine={false} />
+              <YAxis tick={{ ...CHART_TYPOGRAPHY.axisTick, fill: '#94A3B8' }} axisLine={false} tickLine={false} />
+              <Tooltip
+                contentStyle={tooltipBoxStyle}
+                labelStyle={{ color: '#F8FAFC', fontWeight: CHART_TYPOGRAPHY.tooltipLabel.fontWeight, fontFamily: CHART_TYPOGRAPHY.tooltipLabel.fontFamily, fontSize: CHART_TYPOGRAPHY.tooltipLabel.fontSize }}
+                itemStyle={{ color: '#CBD5E1', fontFamily: CHART_TYPOGRAPHY.tooltipItem.fontFamily, fontSize: CHART_TYPOGRAPHY.tooltipItem.fontSize }}
+                formatter={(value, name) => [formatNumber(value || 0), shortenApiKeyLabel(name)]}
+              />
+              <Legend wrapperStyle={{ color: '#CBD5E1', fontSize: CHART_TYPOGRAPHY.legend.fontSize, fontFamily: CHART_TYPOGRAPHY.legend.fontFamily, fontWeight: CHART_TYPOGRAPHY.legend.fontWeight }} formatter={(v) => shortenApiKeyLabel(v)} />
+              {topKeys.map((key, idx) => (
+                <Area
+                  key={key}
+                  type="monotone"
+                  dataKey={key}
+                  name={shortenApiKeyLabel(key)}
+                  stroke={PALETTE[idx % PALETTE.length]}
+                  fill={`url(#req-grad-${idx})`}
+                  strokeWidth={2.2}
+                  dot={false}
+                  activeDot={{ r: 6, strokeWidth: 2, fill: PALETTE[idx % PALETTE.length] }}
+                />
+              ))}
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="cred-time-chart">
+          <ResponsiveContainer width="100%" height={320}>
+            <AreaChart data={costData} margin={{ top: 10, right: 8, left: 8, bottom: 16 }}>
+              <defs>
+                {topKeys.map((key, idx) => (
+                  <linearGradient key={`cost-${key}`} id={`cost-grad-${idx}`} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={PALETTE[idx % PALETTE.length]} stopOpacity={0.32} />
+                    <stop offset="100%" stopColor={PALETTE[idx % PALETTE.length]} stopOpacity={0.02} />
+                  </linearGradient>
+                ))}
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.18)" />
+              <XAxis dataKey="bucket" tick={{ ...CHART_TYPOGRAPHY.axisTick, fill: '#94A3B8' }} interval="preserveStartEnd" axisLine={false} tickLine={false} />
+              <YAxis tick={{ ...CHART_TYPOGRAPHY.axisTick, fill: '#94A3B8' }} orientation="right" axisLine={false} tickLine={false} />
+              <Tooltip
+                contentStyle={tooltipBoxStyle}
+                labelStyle={{ color: '#F8FAFC', fontWeight: CHART_TYPOGRAPHY.tooltipLabel.fontWeight, fontFamily: CHART_TYPOGRAPHY.tooltipLabel.fontFamily, fontSize: CHART_TYPOGRAPHY.tooltipLabel.fontSize }}
+                itemStyle={{ color: '#CBD5E1', fontFamily: CHART_TYPOGRAPHY.tooltipItem.fontFamily, fontSize: CHART_TYPOGRAPHY.tooltipItem.fontSize }}
+                formatter={(value, name) => [`$${Number(value || 0).toFixed(4)}`, shortenApiKeyLabel(name)]}
+              />
+              <Legend wrapperStyle={{ color: '#CBD5E1', fontSize: CHART_TYPOGRAPHY.legend.fontSize, fontFamily: CHART_TYPOGRAPHY.legend.fontFamily, fontWeight: CHART_TYPOGRAPHY.legend.fontWeight }} formatter={(v) => shortenApiKeyLabel(v)} />
+              {topKeys.map((key, idx) => (
+                <Area
+                  key={key}
+                  type="monotone"
+                  dataKey={key}
+                  name={shortenApiKeyLabel(key)}
+                  stroke={PALETTE[idx % PALETTE.length]}
+                  fill={`url(#cost-grad-${idx})`}
+                  strokeWidth={2.2}
+                  dot={false}
+                  activeDot={{ r: 6, strokeWidth: 2, fill: PALETTE[idx % PALETTE.length] }}
+                />
+              ))}
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
     </div>
   )
 }
@@ -716,7 +934,7 @@ function ApiKeysTable({ items, onSort, SortIcon, expandedRow, setExpandedRow, on
                 className={`cred-row ${isExpanded ? 'cred-row-expanded' : ''}`}
                 onClick={() => onRowClick ? onRowClick(ak, 'api_key') : setExpandedRow(isExpanded ? null : ak.api_key_name)}
               >
-                <td><span className="cred-apikey-badge">{apiKeyDisplayName}</span></td>
+                <td><span className="cred-apikey-badge" title={ak.api_key_name}>{apiKeyDisplayName}</span></td>
                 <td className="cred-mono">{formatNumber(ak.total_requests)}</td>
                 <td>
                   <div className="cred-health-cell">
@@ -741,7 +959,7 @@ function ApiKeysTable({ items, onSort, SortIcon, expandedRow, setExpandedRow, on
         return (
           <div className="cred-detail-panel">
             <div className="cred-detail-header">
-              <span className="cred-apikey-badge">{apiKeyDisplayName}</span>
+              <span className="cred-apikey-badge" title={ak.api_key_name}>{apiKeyDisplayName}</span>
               <span className="cred-detail-email">{ak.credentials_used?.length || 0} credentials used</span>
             </div>
             <div className="cred-detail-models">

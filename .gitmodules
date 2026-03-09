@@ -1,0 +1,3 @@
+[submodule "plugin/claude-skills-tracker"]
+	path = plugin/claude-skills-tracker
+	url = git@github.com:leolionart/claude-skills-tracker.git

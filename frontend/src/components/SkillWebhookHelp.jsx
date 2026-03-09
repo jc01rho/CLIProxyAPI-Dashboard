@@ -66,15 +66,35 @@ const SETTINGS_JSON = (scriptPath) => `{
 }`
 
 function CopyButton({ text }) {
-    const handleCopy = () => {
-        navigator.clipboard.writeText(text).catch(() => { })
+    const [copied, setCopied] = useState(false)
+
+    const handleCopy = async () => {
+        try {
+            await navigator.clipboard.writeText(text)
+            setCopied(true)
+            window.setTimeout(() => setCopied(false), 1200)
+        } catch {
+            setCopied(false)
+        }
     }
+
     return (
-        <button className="guide-copy-btn" onClick={handleCopy} title="Copy">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-            </svg>
+        <button
+            className={`guide-copy-btn ${copied ? 'copied' : ''}`}
+            onClick={handleCopy}
+            title={copied ? 'Copied' : 'Copy'}
+            aria-label={copied ? 'Copied' : 'Copy'}
+        >
+            {copied ? (
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="20 6 9 17 4 12" />
+                </svg>
+            ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                </svg>
+            )}
         </button>
     )
 }
@@ -146,8 +166,11 @@ function SetupGuide({ isDarkMode }) {
                             Run these two commands inside Claude Code to add the marketplace and install the tracker plugin.
                             This registers hooks automatically — no manual config needed.
                         </p>
-                        <CodeBlock isDarkMode={isDarkMode} language="claude" code={`/plugin marketplace add leolionart/CLIProxyAPI-Dashboard`} />
-                        <CodeBlock isDarkMode={isDarkMode} language="claude" code={`/plugin install cliproxy-skill-tracker`} />
+                        <div className="guide-tip" style={{ marginBottom: 12 }}>
+                            Tracker distribution now comes from the shared <code>claude-skills-tracker</code> repository via this marketplace.
+                        </div>
+                        <CodeBlock isDarkMode={isDarkMode} language="claude" code={`/plugin marketplace add leolionart/claude-skills-tracker`} />
+                        <CodeBlock isDarkMode={isDarkMode} language="claude" code={`/plugin install claude-skill-tracker`} />
                     </div>
                 </div>
             </div>
@@ -170,6 +193,10 @@ function SetupGuide({ isDarkMode }) {
                         <div className="guide-tip">
                             <strong>Local setup?</strong> If your dashboard runs on the same machine
                             at <code>localhost:8417</code>, this step is optional — that's the default URL.
+                        </div>
+                        <div className="guide-tip" style={{ marginTop: 10 }}>
+                            <strong>Important dedupe note:</strong> if you already installed <code>claude-skill-tracker</code> from marketplace,
+                            do <strong>not</strong> keep a manual <code>PostToolUse: Skill</code> hook at the same time. Running both can send duplicate events.
                         </div>
                     </div>
                 </div>
@@ -199,6 +226,10 @@ function SetupGuide({ isDarkMode }) {
                         />
                         <p className="guide-desc" style={{ marginTop: 12 }}>
                             Expected response: <code>{`{"status":"ok","upserted":1,"skipped":0}`}</code>
+                        </p>
+                        <p className="guide-desc" style={{ marginTop: 8 }}>
+                            Dedupe checklist: one skill invocation should map to one unique <code>event_uid</code>.
+                            If counts look doubled, remove duplicate manual/plugin hooks and test again.
                         </p>
                         <div className="guide-tip">
                             <strong>What the plugin tracks:</strong> skill name, session ID, project directory,

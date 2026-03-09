@@ -12,6 +12,15 @@ export const CHART_COLORS = [
   '#f59e0b', '#ef4444', '#ec4899', '#6366f1',
 ]
 
+// Shared chart typography tokens (single source of truth)
+export const CHART_TYPOGRAPHY = {
+  axisTick: { fontSize: 11, fontFamily: 'var(--font-body)' },
+  legend: { fontSize: 11, fontFamily: 'var(--font-body)', fontWeight: 500 },
+  tooltipLabel: { fontFamily: 'var(--font-heading)', fontSize: 13, fontWeight: 600 },
+  tooltipItem: { fontFamily: 'var(--font-body)', fontSize: 12 },
+  mono: { fontFamily: "'JetBrains Mono', 'Consolas', monospace", fontSize: 11, fontWeight: 600 },
+}
+
 // Provider brand colors — keyword → hex
 // Mirrors --color-brand-* CSS custom properties in index.css
 export const BRAND_COLORS = {

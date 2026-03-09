@@ -1,173 +1,200 @@
 # CLIProxy Dashboard
 
-Real-time monitoring dashboard for CLIProxy API usage — track requests, tokens, costs, and OAuth credentials across all your AI models.
-
-![Dashboard Preview](https://img.shields.io/badge/status-active-brightgreen)
-![License](https://img.shields.io/badge/license-MIT-blue)
-![Docker](https://img.shields.io/badge/docker-ready-blue)
+Real-time dashboard for monitoring CLIProxy usage, token consumption, estimated cost, and credential health.
 
 <p align="center">
   <img src="docs/assets/dashboard_preview.png" alt="CLIProxy Dashboard Preview" width="100%">
 </p>
 
-## Features
+## What this project includes
 
-- **Usage Analytics** — Track requests, tokens, success rates over time
-- **Cost Estimation** — Calculate estimated API costs per model
-- **Date Range Filters** — View Today, Yesterday, 7 Days, 30 Days, or All Time
-- **Hourly Breakdown** — See usage patterns throughout the day
-- **Model Breakdown** — Usage and cost per AI model
-- **OAuth Credentials** — Monitor Antigravity, Codex, and Gemini CLI credentials with subscription status
+- **Collector (Python/Flask)**: polls CLIProxy Management API, computes deltas/costs, writes to PostgreSQL
+- **Frontend (React + Nginx)**: charts and analytics UI
+- **PostgreSQL**: self-hosted DB initialized from `init-db/schema.sql`
+- **PostgREST**: read-only API layer for frontend
+- **Skill tracker plugin distribution** via marketplace + submodule (`plugin/claude-skills-tracker`)
+
+## Architecture
+
+```text
+CLIProxy API → Collector (Python) → PostgreSQL
+Browser → Nginx:8417
+          ├── /rest/v1/*       → PostgREST:3000 → PostgreSQL (read)
+          └── /api/collector/* → collector:5001 (write/trigger)
+```
 
 ---
 
-## Quick Start
+## Quick Start (run from this repository)
 
-### Prerequisites
+### 1) Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/) & Docker Compose
-- CLIProxy running with Management API enabled
+- Docker + Docker Compose v2
+- CLIProxy with remote management enabled
 
-> No external database account needed — PostgreSQL runs inside Docker automatically.
+### 2) Configure CLIProxy Management API
 
-### 1. Download Configuration
+Ensure your CLIProxy config includes:
 
-```bash
-mkdir cliproxy-dashboard && cd cliproxy-dashboard
-
-curl -O https://raw.githubusercontent.com/leolionart/CLIProxyAPI-Dashboard/main/docker-compose.yml
-curl -O https://raw.githubusercontent.com/leolionart/CLIProxyAPI-Dashboard/main/.env.example
-cp .env.example .env
+```yaml
+remote-management:
+  allow-remote: true
+  secret: "<your-management-secret>"
 ```
 
-### 2. Configure Environment
+Quick verification:
+
+```bash
+curl -H "Authorization: Bearer <your-management-secret>" \
+  http://localhost:8317/v0/management/usage
+```
+
+You should receive a JSON usage response.
+
+### 3) Clone and initialize submodule
+
+```bash
+git clone https://github.com/leolionart/CLIProxyAPI-Dashboard.git
+cd CLIProxyAPI-Dashboard
+git submodule update --init --recursive
+```
+
+### 4) Configure environment
+
+```bash
+cp .env.example .env
+```
 
 Edit `.env`:
 
 ```env
-# PostgreSQL password (choose any secure password)
 DB_PASSWORD=your_secure_password_here
-
-# CLIProxy Connection
 CLIPROXY_URL=http://host.docker.internal:8317
-CLIPROXY_MANAGEMENT_KEY=your-management-secret-key
+CLIPROXY_MANAGEMENT_KEY=<your-management-secret>
 
 # Optional
 COLLECTOR_INTERVAL_SECONDS=300
 TIMEZONE_OFFSET_HOURS=7
 ```
 
-### 3. Start Dashboard
-
+### 5) Start services
 ```bash
 docker compose up -d
 ```
 
-Docker will automatically:
-- Start a PostgreSQL database and create all tables on first boot
-- Start PostgREST as the API layer
-- Start the collector (polls CLIProxy every 5 minutes)
-- Start the frontend dashboard
+Open dashboard at: **http://localhost:8417**
 
-### 4. Access Dashboard
+Expected startup order:
+1. `postgres` healthy
+2. `collector` healthy (DB init + migrations)
+3. `postgrest` starts
+4. `frontend` starts
 
-Open your browser: **http://localhost:8417**
-
-> First data appears after ~5 minutes (first collection cycle).
-
----
-
-## Updating
-
-```bash
-docker compose pull
-docker compose up -d
-```
-
----
-
-## Configuration Reference
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DB_PASSWORD` | PostgreSQL password | Required |
-| `CLIPROXY_URL` | CLIProxy Management API URL | `http://host.docker.internal:8317` |
-| `CLIPROXY_MANAGEMENT_KEY` | CLIProxy management secret | Required |
-| `COLLECTOR_INTERVAL_SECONDS` | Polling interval (seconds) | `300` |
-| `TIMEZONE_OFFSET_HOURS` | Timezone offset from UTC | `7` |
-
----
-
-## Troubleshooting
-
-### Check Logs
-
-```bash
-docker compose logs -f             # All services
-docker compose logs -f collector   # Collector only
-docker compose logs -f frontend    # Frontend only
-```
-
-### Check Service Status
-
-```bash
-docker compose ps
-```
-
-All services should show `healthy` or `running`.
-
-### Common Issues
-
-**Dashboard shows no data:**
-- Wait 5 minutes for first data collection
-- Check collector logs for connection errors to CLIProxy
-
-**Collector can't connect to CLIProxy:**
-- Ensure CLIProxy has `remote-management.allow-remote: true`
-- Verify `CLIPROXY_MANAGEMENT_KEY` matches CLIProxy's secret
-- On Linux, confirm `extra_hosts: host.docker.internal:host-gateway` resolves correctly
-
-**PostgREST/database errors:**
-- Run `docker compose ps` — postgres must be `healthy` before postgrest starts
-- Check postgres logs: `docker compose logs postgres`
+> First data usually appears after the first collector interval.
 
 ---
 
 <details>
-<summary><h2>Configure CLIProxy</h2></summary>
+<summary><h2>Verification</h2></summary>
 
-Ensure your CLIProxy config has Management API enabled:
-
-```yaml
-remote-management:
-  allow-remote: true
-  secret: "your-management-secret-key"
+```bash
+docker compose ps
+docker compose logs -f collector
+curl -X POST http://localhost:8417/api/collector/trigger
 ```
 
-Use the same `secret` value as `CLIPROXY_MANAGEMENT_KEY` in your `.env`.
+Success signals:
+- collector logs periodic snapshot collection
+- collector health endpoint responds
+- manual trigger returns success
 
 </details>
 
 ---
 
 <details>
-<summary><h2>Developer Guide</h2></summary>
+<summary><h2>Alternative: deploy from raw compose files only</h2></summary>
 
-### Local Frontend Development
+If you don't want to clone the full repo:
 
 ```bash
-# Start postgres + postgrest in Docker first
-docker compose up -d postgres postgrest
+mkdir cliproxy-dashboard && cd cliproxy-dashboard
+curl -O https://raw.githubusercontent.com/leolionart/CLIProxyAPI-Dashboard/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/leolionart/CLIProxyAPI-Dashboard/main/.env.example
+cp .env.example .env
+# then edit .env and run:
+docker compose up -d
+```
 
-# Then run Vite dev server
+</details>
+
+---
+
+<details>
+<summary><h2>Skill Tracker Plugin Setup</h2></summary>
+
+Tracker plugin marketplace is maintained in the dedicated tracker repository.
+
+- **Marketplace repo:** `leolionart/claude-skills-tracker`
+- **Plugin install ID:** `claude-skill-tracker`
+
+Inside Claude Code:
+
+```claude
+/plugin marketplace add leolionart/claude-skills-tracker
+/plugin install claude-skill-tracker
+/reload-plugins
+```
+
+Optional endpoint override (if dashboard is not local):
+
+```bash
+export CLIPROXY_COLLECTOR_URL="https://your-domain/api/collector/skill-events"
+```
+
+**Dedupe note:** do not run both marketplace plugin hook and a manual `PostToolUse: Skill` hook at the same time.
+
+</details>
+
+---
+
+<details>
+<summary><h2>Common operations</h2></summary>
+
+### Update services
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+### Health and smoke checks
+
+```bash
+docker compose ps
+docker compose logs --tail=200 collector postgrest frontend
+curl http://localhost:8417/api/collector/health
+curl "http://localhost:8417/rest/v1/daily_stats?select=date,total_requests&order=date.desc&limit=1"
+curl -X POST http://localhost:8417/api/collector/trigger
+```
+
+</details>
+
+---
+
+<details>
+<summary><h2>Development</h2></summary>
+
+### Frontend (hot reload)
+
+```bash
+docker compose up -d postgres postgrest
 cd frontend
 npm install
 npm run dev
 ```
 
-Access at `http://localhost:5173` with hot reload.
-
-### Local Collector Development
+### Collector (local)
 
 ```bash
 cd collector
@@ -177,88 +204,43 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Requires `.env` with `DATABASE_URL` (or set env vars manually).
+</details>
 
-### Project Structure
+---
 
-```
-cliproxy-dashboard/
-├── collector/              # Python data collector
-│   ├── main.py             # Collector logic + Flask API
-│   ├── db.py               # PostgreSQL client (psycopg2)
-│   ├── credential_stats_sync.py
-│   ├── Dockerfile
-│   └── requirements.txt
-├── frontend/               # React dashboard
-│   ├── src/
-│   │   ├── App.jsx
-│   │   ├── components/
-│   │   └── lib/supabase.js # PostgREST client via supabase-js
-│   ├── nginx.conf          # Nginx with PostgREST proxy
-│   ├── Dockerfile
-│   └── package.json
-├── init-db/
-│   └── schema.sql          # Auto-applied on first postgres boot
-├── docker-compose.yml
-├── .env.example
-└── README.md
-```
+<details>
+<summary><h2>Troubleshooting</h2></summary>
 
-### Architecture
+### Collector cannot reach CLIProxy
 
-```
-Browser → Nginx (port 8417)
-           ├── /rest/v1/*       → PostgREST:3000 (reads, anonymous)
-           └── /api/collector/* → collector:5001 (writes + triggers)
+- Check `remote-management.allow-remote: true` in CLIProxy config
+- Ensure `CLIPROXY_MANAGEMENT_KEY` matches CLIProxy `secret`
+- Ensure `CLIPROXY_URL` is reachable from the collector container
 
-Collector Flask → PostgreSQL:5432 (psycopg2, writes)
-PostgREST       → PostgreSQL:5432 (reads)
-```
+### Dashboard has no data
+
+- Wait until first collection interval
+- Check collector logs: `docker compose logs -f collector`
+- Trigger manually: `curl -X POST http://localhost:8417/api/collector/trigger`
+
+### PostgREST errors about missing schema
+
+- Confirm postgres is healthy before postgrest starts: `docker compose ps`
+- If using an old pre-initialized volume, apply schema manually from `init-db/schema.sql`
 
 </details>
 
 ---
 
 <details>
-<summary><h2>Dashboard Usage Guide</h2></summary>
+<summary><h2>Key paths</h2></summary>
 
-### Date Range Tabs
-
-| Tab | Description |
-|-----|-------------|
-| **Today** | Usage delta for current day only |
-| **Yesterday** | Usage delta for previous day |
-| **7 Days** | Total usage over past week |
-| **30 Days** | Total usage over past month |
-| **This Year** | Total usage for current year |
-
-### Dashboard Sections
-
-1. **Stats Cards** — Total requests, tokens, success rate
-2. **Request Trends** — Line chart of requests over time
-3. **Token Usage Trends** — Line chart of token consumption
-4. **Cost Breakdown** — Pie chart of costs by model
-5. **Model Usage** — Bar chart of requests per model
-6. **OAuth Credentials** — Status and quota per credential
-7. **Cost Details** — Detailed cost table by model
-
-### Default Model Pricing (USD per 1M tokens)
-
-| Model | Input | Output |
-|-------|-------|--------|
-| GPT-4o | $2.50 | $10.00 |
-| GPT-4o-mini | $0.15 | $0.60 |
-| Claude 3.5 Sonnet | $3.00 | $15.00 |
-| Claude 4 Sonnet | $3.00 | $15.00 |
-| Gemini 2.5 Flash | $0.15 | $0.60 |
-| Gemini 2.5 Pro | $1.25 | $10.00 |
-
-To update pricing, edit the `model_pricing` table directly:
-
-```bash
-docker compose exec postgres psql -U cliproxy -d cliproxy
-# UPDATE model_pricing SET input_price_per_million = 2.50 WHERE model_pattern = 'gpt-4o';
-```
+- `collector/main.py` – collector + Flask endpoints
+- `collector/db.py` – PostgreSQL client + migrations runner
+- `collector/migrations/` – DB migrations (required for schema changes)
+- `frontend/src/` – dashboard UI
+- `plugin/claude-skills-tracker/` – tracker plugin submodule (source mirror for dashboard development)
+- Tracker marketplace source of truth: `leolionart/claude-skills-tracker`
 
 </details>
 
@@ -266,12 +248,4 @@ docker compose exec postgres psql -U cliproxy -d cliproxy
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) file for details.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-## Support
-
-If you find this project helpful, please give it a star!
+MIT — see [LICENSE](LICENSE).

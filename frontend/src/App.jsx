@@ -1,13 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
-import { selectRows, selectSingle } from './lib/postgrest'
+import { supabase } from './lib/supabase'
 import Dashboard from './components/Dashboard'
-import Login from './components/Login'
 
-// Auth context helper - returns auth header if token exists
-const getAuthHeader = () => {
-    const token = localStorage.getItem('auth_token')
-    return token ? { 'Authorization': `Bearer ${token}` } : {}
-}
+const APP_LOGS_PAGE_SIZE = Number(import.meta.env.VITE_APP_LOGS_PAGE_SIZE || 500)
+const FRONTEND_AUTO_REFRESH_MS = Math.max(1000, Number(import.meta.env.VITE_AUTO_REFRESH_SECONDS || 60) * 1000)
+
 // Helper to get date boundaries based on range ID
 // Uses local timezone for date display, converts to UTC for timestamp queries
 const getDateBoundaries = (rangeId, customRange) => {
@@ -132,6 +129,7 @@ function App() {
     const [hourlyStats, setHourlyStats] = useState([]) // NEW: hourly breakdown
     const [skillRuns, setSkillRuns] = useState([])
     const [skillDailyStats, setSkillDailyStats] = useState([])
+    const [appLogs, setAppLogs] = useState([])
     const [loading, setLoading] = useState(true) // Only for initial load
     const [isRefreshing, setIsRefreshing] = useState(false) // For date range changes
     const [lastUpdated, setLastUpdated] = useState(null)
@@ -140,81 +138,10 @@ function App() {
 
     // Credential stats state
     const [credentialData, setCredentialData] = useState(null)
+    const [credentialTimeSeries, setCredentialTimeSeries] = useState({ byDay: [], byHour: [], meta: {} })
     const [credentialLoading, setCredentialLoading] = useState(true)
     const [credentialSetupRequired, setCredentialSetupRequired] = useState(false)
 
-    // Authentication state
-    const [isAuthenticated, setIsAuthenticated] = useState(false)
-    const [authChecking, setAuthChecking] = useState(true)
-    const [authEnabled, setAuthEnabled] = useState(true)
-
-    // Check authentication status on mount
-    useEffect(() => {
-        const checkAuth = async () => {
-            try {
-                // Check if auth is enabled on server
-                const statusRes = await fetch('/api/collector/auth/status')
-                const statusData = await statusRes.json()
-                
-                if (!statusData.auth_enabled) {
-                    // Auth disabled on server - allow access
-                    setAuthEnabled(false)
-                    setIsAuthenticated(true)
-                    return
-                }
-                
-                setAuthEnabled(true)
-                
-                // Check if we have a stored token
-                const token = localStorage.getItem('auth_token')
-                const expires = localStorage.getItem('auth_expires')
-                
-                if (!token) {
-                    setIsAuthenticated(false)
-                    return
-                }
-                
-                // Check if token is expired
-                if (expires && new Date(expires) < new Date()) {
-                    localStorage.removeItem('auth_token')
-                    localStorage.removeItem('auth_expires')
-                    setIsAuthenticated(false)
-                    return
-                }
-                
-                // Verify token with server
-                const verifyRes = await fetch('/api/collector/auth/verify', {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                })
-                
-                if (verifyRes.ok) {
-                    setIsAuthenticated(true)
-                } else {
-                    localStorage.removeItem('auth_token')
-                    localStorage.removeItem('auth_expires')
-                    setIsAuthenticated(false)
-                }
-            } catch (err) {
-                console.error('Auth check failed:', err)
-                // On error, assume auth disabled and allow access
-                setIsAuthenticated(true)
-            } finally {
-                setAuthChecking(false)
-            }
-        }
-        
-        checkAuth()
-    }, [])
-
-    const handleLogin = (token) => {
-        setIsAuthenticated(true)
-    }
-
-    const handleLogout = () => {
-        localStorage.removeItem('auth_token')
-        localStorage.removeItem('auth_expires')
-        setIsAuthenticated(false)
-    }
     // Fetch credential stats filtered by date range
     const fetchCredentialStats = useCallback(async (rangeId = dateRange) => {
         try {
@@ -224,15 +151,24 @@ function App() {
 
             // Try credential_daily_stats first (date-range aware)
             let useDailyStats = false
+            let dailyRowsForSeries = []
             try {
-                const dailyRows = await selectRows('credential_daily_stats', {
-                    select: 'credentials,api_keys,total_credentials,total_api_keys,stat_date',
-                    filters: [
-                        ...(startDate ? [{ column: 'stat_date', operator: 'gte', value: startDate }] : []),
-                        ...(endDate ? [{ column: 'stat_date', operator: 'lt', value: endDate }] : []),
-                    ],
-                })
-                const dailyError = null
+                let query = supabase
+                    .from('credential_daily_stats')
+                    .select('credentials, api_keys, total_credentials, total_api_keys, stat_date')
+
+                if (startDate) {
+                    query = query.gte('stat_date', startDate)
+                }
+                if (endDate) {
+                    query = query.lt('stat_date', endDate)
+                }
+
+                const { data: dailyRows, error: dailyError } = await query
+
+                if (!dailyError && dailyRows) {
+                    dailyRowsForSeries = dailyRows
+                }
 
                 if (!dailyError && dailyRows && dailyRows.length > 0) {
                     useDailyStats = true
@@ -304,51 +240,8 @@ function App() {
                     }
 
                     // Recalculate success_rate for aggregated credentials
-                    const inferProvider = (cred) => {
-                        const rawProvider = (cred.provider || '').trim()
-                        const normalizedRawProvider = rawProvider.toLowerCase()
-                        if (rawProvider) {
-                            if (['unknown', 'unkown', 'unknown provider', 'unkown provider', 'api key provider'].includes(normalizedRawProvider)) {
-                            } else if (normalizedRawProvider === 'api-key provider') {
-                                return 'api-key'
-                            } else if (normalizedRawProvider === 'oauth provider') {
-                                return 'oauth'
-                            } else {
-                                return rawProvider
-                            }
-                        }
-
-                        const source = (cred.source || '').toLowerCase()
-                        const email = (cred.email || '').toLowerCase()
-                        const label = (cred.label || '').toLowerCase()
-                        const haystack = `${source} ${email} ${label}`
-
-                        const configMatch = source.match(/^config:([^\[\]\s]+)\[/)
-                        if (configMatch) {
-                            // Keep original provider name for all OpenAI-compatible providers
-                            return configMatch[1]
-                        }
-                        if (configMatch) {
-                            const provider = configMatch[1]
-                            if (['z.ai', 'z-ai', 'zai'].includes(provider)) return 'openai'
-                            if (['google', 'googleai'].includes(provider)) return 'gemini-api-key'
-                            if (['anthropic', 'claude'].includes(provider)) return 'anthropic'
-                            return provider
-                        }
-                        if (haystack.includes('gemini') || haystack.includes('googleapis')) return 'gemini-api-key'
-                        if (haystack.includes('claude') || haystack.includes('anthropic') || haystack.includes('antigravity')) return 'anthropic'
-                        if (haystack.includes('openai') || haystack.includes('chatgpt') || haystack.includes('gpt') || haystack.includes('codex')) return 'openai'
-                        if (haystack.includes('qwen') || haystack.includes('alibaba')) return 'alibaba'
-                        if (haystack.includes('deepseek')) return 'deepseek'
-                        if (haystack.includes('grok') || haystack.includes('xai')) return 'xai'
-                        if (haystack.includes('@')) return 'oauth'
-                        if (source.includes('=') || source.length > 40) return 'api-key'
-                        return 'unknown'
-                    }
-
                     const aggregatedCreds = Object.values(credMap).map(c => ({
                         ...c,
-                        provider: inferProvider(c),
                         success_rate: c.total_requests > 0
                             ? Math.round((c.success_count / c.total_requests) * 1000) / 10
                             : 0
@@ -374,13 +267,257 @@ function App() {
                 console.debug('credential_daily_stats not available, falling back to summary:', dailyErr.message)
             }
 
+            // Build API-key by-day series from credential_daily_stats + daily_stats.breakdown (cost)
+            const dailyCostByDate = {}
+            if (startDate || rangeId === 'all') {
+                let dailyBreakdownQuery = supabase
+                    .from('daily_stats')
+                    .select('stat_date, breakdown')
+
+                if (startDate) dailyBreakdownQuery = dailyBreakdownQuery.gte('stat_date', startDate)
+                if (endDate) dailyBreakdownQuery = dailyBreakdownQuery.lt('stat_date', endDate)
+
+                const { data: dailyBreakdownRows } = await dailyBreakdownQuery
+                for (const row of (dailyBreakdownRows || [])) {
+                    const endpoints = row?.breakdown?.endpoints || {}
+                    const costMap = {}
+                    for (const [apiKeyName, endpointData] of Object.entries(endpoints)) {
+                        costMap[apiKeyName] = endpointData?.cost || 0
+                    }
+                    dailyCostByDate[row.stat_date] = costMap
+                }
+            }
+
+            const apiKeyDailySeries = (dailyRowsForSeries || [])
+                .map((row) => {
+                    const dayCostMap = dailyCostByDate[row.stat_date] || {}
+                    const keys = (row.api_keys || [])
+                        .map((k) => ({
+                            api_key_name: k.api_key_name || 'unknown',
+                            total_requests: k.total_requests || 0,
+                            total_tokens: k.total_tokens || 0,
+                            success_count: k.success_count || 0,
+                            failure_count: k.failure_count || 0,
+                            estimated_cost_usd: dayCostMap[k.api_key_name || 'unknown'] || 0,
+                            success_rate: (k.total_requests || 0) > 0
+                                ? Math.round(((k.success_count || 0) / (k.total_requests || 0)) * 1000) / 10
+                                : 0,
+                        }))
+                        .sort((a, b) => b.total_requests - a.total_requests)
+
+                    return {
+                        stat_date: row.stat_date,
+                        total_requests: keys.reduce((sum, k) => sum + (k.total_requests || 0), 0),
+                        total_tokens: keys.reduce((sum, k) => sum + (k.total_tokens || 0), 0),
+                        total_cost: keys.reduce((sum, k) => sum + (k.estimated_cost_usd || 0), 0),
+                        keys,
+                    }
+                })
+                .sort((a, b) => (a.stat_date || '').localeCompare(b.stat_date || ''))
+
+            // Build API-key by-hour series from usage_snapshots.raw_data (cumulative -> delta)
+            const { startTime, endTime } = getDateBoundaries(rangeId, customRange)
+            let snapshotsRawQuery = supabase
+                .from('usage_snapshots')
+                .select('id, collected_at, raw_data, model_usage(api_endpoint, estimated_cost_usd)')
+                .order('collected_at', { ascending: true })
+
+            if (startTime) snapshotsRawQuery = snapshotsRawQuery.gte('collected_at', startTime)
+            if (endTime) snapshotsRawQuery = snapshotsRawQuery.lt('collected_at', endTime)
+
+            const { data: snapshotsRawRows, error: snapshotsRawError } = await snapshotsRawQuery
+
+            let baselineRaw = null
+            if (startTime) {
+                const { data: baselineRawRows } = await supabase
+                    .from('usage_snapshots')
+                    .select('id, collected_at, raw_data, model_usage(api_endpoint, estimated_cost_usd)')
+                    .lt('collected_at', startTime)
+                    .order('collected_at', { ascending: false })
+                    .limit(1)
+                baselineRaw = baselineRawRows?.[0] || null
+            }
+
+            const readCumulativeApis = (snap) => {
+                const apis = snap?.raw_data?.usage?.apis || {}
+                const out = {}
+                for (const [apiKeyName, apiData] of Object.entries(apis)) {
+                    const models = apiData?.models || {}
+                    let req = 0
+                    let succ = 0
+                    let fail = 0
+                    let inTok = 0
+                    let outTok = 0
+                    let totalTok = 0
+                    for (const modelData of Object.values(models)) {
+                        req += modelData?.total_requests || 0
+                        succ += modelData?.success_count || 0
+                        fail += modelData?.failure_count || 0
+                        const mIn = modelData?.input_tokens || 0
+                        const mOut = modelData?.output_tokens || 0
+                        const mTok = modelData?.total_tokens || 0
+                        inTok += mIn
+                        outTok += mOut
+                        totalTok += mTok || (mIn + mOut)
+                    }
+                    out[apiKeyName] = {
+                        total_requests: req,
+                        success_count: succ,
+                        failure_count: fail,
+                        input_tokens: inTok,
+                        output_tokens: outTok,
+                        total_tokens: totalTok,
+                    }
+                }
+                return out
+            }
+
+            const readCumulativeCostByApi = (snap) => {
+                const out = {}
+                for (const row of (snap?.model_usage || [])) {
+                    const key = row?.api_endpoint || 'unknown'
+                    out[key] = (out[key] || 0) + (parseFloat(row?.estimated_cost_usd) || 0)
+                }
+                return out
+            }
+
+            const mergeHourEntry = (hourMap, hourKey, apiKeyName, delta) => {
+                if (!hourMap[hourKey]) {
+                    hourMap[hourKey] = { total_requests: 0, total_tokens: 0, total_cost: 0, keys: {} }
+                }
+                const hour = hourMap[hourKey]
+                if (!hour.keys[apiKeyName]) {
+                    hour.keys[apiKeyName] = {
+                        api_key_name: apiKeyName,
+                        total_requests: 0,
+                        total_tokens: 0,
+                        success_count: 0,
+                        failure_count: 0,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        estimated_cost_usd: 0,
+                    }
+                }
+                const keyRow = hour.keys[apiKeyName]
+                keyRow.total_requests += delta.total_requests
+                keyRow.total_tokens += delta.total_tokens
+                keyRow.success_count += delta.success_count
+                keyRow.failure_count += delta.failure_count
+                keyRow.input_tokens += delta.input_tokens
+                keyRow.output_tokens += delta.output_tokens
+                keyRow.estimated_cost_usd += delta.estimated_cost_usd
+                hour.total_requests += delta.total_requests
+                hour.total_tokens += delta.total_tokens
+                hour.total_cost += delta.estimated_cost_usd
+            }
+
+            const hourMap = {}
+            let prevRaw = baselineRaw
+            if (snapshotsRawRows && snapshotsRawRows.length > 0) {
+                for (const snap of snapshotsRawRows) {
+                    const curr = readCumulativeApis(snap)
+                    const currCost = readCumulativeCostByApi(snap)
+                    if (prevRaw) {
+                        const prev = readCumulativeApis(prevRaw)
+                        const prevCost = readCumulativeCostByApi(prevRaw)
+                        const allKeys = new Set([...Object.keys(prev), ...Object.keys(curr), ...Object.keys(prevCost), ...Object.keys(currCost)])
+                        const dt = new Date(snap.collected_at)
+                        const hourBucket = `${dt.toLocaleDateString('en-CA')} ${dt.getHours().toString().padStart(2, '0')}:00`
+
+                        for (const apiKeyName of allKeys) {
+                            const p = prev[apiKeyName] || {
+                                total_requests: 0,
+                                total_tokens: 0,
+                                success_count: 0,
+                                failure_count: 0,
+                                input_tokens: 0,
+                                output_tokens: 0,
+                            }
+                            const c = curr[apiKeyName] || {
+                                total_requests: 0,
+                                total_tokens: 0,
+                                success_count: 0,
+                                failure_count: 0,
+                                input_tokens: 0,
+                                output_tokens: 0,
+                            }
+
+                            let delta = {
+                                total_requests: c.total_requests - p.total_requests,
+                                total_tokens: c.total_tokens - p.total_tokens,
+                                success_count: c.success_count - p.success_count,
+                                failure_count: c.failure_count - p.failure_count,
+                                input_tokens: c.input_tokens - p.input_tokens,
+                                output_tokens: c.output_tokens - p.output_tokens,
+                                estimated_cost_usd: (currCost[apiKeyName] || 0) - (prevCost[apiKeyName] || 0),
+                            }
+
+                            if (delta.total_requests < 0 || delta.total_tokens < 0 || delta.success_count < 0 || delta.failure_count < 0 || delta.estimated_cost_usd < 0) {
+                                delta = {
+                                    total_requests: c.total_requests,
+                                    total_tokens: c.total_tokens,
+                                    success_count: c.success_count,
+                                    failure_count: c.failure_count,
+                                    input_tokens: c.input_tokens,
+                                    output_tokens: c.output_tokens,
+                                    estimated_cost_usd: currCost[apiKeyName] || 0,
+                                }
+                            }
+
+                            delta.total_requests = Math.max(0, delta.total_requests)
+                            delta.total_tokens = Math.max(0, delta.total_tokens)
+                            delta.success_count = Math.max(0, delta.success_count)
+                            delta.failure_count = Math.max(0, delta.failure_count)
+                            delta.input_tokens = Math.max(0, delta.input_tokens)
+                            delta.output_tokens = Math.max(0, delta.output_tokens)
+                            delta.estimated_cost_usd = Math.max(0, delta.estimated_cost_usd)
+
+                            if (delta.total_requests > 0 || delta.total_tokens > 0 || delta.estimated_cost_usd > 0) {
+                                mergeHourEntry(hourMap, hourBucket, apiKeyName, delta)
+                            }
+                        }
+                    }
+                    prevRaw = snap
+                }
+            }
+
+            const apiKeyHourlySeries = Object.entries(hourMap)
+                .map(([hour, data]) => {
+                    const keys = Object.values(data.keys)
+                        .map((k) => ({
+                            ...k,
+                            success_rate: k.total_requests > 0
+                                ? Math.round((k.success_count / k.total_requests) * 1000) / 10
+                                : 0,
+                        }))
+                        .sort((a, b) => b.total_requests - a.total_requests)
+                    return {
+                        hour,
+                        total_requests: data.total_requests,
+                        total_tokens: data.total_tokens,
+                        total_cost: data.total_cost || 0,
+                        keys,
+                    }
+                })
+                .sort((a, b) => a.hour.localeCompare(b.hour))
+
+            setCredentialTimeSeries({
+                byDay: apiKeyDailySeries,
+                byHour: apiKeyHourlySeries,
+                meta: {
+                    hasRawSnapshots: !snapshotsRawError,
+                    hasHourlyData: apiKeyHourlySeries.length > 0,
+                    rangeId,
+                },
+            })
+
             // Fallback: use credential_usage_summary (backward compat)
             if (!useDailyStats) {
-                const rows = await selectSingle('credential_usage_summary', {
-                    select: '*',
-                    filters: [{ column: 'id', operator: 'eq', value: 1 }],
-                })
-                const error = rows ? null : { code: 'PGRST116', message: 'No rows found' }
+                const { data: rows, error } = await supabase
+                    .from('credential_usage_summary')
+                    .select('*')
+                    .eq('id', 1)
+                    .single()
 
                 if (error) {
                     if (error.code === 'PGRST205' || error.message?.includes('relation') || error.message?.includes('does not exist') || error.message?.includes('Could not find')) {
@@ -390,10 +527,12 @@ function App() {
                 }
 
                 setCredentialData(rows)
+                setCredentialTimeSeries({ byDay: [], byHour: [], meta: { hasRawSnapshots: false, hasHourlyData: false, rangeId } })
                 setCredentialSetupRequired(false)
             }
         } catch (err) {
             console.error('Error fetching credential stats:', err)
+            setCredentialTimeSeries({ byDay: [], byHour: [], meta: { hasRawSnapshots: false, hasHourlyData: false, rangeId } })
         } finally {
             setCredentialLoading(false)
         }
@@ -410,11 +549,11 @@ function App() {
             const { startTime, endTime, startDate, endDate } = getDateBoundaries(rangeId, customRange)
 
             // 1. Fetch latest snapshot for raw_data (used for Rate Limits)
-            const latestSnapshots = await selectRows('usage_snapshots', {
-                select: '*',
-                order: { column: 'collected_at', ascending: false },
-                limit: 1,
-            })
+            const { data: latestSnapshots } = await supabase
+                .from('usage_snapshots')
+                .select('*')
+                .order('collected_at', { ascending: false })
+                .limit(1)
 
             if (latestSnapshots?.length > 0) {
                 setStats(latestSnapshots[0])
@@ -422,24 +561,29 @@ function App() {
             }
 
             // 2. Fetch ALL snapshots within date range (including model_usage for granular delta)
-            const snapshotsData = await selectRows('usage_snapshots', {
-                select: 'id,collected_at,total_requests,success_count,failure_count,total_tokens,model_usage(model_name,request_count,total_tokens,estimated_cost_usd,input_tokens,output_tokens,reasoning_tokens,cached_tokens)',
-                order: { column: 'collected_at', ascending: true },
-                filters: [
-                    ...(startTime ? [{ column: 'collected_at', operator: 'gte', value: startTime }] : []),
-                    ...(endTime ? [{ column: 'collected_at', operator: 'lt', value: endTime }] : []),
-                ],
-            })
+            let snapshotsQuery = supabase
+                .from('usage_snapshots')
+                .select('id, collected_at, total_requests, success_count, failure_count, total_tokens, model_usage(model_name, request_count, total_tokens, estimated_cost_usd, input_tokens, output_tokens, reasoning_tokens, cached_tokens)')
+                .order('collected_at', { ascending: true })
+
+            if (startTime) {
+                snapshotsQuery = snapshotsQuery.gte('collected_at', startTime)
+            }
+            if (endTime) {
+                snapshotsQuery = snapshotsQuery.lt('collected_at', endTime)
+            }
+
+            const { data: snapshotsData } = await snapshotsQuery
 
             // 2b. Fetch baseline snapshot (just before startTime) for accurate delta calculation
             let baselineSnapshot = null
             if (startTime && snapshotsData?.length > 0) {
-                const baselineData = await selectRows('usage_snapshots', {
-                    select: 'id,collected_at,total_requests,success_count,failure_count,total_tokens,model_usage(model_name,request_count,total_tokens,estimated_cost_usd)',
-                    filters: [{ column: 'collected_at', operator: 'lt', value: startTime }],
-                    order: { column: 'collected_at', ascending: false },
-                    limit: 1,
-                })
+                const { data: baselineData } = await supabase
+                    .from('usage_snapshots')
+                    .select('id, collected_at, total_requests, success_count, failure_count, total_tokens, model_usage(model_name, request_count, total_tokens, estimated_cost_usd)')
+                    .lt('collected_at', startTime)
+                    .order('collected_at', { ascending: false })
+                    .limit(1)
 
                 baselineSnapshot = baselineData?.[0] || null
             }
@@ -544,13 +688,17 @@ function App() {
 
             // For 'all' time, we want all daily stats, otherwise respect startDate
             if (rangeId === 'all' || startDate) {
-                const dailyStatsRows = await selectRows('daily_stats', {
-                    select: 'stat_date,total_requests,total_tokens,success_count,failure_count,estimated_cost_usd,breakdown',
-                    filters: [
-                        ...(startDate ? [{ column: 'stat_date', operator: 'gte', value: startDate }] : []),
-                        ...(endDate ? [{ column: 'stat_date', operator: 'lt', value: endDate }] : []),
-                    ],
-                })
+                let dailyStatsQuery = supabase
+                    .from('daily_stats')
+                    .select('stat_date, total_requests, total_tokens, success_count, failure_count, estimated_cost_usd, breakdown')
+
+                if (startDate) {
+                    dailyStatsQuery = dailyStatsQuery.gte('stat_date', startDate)
+                }
+                if (endDate) {
+                    dailyStatsQuery = dailyStatsQuery.lt('stat_date', endDate)
+                }
+                const { data: dailyStatsRows } = await dailyStatsQuery
                 dailyStatsRows?.forEach(row => {
                     dailyStatsFromDB[row.stat_date] = {
                         total_requests: row.total_requests || 0,
@@ -712,12 +860,11 @@ function App() {
                 // If no baseline (e.g. All Time), assume 0 for all counters.
                 let baselineId = null;
                 if (startTime) {
-                    const baselineData = await selectRows('usage_snapshots', {
-                        select: 'id,collected_at,total_requests,success_count,failure_count,total_tokens',
-                        filters: [{ column: 'collected_at', operator: 'lt', value: startTime }],
-                        order: { column: 'collected_at', ascending: false },
-                        limit: 1,
-                    })
+                    const { data: baselineData } = await supabase.from('usage_snapshots')
+                        .select('id, collected_at, total_requests, success_count, failure_count, total_tokens')
+                        .lt('collected_at', startTime)
+                        .order('collected_at', { ascending: false })
+                        .limit(1)
 
                     baselineId = baselineData?.[0]?.id;
                 }
@@ -768,11 +915,10 @@ function App() {
                 // For now, assuming < 100 restarts is safe for a single 'in' query.
                 // CRITICAL: Supabase defaults to 1000 rows. With many snapshots, this query can return thousands of rows.
                 // We MUST increase the limit.
-                const usageRecords = await selectRows('model_usage', {
-                    select: 'snapshot_id,model_name,api_endpoint,request_count,input_tokens,output_tokens,reasoning_tokens,cached_tokens,total_tokens,estimated_cost_usd',
-                    filters: [{ column: 'snapshot_id', operator: 'in', value: uniqueSnapIds }],
-                    limit: 100000,
-                }) // Increase limit to ensure we get all records
+                const { data: usageRecords } = await supabase.from('model_usage')
+                    .select('snapshot_id, model_name, api_endpoint, request_count, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, estimated_cost_usd')
+                    .in('snapshot_id', uniqueSnapIds)
+                    .limit(100000); // Increase limit to ensure we get all records
 
                 // Group fetched usage records by Snapshot ID -> Map<snapshot_id, Map<composite_key, model_usage_data>>
                 const snapMap = new Map();
@@ -926,7 +1072,7 @@ function App() {
             // 5. Fetch skill runs + daily stats
             let skillRunsQuery = supabase
                 .from('skill_runs')
-                .select('skill_name,session_id,machine_id,triggered_at,tokens_used,output_tokens,duration_ms,model,tool_calls,is_skeleton,project_dir')
+                .select('event_uid,tool_use_id,skill_name,session_id,machine_id,source,triggered_at,status,error_type,error_message,attempt_no,tokens_used,output_tokens,duration_ms,model,tool_calls,estimated_cost_usd,is_skeleton,project_dir')
                 .eq('is_skeleton', false)
                 .order('triggered_at', { ascending: false })
                 .limit(1000)
@@ -950,13 +1096,31 @@ function App() {
                 skillDailyQuery = skillDailyQuery.lt('stat_date', endDate)
             }
 
-            const [{ data: skillRunsData }, { data: skillDailyData }] = await Promise.all([
+            let appLogsQuery = supabase
+                .from('app_logs')
+                .select('id,event_uid,logged_at,source,category,severity,title,message,details,session_id,machine_id,project_dir')
+                .order('logged_at', { ascending: false })
+                .order('id', { ascending: false })
+                .limit(APP_LOGS_PAGE_SIZE)
+
+            if (startTime) {
+                appLogsQuery = appLogsQuery.gte('logged_at', startTime)
+            }
+            if (endTime) {
+                appLogsQuery = appLogsQuery.lt('logged_at', endTime)
+            }
+
+            const [{ data: skillRunsData }, { data: skillDailyData }, { data: appLogsData }] = await Promise.all([
                 skillRunsQuery,
                 skillDailyQuery,
+                appLogsQuery,
             ])
+
+            const appRows = appLogsData || []
 
             setSkillRuns(skillRunsData || [])
             setSkillDailyStats(skillDailyData || [])
+            setAppLogs(appRows)
 
             setLoading(false)
             setIsRefreshing(false)
@@ -974,11 +1138,10 @@ function App() {
     }, [dateRange, fetchData, fetchCredentialStats])
 
     useEffect(() => {
-        // Refresh every 5 minutes
         const interval = setInterval(() => {
             fetchData(dateRange)
             fetchCredentialStats(dateRange)
-        }, 5 * 60 * 1000)
+        }, FRONTEND_AUTO_REFRESH_MS)
 
         return () => {
             clearInterval(interval)
@@ -1044,28 +1207,24 @@ function App() {
         setDateRange(days)
     }
 
-    // Show loading while checking auth
-    if (authChecking) {
-        return (
-            <div style={{
-                minHeight: '100vh',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                background: '#1a1a2e',
-                color: '#fff'
-            }}>
-                <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontSize: '24px', marginBottom: '10px' }}>Loading...</div>
-                </div>
-            </div>
-        )
-    }
+    const clearAllAppLogs = useCallback(async () => {
+        const isProduction = import.meta.env.PROD
+        const collectorBase = isProduction
+            ? '/api/collector'
+            : (import.meta.env.VITE_COLLECTOR_URL || 'http://localhost:5001')
 
-    // Show login if not authenticated (and auth is enabled)
-    if (!isAuthenticated && authEnabled) {
-        return <Login onLogin={handleLogin} authEnabled={authEnabled} />
-    }
+        const response = await fetch(`${collectorBase}/logs/clear`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scope: 'all' })
+        })
+
+        if (!response.ok) {
+            throw new Error(`Clear logs failed: ${response.status}`)
+        }
+
+        await fetchData(dateRange)
+    }, [dateRange, fetchData])
 
     const handleCustomRangeApply = (range) => {
         setCustomRange({
@@ -1091,12 +1250,13 @@ function App() {
                 onCustomRangeApply={handleCustomRangeApply}
                 endpointUsage={endpointUsage}
                 credentialData={credentialData}
+                credentialTimeSeries={credentialTimeSeries}
                 credentialLoading={credentialLoading}
                 credentialSetupRequired={credentialSetupRequired}
-                onLogout={handleLogout}
-                isAuthenticated={isAuthenticated}
                 skillRuns={skillRuns}
                 skillDailyStats={skillDailyStats}
+                appLogs={appLogs}
+                onClearAllLogs={clearAllAppLogs}
             />
         </div>
     )

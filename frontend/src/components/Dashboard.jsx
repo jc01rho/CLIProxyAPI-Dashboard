@@ -216,7 +216,7 @@ const TREND_CONFIG = {
     cost: { stroke: '#f59e0b', name: 'Cost' },
 }
 
-function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefreshing, lastUpdated, dateRange, onDateRangeChange, customRange, onCustomRangeApply, endpointUsage: rawEndpointUsage, credentialData, credentialTimeSeries, credentialLoading, credentialSetupRequired, skillRuns, skillDailyStats, appLogs, onClearAllLogs }) {
+function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefreshing, lastUpdated, dateRange, onDateRangeChange, customRange, onCustomRangeApply, endpointUsage: rawEndpointUsage, credentialData, credentialTimeSeries, credentialLoading, credentialSetupRequired, skillRuns, skillDailyStats, appLogs, onClearAllLogs, onLogout }) {
     // Auto-select time range based on dateRange: hour for today/yesterday, day for longer ranges
     const defaultTimeRange = (dateRange === 'today' || dateRange === 'yesterday') ? 'hour' : 'day'
 
@@ -997,6 +997,9 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                 lastUpdated ? `Updated: ${lastUpdated.toLocaleTimeString()}` : ''
                             )}
                         </span>
+                        <button className="refresh-btn" onClick={onLogout} style={{ background: 'rgba(239, 68, 68, 0.14)', borderColor: 'rgba(248, 113, 113, 0.28)' }}>
+                            <span className="refresh-text">Logout</span>
+                        </button>
                     </div>
                     <button className="theme-toggle" onClick={toggleTheme} title="Toggle theme">
                         {isDarkMode ? <Sun /> : <Moon />}

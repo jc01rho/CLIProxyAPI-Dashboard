@@ -71,11 +71,20 @@ Edit `.env`:
 DB_PASSWORD=your_secure_password_here
 CLIPROXY_URL=http://host.docker.internal:8317
 CLIPROXY_MANAGEMENT_KEY=<your-management-secret>
+ADMIN_PASSWORD=change-me
 
 # Optional
 COLLECTOR_INTERVAL_SECONDS=300
 TIMEZONE_OFFSET_HOURS=7
+ADMIN_SESSION_TTL_DAYS=30
+ADMIN_SESSION_SECURE_COOKIE=false
+ADMIN_SESSION_SAMESITE=Lax
 ```
+
+Notes:
+- Dashboard now requires admin login before loading UI or `/rest/v1/*` data.
+- The browser stores only an `HttpOnly` session cookie; the password is never stored in browser storage.
+- If you deploy behind HTTPS, set `ADMIN_SESSION_SECURE_COOKIE=true`.
 
 ### 5) Start services
 ```bash
@@ -159,6 +168,47 @@ export CLIPROXY_COLLECTOR_URL="https://your-domain/api/collector/skill-events"
 ---
 
 <details>
+<summary><h2>Optional: Lark Suite MCP + local skill</h2></summary>
+
+This repo now includes templates to enable Lark task data access from Claude Code.
+
+### 1) Prepare local MCP config (do not commit secrets)
+
+```bash
+cp .mcp.json.example .mcp.json
+```
+
+`.mcp.json` is ignored by git in this repo, so keep real credentials there.
+
+### 2) Set local environment variables
+
+Use your shell profile (or export in current terminal):
+
+```bash
+export LARK_APP_ID="cli_xxx"
+export LARK_APP_SECRET="your-lark-app-secret"
+export LARK_DOMAIN="https://open.larksuite.com"
+export LARK_TOOLSETS="preset.base,preset.task,task.v2.task.get,task.v2.task.list,task.v2.tasklist.list,task.v2.tasklist.tasks"
+```
+
+### 3) Reload Claude Code session
+
+After saving `.mcp.json` and env vars, restart Claude Code (or reload) so `lark-mcp` can start.
+
+### 4) Use repo-local skill
+
+Skill file: `.claude/skills/lark-suite/SKILL.md`
+
+Ask naturally, for example:
+- "Lấy danh sách task đang open trong Lark"
+- "Lấy chi tiết task theo ID ..."
+- "Tóm tắt task theo trạng thái"
+
+</details>
+
+---
+
+<details>
 <summary><h2>Common operations</h2></summary>
 
 ### Update services
@@ -194,6 +244,10 @@ npm install
 npm run dev
 ```
 
+Open Vite dev UI at `http://localhost:5173`.
+
+> Keep the local collector running too. Vite dev proxy now checks the same auth session flow as production, so `/rest/v1/*` stays locked until you log in.
+
 ### Collector (local)
 
 ```bash
@@ -221,7 +275,13 @@ python main.py
 
 - Wait until first collection interval
 - Check collector logs: `docker compose logs -f collector`
-- Trigger manually: `curl -X POST http://localhost:8417/api/collector/trigger`
+- Trigger manually after logging in: `curl -X POST http://localhost:8417/api/collector/trigger`
+
+### Login does not work
+
+- Ensure `.env` contains `ADMIN_PASSWORD` and that it matches what you enter on the login screen
+- For HTTPS deployments, set `ADMIN_SESSION_SECURE_COOKIE=true`; for local HTTP keep it `false`
+- If you use a custom origin or reverse proxy, set `ADMIN_ALLOWED_ORIGINS` to the public dashboard origin
 
 ### PostgREST errors about missing schema
 

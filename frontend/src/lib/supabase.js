@@ -5,4 +5,21 @@ import { createClient } from '@supabase/supabase-js'
 const supabaseUrl = window.location.origin
 const supabaseKey = 'anon'  // PostgREST uses web_anon role (no JWT required)
 
-export const supabase = createClient(supabaseUrl, supabaseKey)
+const authenticatedFetch = async (input, init = {}) => {
+    const response = await fetch(input, {
+        ...init,
+        credentials: 'include',
+    })
+
+    if (response.status === 401 && typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('cliproxy:auth-unauthorized'))
+    }
+
+    return response
+}
+
+export const supabase = createClient(supabaseUrl, supabaseKey, {
+    global: {
+        fetch: authenticatedFetch,
+    },
+})

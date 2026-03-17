@@ -1,29 +1,87 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+const authBypassPaths = new Set([
+    '/api/collector/health',
+    '/api/collector/auth/login',
+    '/api/collector/auth/session',
+    '/api/collector/auth/logout',
+    '/api/collector/auth/verify',
+    '/api/collector/log-events',
+    '/api/collector/skill-events',
+])
+
 export default defineConfig({
     plugins: [react()],
     server: {
         host: '0.0.0.0',
         port: 5173,
         proxy: {
-            // PostgREST — proxied by nginx in prod, proxied by Vite in dev
-            // Strip Authorization/apikey headers: PostgREST uses web_anon role when no JWT present
+            // PostgREST — proxied by nginx in prod, and gated via collector auth in dev
             '/rest/v1': {
                 target: 'http://localhost:3000',
                 rewrite: (path) => path.replace(/^\/rest\/v1/, ''),
                 changeOrigin: true,
                 configure: (proxy) => {
-                    proxy.on('proxyReq', (proxyReq) => {
+                    proxy.on('proxyReq', async (proxyReq, req, res) => {
                         proxyReq.removeHeader('Authorization')
                         proxyReq.removeHeader('apikey')
+
+                        try {
+                            const cookie = req.headers.cookie || ''
+                            const verifyResponse = await fetch('http://localhost:5001/api/collector/auth/verify', {
+                                headers: cookie ? { cookie } : {},
+                            })
+
+                            if (verifyResponse.status === 401) {
+                                if (!res.headersSent) {
+                                    res.writeHead(401, { 'Content-Type': 'application/json' })
+                                    res.end(JSON.stringify({ error: 'authentication required' }))
+                                }
+                                proxyReq.destroy()
+                            }
+                        } catch (error) {
+                            if (!res.headersSent) {
+                                res.writeHead(502, { 'Content-Type': 'application/json' })
+                                res.end(JSON.stringify({ error: 'auth verify failed' }))
+                            }
+                            proxyReq.destroy(error)
+                        }
                     })
                 },
             },
-            // Collector trigger API
+            // Collector API — keep cookie/session semantics same as production
             '/api/collector': {
                 target: 'http://localhost:5001',
                 changeOrigin: true,
+                configure: (proxy) => {
+                    proxy.on('proxyReq', async (proxyReq, req, res) => {
+                        if (authBypassPaths.has(req.url || '')) {
+                            return
+                        }
+
+                        try {
+                            const cookie = req.headers.cookie || ''
+                            const verifyResponse = await fetch('http://localhost:5001/api/collector/auth/verify', {
+                                headers: cookie ? { cookie } : {},
+                            })
+
+                            if (verifyResponse.status === 401) {
+                                if (!res.headersSent) {
+                                    res.writeHead(401, { 'Content-Type': 'application/json' })
+                                    res.end(JSON.stringify({ error: 'authentication required' }))
+                                }
+                                proxyReq.destroy()
+                            }
+                        } catch (error) {
+                            if (!res.headersSent) {
+                                res.writeHead(502, { 'Content-Type': 'application/json' })
+                                res.end(JSON.stringify({ error: 'auth verify failed' }))
+                            }
+                            proxyReq.destroy(error)
+                        }
+                    })
+                },
             },
         }
     },

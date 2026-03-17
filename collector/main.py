@@ -6,17 +6,20 @@ Polls the CLIProxy Management API and stores usage data in PostgreSQL
 
 import os
 import time
+import hmac
 import hashlib
 import logging
+import secrets
 import threading
 from uuid import uuid4
 from datetime import datetime, date, timezone, timedelta
 from typing import Optional, Dict, Any, Tuple
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from dotenv import load_dotenv
-from flask import Flask, jsonify, Blueprint, request
+from flask import Flask, jsonify, Blueprint, request, make_response, Response, g
 from flask_cors import CORS
 from db import PostgreSQLClient
 from credential_stats_sync import sync_credential_stats
@@ -56,6 +59,15 @@ COLLECTOR_INTERVAL = _env_int('COLLECTOR_INTERVAL_SECONDS', 60)
 CREDENTIAL_SYNC_INTERVAL = _env_int('CREDENTIAL_SYNC_INTERVAL_SECONDS', COLLECTOR_INTERVAL)
 APP_LOG_CLEANUP_INTERVAL_MINUTES = _env_int('APP_LOG_CLEANUP_INTERVAL_MINUTES', 30)
 TRIGGER_PORT = _env_int('COLLECTOR_TRIGGER_PORT', 5001)
+
+ADMIN_PASSWORD = str(os.getenv('ADMIN_PASSWORD', '')).strip()
+ADMIN_SESSION_COOKIE_NAME = str(os.getenv('ADMIN_SESSION_COOKIE_NAME', 'cliproxy_admin_session')).strip() or 'cliproxy_admin_session'
+ADMIN_SESSION_TTL_DAYS = _env_int('ADMIN_SESSION_TTL_DAYS', 30)
+ADMIN_SESSION_SECURE_COOKIE = str(os.getenv('ADMIN_SESSION_SECURE_COOKIE', 'false')).strip().lower() in {'1', 'true', 'yes', 'on'}
+ADMIN_SESSION_SAMESITE = str(os.getenv('ADMIN_SESSION_SAMESITE', 'Lax')).strip().capitalize() or 'Lax'
+if ADMIN_SESSION_SAMESITE not in {'Lax', 'Strict', 'None'}:
+    ADMIN_SESSION_SAMESITE = 'Lax'
+ADMIN_ALLOWED_ORIGINS = [origin.strip().rstrip('/') for origin in str(os.getenv('ADMIN_ALLOWED_ORIGINS', '')).split(',') if origin.strip()]
 
 LOG_VERBOSITY = str(os.getenv('LOG_VERBOSITY', 'normal')).strip().lower()
 if LOG_VERBOSITY not in {'minimal', 'normal', 'debug'}:
@@ -118,6 +130,190 @@ api_bp = Blueprint('api', __name__, url_prefix='/api/collector')
 SKILL_DEFAULT_PRICING = {'input': 3.00, 'output': 15.00}
 LOG_ALLOWED_SEVERITY = {'debug', 'info', 'warn', 'error'}
 LOG_ALLOWED_CATEGORY = {'skill', 'sync', 'credential', 'api', 'db', 'system', 'other'}
+AUTH_PUBLIC_PATHS = {
+    '/api/collector/health',
+    '/api/collector/auth/login',
+    '/api/collector/auth/logout',
+    '/api/collector/auth/session',
+    '/api/collector/auth/verify',
+    '/api/collector/log-events',
+    '/api/collector/skill-events',
+}
+AUTH_PROTECTED_POST_PATHS = {
+    '/api/collector/trigger',
+    '/api/collector/credential-stats/sync',
+    '/api/collector/logs/clear',
+    '/api/collector/auth/logout',
+}
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        raw = str(value).strip()
+        if not raw:
+            return None
+        if raw.endswith('Z'):
+            raw = raw[:-1] + '+00:00'
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _format_http_datetime(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT')
+
+
+def _hash_session_token(token: str) -> str:
+    return hashlib.sha256(token.encode('utf-8')).hexdigest()
+
+
+def _generate_session_token() -> str:
+    return secrets.token_urlsafe(48)
+
+
+def _verify_admin_password(password: str) -> bool:
+    if not ADMIN_PASSWORD:
+        logger.warning('ADMIN_PASSWORD is not configured; rejecting login attempt.')
+        return False
+    return hmac.compare_digest(password, ADMIN_PASSWORD)
+
+
+def _get_request_origin() -> str:
+    return (request.headers.get('Origin') or '').strip().rstrip('/')
+
+
+def _origin_allowed(origin: str) -> bool:
+    if not origin:
+        return False
+    if ADMIN_ALLOWED_ORIGINS:
+        return origin in ADMIN_ALLOWED_ORIGINS
+    host = request.host_url.rstrip('/')
+    return origin == host
+
+
+def _validate_same_origin_request() -> Optional[Response]:
+    origin = _get_request_origin()
+    referer = (request.headers.get('Referer') or '').strip()
+
+    if origin:
+        if _origin_allowed(origin):
+            return None
+        return jsonify({'error': 'origin not allowed'}), 403
+
+    if referer:
+        parsed = urlparse(referer)
+        referer_origin = f'{parsed.scheme}://{parsed.netloc}'.rstrip('/') if parsed.scheme and parsed.netloc else ''
+        if referer_origin and _origin_allowed(referer_origin):
+            return None
+        return jsonify({'error': 'referer not allowed'}), 403
+
+    return jsonify({'error': 'missing origin'}), 403
+
+
+def _session_cookie_settings(max_age: int = 0) -> Dict[str, Any]:
+    expires_at = _utcnow() + timedelta(seconds=max_age) if max_age > 0 else _utcnow() - timedelta(days=1)
+    return {
+        'key': ADMIN_SESSION_COOKIE_NAME,
+        'httponly': True,
+        'secure': ADMIN_SESSION_SECURE_COOKIE,
+        'samesite': ADMIN_SESSION_SAMESITE,
+        'path': '/',
+        'max_age': max_age,
+        'expires': _format_http_datetime(expires_at),
+    }
+
+
+def _set_session_cookie(response: Response, token: str, max_age: int) -> None:
+    response.set_cookie(value=token, **_session_cookie_settings(max_age=max_age))
+
+
+def _clear_session_cookie(response: Response) -> None:
+    response.set_cookie(value='', **_session_cookie_settings(max_age=0))
+
+
+def _get_session_row(token: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not db_client or not token:
+        return None
+    token_hash = _hash_session_token(token)
+    try:
+        row = db_client.table('admin_sessions').select('*').eq('token_hash', token_hash).single().execute().data
+    except Exception as e:
+        logger.error(f'Failed to load admin session: {e}', exc_info=True)
+        return None
+
+    if not row:
+        return None
+
+    revoked_at = _parse_iso_datetime(row.get('revoked_at'))
+    expires_at = _parse_iso_datetime(row.get('expires_at'))
+    now = _utcnow()
+    if revoked_at or not expires_at or expires_at <= now:
+        if not revoked_at:
+            try:
+                db_client.table('admin_sessions').update({'revoked_at': now.isoformat()}).eq('id', row.get('id')).execute()
+            except Exception as e:
+                logger.error(f'Failed to revoke expired admin session: {e}', exc_info=True)
+        return None
+
+    return row
+
+
+def _get_authenticated_session() -> Optional[Dict[str, Any]]:
+    if hasattr(g, 'admin_session'):
+        return g.admin_session
+    token = request.cookies.get(ADMIN_SESSION_COOKIE_NAME)
+    session_row = _get_session_row(token)
+    g.admin_session = session_row
+    return session_row
+
+
+def _touch_session(session_row: Dict[str, Any]) -> None:
+    if not db_client or not session_row or not session_row.get('id'):
+        return
+    try:
+        db_client.table('admin_sessions').update({'last_seen_at': _utcnow().isoformat()}).eq('id', session_row['id']).execute()
+    except Exception as e:
+        logger.error(f'Failed to update admin session last_seen_at: {e}', exc_info=True)
+
+
+def _revoke_session(session_row: Optional[Dict[str, Any]]) -> None:
+    if not db_client or not session_row or not session_row.get('id'):
+        return
+    try:
+        db_client.table('admin_sessions').update({'revoked_at': _utcnow().isoformat()}).eq('id', session_row['id']).execute()
+    except Exception as e:
+        logger.error(f'Failed to revoke admin session: {e}', exc_info=True)
+
+
+def _session_payload(session_row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not session_row:
+        return {'authenticated': False}
+    return {
+        'authenticated': True,
+        'remember_me': bool(session_row.get('remember_me')),
+        'expires_at': session_row.get('expires_at'),
+        'last_seen_at': session_row.get('last_seen_at'),
+    }
+
+
+def _require_admin_session() -> Optional[Response]:
+    session_row = _get_authenticated_session()
+    if not session_row:
+        return jsonify({'error': 'authentication required'}), 401
+    _touch_session(session_row)
+    return None
 
 
 def _should_log_event(severity: str, is_debug_event: bool = False) -> bool:
@@ -166,6 +362,32 @@ def _normalize_log_category(value: Any) -> str:
 
 def _safe_text(value: Any, max_len: int = 1000) -> str:
     return str(value or '').strip()[:max_len]
+
+
+@flask_app.before_request
+def _enforce_admin_auth() -> Optional[Response]:
+    path = request.path.rstrip('/') or '/'
+
+    if path.startswith('/rest/v1'):
+        guard = _require_admin_session()
+        if guard:
+            return guard
+        return None
+
+    if not path.startswith('/api/collector'):
+        return None
+
+    if path in AUTH_PUBLIC_PATHS:
+        if request.method == 'POST' and path == '/api/collector/auth/logout':
+            return _validate_same_origin_request()
+        return None
+
+    if request.method == 'POST' and path in AUTH_PROTECTED_POST_PATHS:
+        csrf_guard = _validate_same_origin_request()
+        if csrf_guard:
+            return csrf_guard
+
+    return _require_admin_session()
 
 
 def _current_local_day_bounds_utc() -> tuple[str, str]:
@@ -256,6 +478,79 @@ def _log_app_event(*, source: str, category: str, severity: str, title: str, mes
 def health_check():
     """Health check endpoint."""
     return jsonify({"status": "healthy", "timestamp": datetime.now(APP_TIMEZONE).isoformat()})
+
+
+@api_bp.route('/auth/login', methods=['POST'])
+def auth_login():
+    if not db_client:
+        return jsonify({'error': 'database not initialized'}), 500
+
+    csrf_guard = _validate_same_origin_request()
+    if csrf_guard:
+        return csrf_guard
+
+    body = request.get_json(force=True, silent=True) or {}
+    password = str(body.get('password') or '')
+    remember_me = bool(body.get('rememberMe'))
+
+    if not password:
+        return jsonify({'error': 'password is required'}), 400
+
+    if not _verify_admin_password(password):
+        logger.warning('Admin login failed due to invalid password')
+        return jsonify({'error': 'invalid credentials'}), 401
+
+    token = _generate_session_token()
+    now = _utcnow()
+    expires_at = now + timedelta(days=ADMIN_SESSION_TTL_DAYS)
+    session_record = {
+        'token_hash': _hash_session_token(token),
+        'created_at': now.isoformat(),
+        'last_seen_at': now.isoformat(),
+        'expires_at': expires_at.isoformat(),
+        'remember_me': remember_me,
+        'revoked_at': None,
+        'created_ip': _safe_text(request.headers.get('X-Forwarded-For') or request.remote_addr, 255) or None,
+        'user_agent': _safe_text(request.headers.get('User-Agent'), 1000) or None,
+    }
+
+    created = db_client.table('admin_sessions').insert(session_record).execute().data
+    session_row = created[0] if created else session_record
+    response = make_response(jsonify(_session_payload(session_row)))
+    _set_session_cookie(response, token, max_age=ADMIN_SESSION_TTL_DAYS * 24 * 60 * 60)
+    g.admin_session = session_row
+    return response
+
+
+@api_bp.route('/auth/session', methods=['GET'])
+def auth_session():
+    session_row = _get_authenticated_session()
+    if session_row:
+        _touch_session(session_row)
+    return jsonify(_session_payload(session_row))
+
+
+@api_bp.route('/auth/logout', methods=['POST'])
+def auth_logout():
+    session_row = _get_authenticated_session()
+    if session_row:
+        _revoke_session(session_row)
+    response = make_response(jsonify({'ok': True}))
+    _clear_session_cookie(response)
+    g.admin_session = None
+    return response
+
+
+@api_bp.route('/auth/verify', methods=['GET'])
+def auth_verify():
+    session_row = _get_authenticated_session()
+    if not session_row:
+        response = make_response('', 401)
+        _clear_session_cookie(response)
+        return response
+    _touch_session(session_row)
+    return jsonify({'authenticated': True})
+
 
 @api_bp.route('/trigger', methods=['POST'])
 def trigger_sync_endpoint():

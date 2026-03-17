@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from './lib/supabase'
 import Dashboard from './components/Dashboard'
 
 const APP_LOGS_PAGE_SIZE = Number(import.meta.env.VITE_APP_LOGS_PAGE_SIZE || 500)
 const FRONTEND_AUTO_REFRESH_MS = Math.max(1000, Number(import.meta.env.VITE_AUTO_REFRESH_SECONDS || 60) * 1000)
+const COLLECTOR_BASE = '/api/collector'
 
 // Helper to get date boundaries based on range ID
 // Uses local timezone for date display, converts to UTC for timestamp queries
@@ -122,6 +123,39 @@ const getDateBoundaries = (rangeId, customRange) => {
 }
 
 function App() {
+    const [authState, setAuthState] = useState({ loading: true, authenticated: false, expiresAt: null, rememberMe: false })
+    const [loginForm, setLoginForm] = useState({ password: '', rememberMe: true })
+    const [loginError, setLoginError] = useState('')
+    const [loginSubmitting, setLoginSubmitting] = useState(false)
+    const unauthorizedHandledRef = useRef(false)
+
+    const resetDashboardState = useCallback(() => {
+        setStats(null)
+        setDailyStats([])
+        setModelUsage([])
+        setEndpointUsage([])
+        setHourlyStats([])
+        setSkillRuns([])
+        setSkillDailyStats([])
+        setAppLogs([])
+        setLastUpdated(null)
+        setCredentialData(null)
+        setCredentialTimeSeries({ byDay: [], byHour: [], meta: {} })
+        setCredentialSetupRequired(false)
+        setCredentialLoading(false)
+        setLoading(false)
+        setIsRefreshing(false)
+    }, [])
+
+    const handleUnauthorized = useCallback(() => {
+        if (unauthorizedHandledRef.current) return
+        unauthorizedHandledRef.current = true
+        resetDashboardState()
+        setAuthState({ loading: false, authenticated: false, expiresAt: null, rememberMe: false })
+        setLoginForm(prev => ({ ...prev, password: '' }))
+        setLoginError('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.')
+    }, [resetDashboardState])
+
     const [stats, setStats] = useState(null)
     const [dailyStats, setDailyStats] = useState([])
     const [modelUsage, setModelUsage] = useState([])
@@ -142,8 +176,55 @@ function App() {
     const [credentialLoading, setCredentialLoading] = useState(true)
     const [credentialSetupRequired, setCredentialSetupRequired] = useState(false)
 
+    const authFetch = useCallback(async (url, options = {}) => {
+        const { skipUnauthorized = false, headers, ...rest } = options
+        const response = await fetch(url, {
+            credentials: 'include',
+            ...rest,
+            headers: {
+                'Content-Type': 'application/json',
+                ...(headers || {}),
+            },
+        })
+
+        if (!skipUnauthorized && response.status === 401) {
+            handleUnauthorized()
+        }
+
+        return response
+    }, [handleUnauthorized])
+
+    const fetchSession = useCallback(async () => {
+        try {
+            const response = await authFetch(`${COLLECTOR_BASE}/auth/session`, { method: 'GET', skipUnauthorized: true })
+            if (!response.ok) {
+                setAuthState({ loading: false, authenticated: false, expiresAt: null, rememberMe: false })
+                return false
+            }
+
+            const session = await response.json()
+            unauthorizedHandledRef.current = false
+            setAuthState({
+                loading: false,
+                authenticated: Boolean(session.authenticated),
+                                expiresAt: session.expires_at || null,
+                rememberMe: Boolean(session.remember_me),
+            })
+            return Boolean(session.authenticated)
+        } catch (error) {
+            console.error('Error fetching session:', error)
+            setAuthState({ loading: false, authenticated: false, expiresAt: null, rememberMe: false })
+            return false
+        }
+    }, [authFetch])
+
     // Fetch credential stats filtered by date range
     const fetchCredentialStats = useCallback(async (rangeId = dateRange) => {
+        if (!authState.authenticated) {
+            setCredentialLoading(false)
+            return
+        }
+
         try {
             setCredentialLoading(true)
 
@@ -536,9 +617,13 @@ function App() {
         } finally {
             setCredentialLoading(false)
         }
-    }, [customRange, dateRange])
+    }, [authState.authenticated, customRange, dateRange])
 
     const fetchData = useCallback(async (rangeId = dateRange, isInitial = false) => {
+        if (!authState.authenticated) {
+            return
+        }
+
         try {
             if (isInitial) {
                 setLoading(true)
@@ -1129,15 +1214,28 @@ function App() {
             setLoading(false)
             setIsRefreshing(false)
         }
-    }, [customRange, dateRange])
+    }, [authState.authenticated, customRange, dateRange])
+
+    useEffect(() => {
+        const onUnauthorized = () => handleUnauthorized()
+        window.addEventListener('cliproxy:auth-unauthorized', onUnauthorized)
+        return () => window.removeEventListener('cliproxy:auth-unauthorized', onUnauthorized)
+    }, [handleUnauthorized])
+
+    useEffect(() => {
+        fetchSession()
+    }, [fetchSession])
 
     // Refetch when dateRange changes (both main data and credential stats)
     useEffect(() => {
-        fetchData(dateRange)
+        if (!authState.authenticated) return
+        fetchData(dateRange, true)
         fetchCredentialStats(dateRange)
-    }, [dateRange, fetchData, fetchCredentialStats])
+    }, [authState.authenticated, dateRange, fetchData, fetchCredentialStats])
 
     useEffect(() => {
+        if (!authState.authenticated) return
+
         const interval = setInterval(() => {
             fetchData(dateRange)
             fetchCredentialStats(dateRange)
@@ -1146,24 +1244,18 @@ function App() {
         return () => {
             clearInterval(interval)
         }
-    }, [dateRange, fetchData, fetchCredentialStats])
+    }, [authState.authenticated, dateRange, fetchData, fetchCredentialStats])
 
     // Trigger collector to fetch fresh data from CLIProxy
     const triggerCollector = async () => {
-        // In production (Docker): use relative URL via nginx proxy
-        // In development: fallback to localhost:5001
-        const isProduction = import.meta.env.PROD
-        const collectorUrl = isProduction
-            ? '/api/collector/trigger'  // Nginx proxies this to collector container
-            : (import.meta.env.VITE_COLLECTOR_URL || 'http://localhost:5001') + '/trigger'
+        const collectorUrl = `${COLLECTOR_BASE}/trigger`
 
         try {
             const controller = new AbortController()
             const timeoutId = setTimeout(() => controller.abort(), 10000) // 10s timeout
 
-            const response = await fetch(collectorUrl, {
+            const response = await authFetch(collectorUrl, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 signal: controller.signal
             })
             clearTimeout(timeoutId)
@@ -1208,14 +1300,8 @@ function App() {
     }
 
     const clearAllAppLogs = useCallback(async () => {
-        const isProduction = import.meta.env.PROD
-        const collectorBase = isProduction
-            ? '/api/collector'
-            : (import.meta.env.VITE_COLLECTOR_URL || 'http://localhost:5001')
-
-        const response = await fetch(`${collectorBase}/logs/clear`, {
+        const response = await authFetch(`${COLLECTOR_BASE}/logs/clear`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ scope: 'all' })
         })
 
@@ -1224,7 +1310,7 @@ function App() {
         }
 
         await fetchData(dateRange)
-    }, [dateRange, fetchData])
+    }, [authFetch, dateRange, fetchData])
 
     const handleCustomRangeApply = (range) => {
         setCustomRange({
@@ -1232,6 +1318,121 @@ function App() {
             endDate: range.endDate || null
         })
         setDateRange('custom')
+    }
+
+    const handleLoginSubmit = async (event) => {
+        event.preventDefault()
+        setLoginError('')
+        setLoginSubmitting(true)
+
+        try {
+            const response = await authFetch(`${COLLECTOR_BASE}/auth/login`, {
+                method: 'POST',
+                body: JSON.stringify(loginForm),
+                skipUnauthorized: true,
+            })
+
+            if (!response.ok) {
+                const payload = await response.json().catch(() => ({}))
+                setLoginError(payload.error || 'Đăng nhập thất bại.')
+                return
+            }
+
+            const session = await response.json()
+            unauthorizedHandledRef.current = false
+            setAuthState({
+                loading: false,
+                authenticated: Boolean(session.authenticated),
+                expiresAt: session.expires_at || null,
+                rememberMe: Boolean(session.remember_me),
+            })
+            setLoginForm(prev => ({ ...prev, password: '' }))
+            setLoginError('')
+        } catch (error) {
+            console.error('Login failed:', error)
+            setLoginError('Không thể kết nối tới collector để đăng nhập.')
+        } finally {
+            setLoginSubmitting(false)
+        }
+    }
+
+    const handleLogout = useCallback(async () => {
+        try {
+            await authFetch(`${COLLECTOR_BASE}/auth/logout`, { method: 'POST' })
+        } catch (error) {
+            console.error('Logout failed:', error)
+        } finally {
+            unauthorizedHandledRef.current = false
+            resetDashboardState()
+            setAuthState({ loading: false, authenticated: false, expiresAt: null, rememberMe: false })
+            setLoginForm(prev => ({ ...prev, password: '' }))
+            setLoginError('')
+        }
+    }, [authFetch, resetDashboardState])
+
+    if (authState.loading) {
+        return (
+            <div className="dashboard auth-screen">
+                <div className="auth-shell">
+                    <div className="auth-card auth-card--loading">
+                        <div className="auth-kicker">Session</div>
+                        <h1 className="auth-title">CLIProxy Dashboard</h1>
+                        <p className="auth-subtitle">Checking session...</p>
+                    </div>
+                </div>
+            </div>
+        )
+    }
+
+    if (!authState.authenticated) {
+        return (
+            <div className="dashboard auth-screen">
+                <div className="auth-shell">
+                    <form onSubmit={handleLoginSubmit} className="auth-card">
+                        <div className="auth-kicker">Admin Access</div>
+                        <h1 className="auth-title">CLIProxy Dashboard</h1>
+                        <p className="auth-subtitle">Đăng nhập để mở dashboard và khóa truy cập dữ liệu qua session cookie HttpOnly.</p>
+
+                        <label className="auth-field">
+                            <span className="auth-label">Password</span>
+                            <input
+                                className="auth-input"
+                                type="password"
+                                value={loginForm.password}
+                                onChange={(e) => setLoginForm(prev => ({ ...prev, password: e.target.value }))}
+                                autoComplete="current-password"
+                                placeholder="Nhập mật khẩu admin"
+                            />
+                        </label>
+
+                        <label className="auth-checkbox">
+                            <input
+                                type="checkbox"
+                                checked={loginForm.rememberMe}
+                                onChange={(e) => setLoginForm(prev => ({ ...prev, rememberMe: e.target.checked }))}
+                            />
+                            <span>Remember this device</span>
+                        </label>
+
+                        {loginError ? (
+                            <div className="auth-alert" role="alert">
+                                {loginError}
+                            </div>
+                        ) : null}
+
+                        <div className="auth-actions">
+                            <button
+                                type="submit"
+                                className="auth-submit"
+                                disabled={loginSubmitting}
+                            >
+                                {loginSubmitting ? 'Signing in...' : 'Unlock dashboard'}
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        )
     }
 
     return (
@@ -1257,6 +1458,7 @@ function App() {
                 skillDailyStats={skillDailyStats}
                 appLogs={appLogs}
                 onClearAllLogs={clearAllAppLogs}
+                onLogout={handleLogout}
             />
         </div>
     )

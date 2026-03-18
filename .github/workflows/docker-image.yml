@@ -39,16 +39,22 @@ jobs:
       uses: dorny/paths-filter@v3
       with:
         filters: |
-          collector:
+          collector_image:
             - 'collector/**'
-          frontend:
-            - 'frontend/**'
-          shared:
+            - 'init-db/**'
+            - '.env.example'
             - 'docker-compose.yml'
+            - 'docker-compose.override.yml'
+            - '.github/workflows/docker-image.yml'
+          frontend_image:
+            - 'frontend/**'
+            - '.env.example'
+            - 'docker-compose.yml'
+            - 'docker-compose.override.yml'
             - '.github/workflows/docker-image.yml'
 
     - name: Extract metadata for Collector
-      if: steps.changes.outputs.collector == 'true' || steps.changes.outputs.shared == 'true'
+      if: steps.changes.outputs.collector_image == 'true'
       id: meta-collector
       uses: docker/metadata-action@v5
       with:
@@ -58,7 +64,7 @@ jobs:
           type=sha,prefix=
 
     - name: Extract metadata for Frontend
-      if: steps.changes.outputs.frontend == 'true' || steps.changes.outputs.shared == 'true'
+      if: steps.changes.outputs.frontend_image == 'true'
       id: meta-frontend
       uses: docker/metadata-action@v5
       with:
@@ -68,7 +74,7 @@ jobs:
           type=sha,prefix=
 
     - name: Build and push Collector image
-      if: steps.changes.outputs.collector == 'true' || steps.changes.outputs.shared == 'true'
+      if: steps.changes.outputs.collector_image == 'true'
       uses: docker/build-push-action@v6
       with:
         context: ./collector
@@ -80,7 +86,7 @@ jobs:
         cache-to: type=gha,mode=max
 
     - name: Build and push Frontend image
-      if: steps.changes.outputs.frontend == 'true' || steps.changes.outputs.shared == 'true'
+      if: steps.changes.outputs.frontend_image == 'true'
       uses: docker/build-push-action@v6
       with:
         context: ./frontend

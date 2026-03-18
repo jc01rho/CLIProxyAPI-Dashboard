@@ -86,6 +86,7 @@ Notes:
 - The browser stores only an `HttpOnly` session cookie; the password is never stored in browser storage.
 - If you deploy behind HTTPS, set `ADMIN_SESSION_SECURE_COOKIE=true`.
 - Default host port for PostgREST is now `8418` to avoid common conflicts on `3000`. Override with `POSTGREST_HOST_PORT` if needed.
+- `ADMIN_ALLOWED_ORIGINS` is optional. Leave it empty for the default same-compose setup; set it only if you want stricter Origin/Referer enforcement.
 
 ### 5) Start services
 ```bash

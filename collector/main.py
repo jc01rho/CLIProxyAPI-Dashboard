@@ -204,6 +204,9 @@ def _origin_allowed(origin: str) -> bool:
 
 
 def _validate_same_origin_request() -> Optional[Response]:
+    if not ADMIN_ALLOWED_ORIGINS:
+        return None
+
     origin = _get_request_origin()
     referer = (request.headers.get('Referer') or '').strip()
 

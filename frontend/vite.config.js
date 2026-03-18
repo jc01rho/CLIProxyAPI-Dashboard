@@ -19,7 +19,7 @@ export default defineConfig({
         proxy: {
             // PostgREST — proxied by nginx in prod, and gated via collector auth in dev
             '/rest/v1': {
-                target: 'http://localhost:3000',
+                target: `http://localhost:${process.env.POSTGREST_HOST_PORT || '8418'}`,
                 rewrite: (path) => path.replace(/^\/rest\/v1/, ''),
                 changeOrigin: true,
                 configure: (proxy) => {

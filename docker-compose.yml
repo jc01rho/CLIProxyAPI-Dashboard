@@ -30,7 +30,7 @@ services:
       PGRST_LOG_LEVEL: warn
       PGRST_SERVER_PORT: 3000
     ports:
-      - "127.0.0.1:3000:3000"  # Dev only: expose for Vite proxy (localhost:5173)
+      - "127.0.0.1:${POSTGREST_HOST_PORT:-8418}:3000"  # Dev only: expose for Vite proxy
     depends_on:
       postgres:
         condition: service_healthy

@@ -85,6 +85,7 @@ Notes:
 - Dashboard now requires admin login before loading UI or `/rest/v1/*` data.
 - The browser stores only an `HttpOnly` session cookie; the password is never stored in browser storage.
 - If you deploy behind HTTPS, set `ADMIN_SESSION_SECURE_COOKIE=true`.
+- Default host port for PostgREST is now `8418` to avoid common conflicts on `3000`. Override with `POSTGREST_HOST_PORT` if needed.
 
 ### 5) Start services
 ```bash
@@ -237,11 +238,14 @@ curl -X POST http://localhost:8417/api/collector/trigger
 
 ### Frontend (hot reload)
 
+`docker-compose.override.yml` is the local dev override and is loaded automatically by `docker compose`.
+For source-only changes, prefer bind mounts + service restart. Rebuild images only when Dockerfile or dependencies changed.
+
 ```bash
 docker compose up -d postgres postgrest
 cd frontend
 npm install
-npm run dev
+POSTGREST_HOST_PORT=8418 npm run dev
 ```
 
 Open Vite dev UI at `http://localhost:5173`.
@@ -287,6 +291,12 @@ python main.py
 
 - Confirm postgres is healthy before postgrest starts: `docker compose ps`
 - If using an old pre-initialized volume, apply schema manually from `init-db/schema.sql`
+
+### Port 3000 already allocated
+
+- PostgREST now defaults to host port `8418` instead of `3000`
+- If you want a different host port, set `POSTGREST_HOST_PORT` in `.env`
+- If Vite dev is already running, restart it after changing `POSTGREST_HOST_PORT`
 
 </details>
 

@@ -1,5 +1,8 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import pkg from './package.json'
+
+const devBypassAuth = String(process.env.VITE_DEV_BYPASS_AUTH || '').toLowerCase() === 'true'
 
 const authBypassPaths = new Set([
     '/api/collector/health',
@@ -13,6 +16,9 @@ const authBypassPaths = new Set([
 
 export default defineConfig({
     plugins: [react()],
+    define: {
+        'import.meta.env.VITE_APP_VERSION': JSON.stringify(pkg.version),
+    },
     server: {
         host: '0.0.0.0',
         port: 5173,
@@ -26,6 +32,10 @@ export default defineConfig({
                     proxy.on('proxyReq', async (proxyReq, req, res) => {
                         proxyReq.removeHeader('Authorization')
                         proxyReq.removeHeader('apikey')
+
+                        if (devBypassAuth) {
+                            return
+                        }
 
                         try {
                             const cookie = req.headers.cookie || ''
@@ -56,7 +66,7 @@ export default defineConfig({
                 changeOrigin: true,
                 configure: (proxy) => {
                     proxy.on('proxyReq', async (proxyReq, req, res) => {
-                        if (authBypassPaths.has(req.url || '')) {
+                        if (devBypassAuth || authBypassPaths.has(req.url || '')) {
                             return
                         }
 

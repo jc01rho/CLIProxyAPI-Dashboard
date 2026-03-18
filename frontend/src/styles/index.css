@@ -1046,15 +1046,41 @@ body {
   margin-top: auto;
   padding: 12px 16px 20px;
   border-top: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.drawer-logout-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.10);
+  background: rgba(148, 163, 184, 0.05);
+  color: var(--color-text-secondary);
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.drawer-logout-btn:hover {
+  background: rgba(148, 163, 184, 0.09);
+  border-color: rgba(148, 163, 184, 0.16);
+  color: var(--color-text);
 }
 
 .drawer-footer-badge {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 8px;
+  min-height: 40px;
   padding: 8px 12px;
-  background: rgba(245, 158, 11, 0.06);
-  border: 1px solid rgba(245, 158, 11, 0.12);
+  background: rgba(148, 163, 184, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.10);
   border-radius: 10px;
 }
 

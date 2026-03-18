@@ -5,6 +5,7 @@ import Dashboard from './components/Dashboard'
 const APP_LOGS_PAGE_SIZE = Number(import.meta.env.VITE_APP_LOGS_PAGE_SIZE || 500)
 const FRONTEND_AUTO_REFRESH_MS = Math.max(1000, Number(import.meta.env.VITE_AUTO_REFRESH_SECONDS || 60) * 1000)
 const COLLECTOR_BASE = '/api/collector'
+const DEV_BYPASS_AUTH = import.meta.env.DEV && String(import.meta.env.VITE_DEV_BYPASS_AUTH || '').toLowerCase() === 'true'
 
 // Helper to get date boundaries based on range ID
 // Uses local timezone for date display, converts to UTC for timestamp queries
@@ -145,6 +146,7 @@ function App() {
         setCredentialLoading(false)
         setLoading(false)
         setIsRefreshing(false)
+        setHasInitialDataLoaded(false)
     }, [])
 
     const handleUnauthorized = useCallback(() => {
@@ -166,6 +168,7 @@ function App() {
     const [appLogs, setAppLogs] = useState([])
     const [loading, setLoading] = useState(true) // Only for initial load
     const [isRefreshing, setIsRefreshing] = useState(false) // For date range changes
+    const [hasInitialDataLoaded, setHasInitialDataLoaded] = useState(false)
     const [lastUpdated, setLastUpdated] = useState(null)
     const [dateRange, setDateRange] = useState('today') // 'today', 'yesterday', '7d', '30d', 'year', 'custom'
     const [customRange, setCustomRange] = useState({ startDate: null, endDate: null })
@@ -195,6 +198,12 @@ function App() {
     }, [handleUnauthorized])
 
     const fetchSession = useCallback(async () => {
+        if (DEV_BYPASS_AUTH) {
+            unauthorizedHandledRef.current = false
+            setAuthState({ loading: false, authenticated: true, expiresAt: null, rememberMe: true })
+            return true
+        }
+
         try {
             const response = await authFetch(`${COLLECTOR_BASE}/auth/session`, { method: 'GET', skipUnauthorized: true })
             if (!response.ok) {
@@ -624,8 +633,10 @@ function App() {
             return
         }
 
+        const shouldShowInitialLoading = isInitial && !hasInitialDataLoaded
+
         try {
-            if (isInitial) {
+            if (shouldShowInitialLoading) {
                 setLoading(true)
             } else {
                 setIsRefreshing(true)
@@ -1206,6 +1217,7 @@ function App() {
             setSkillRuns(skillRunsData || [])
             setSkillDailyStats(skillDailyData || [])
             setAppLogs(appRows)
+            setHasInitialDataLoaded(true)
 
             setLoading(false)
             setIsRefreshing(false)
@@ -1214,7 +1226,7 @@ function App() {
             setLoading(false)
             setIsRefreshing(false)
         }
-    }, [authState.authenticated, customRange, dateRange])
+    }, [authState.authenticated, customRange, dateRange, hasInitialDataLoaded])
 
     useEffect(() => {
         const onUnauthorized = () => handleUnauthorized()
@@ -1322,6 +1334,14 @@ function App() {
 
     const handleLoginSubmit = async (event) => {
         event.preventDefault()
+
+        if (DEV_BYPASS_AUTH) {
+            unauthorizedHandledRef.current = false
+            setAuthState({ loading: false, authenticated: true, expiresAt: null, rememberMe: true })
+            setLoginError('')
+            return
+        }
+
         setLoginError('')
         setLoginSubmitting(true)
 

@@ -3,6 +3,8 @@ import {
     AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
     XAxis, YAxis, CartesianGrid, Tooltip, Legend
 } from 'recharts'
+
+const APP_VERSION = import.meta.env.VITE_APP_VERSION || 'dev'
 import { DateRange } from 'react-date-range'
 import { BarGraph, PieGraph, DollarSign, Moon, Sun, Refresh } from './Icons'
 import CredentialStatsCard from './CredentialStatsCard'
@@ -904,6 +906,23 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                         <span className="drawer-nav-label">Setup Guide</span>
                     </button>
                 </nav>
+
+                <div className="drawer-footer">
+                    <button className="drawer-logout-btn" onClick={onLogout} title="Logout">
+                        <span className="drawer-nav-icon">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                                <polyline points="16 17 21 12 16 7" />
+                                <line x1="21" y1="12" x2="9" y2="12" />
+                            </svg>
+                        </span>
+                        <span className="drawer-nav-label">Logout</span>
+                    </button>
+                    <div className="drawer-footer-badge">
+                        <span className="drawer-footer-dot"></span>
+                        <span className="drawer-footer-text">Version v{APP_VERSION}</span>
+                    </div>
+                </div>
             </aside>
 
             <div className="content-shell">
@@ -997,9 +1016,6 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                 lastUpdated ? `Updated: ${lastUpdated.toLocaleTimeString()}` : ''
                             )}
                         </span>
-                        <button className="refresh-btn" onClick={onLogout} style={{ background: 'rgba(239, 68, 68, 0.14)', borderColor: 'rgba(248, 113, 113, 0.28)' }}>
-                            <span className="refresh-text">Logout</span>
-                        </button>
                     </div>
                     <button className="theme-toggle" onClick={toggleTheme} title="Toggle theme">
                         {isDarkMode ? <Sun /> : <Moon />}

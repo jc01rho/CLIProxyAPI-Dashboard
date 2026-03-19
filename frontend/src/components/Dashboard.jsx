@@ -218,7 +218,7 @@ const TREND_CONFIG = {
     cost: { stroke: '#f59e0b', name: 'Cost' },
 }
 
-function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefreshing, lastUpdated, dateRange, onDateRangeChange, customRange, onCustomRangeApply, endpointUsage: rawEndpointUsage, credentialData, credentialTimeSeries, credentialLoading, credentialSetupRequired, skillRuns, skillDailyStats, appLogs, onClearAllLogs, onLogout }) {
+function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefreshing, lastUpdated, dateRange, onDateRangeChange, customRange, rangeBoundaries, onCustomRangeApply, endpointUsage: rawEndpointUsage, credentialData, credentialTimeSeries, credentialLoading, credentialSetupRequired, skillRuns, skillDailyStats, appLogs, onClearAllLogs, onLogout }) {
     // Auto-select time range based on dateRange: hour for today/yesterday, day for longer ranges
     const defaultTimeRange = (dateRange === 'today' || dateRange === 'yesterday') ? 'hour' : 'day'
 
@@ -1744,6 +1744,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                             skillDailyStats={skillDailyStats}
                             dateRange={dateRange}
                             customRange={customRange}
+                            rangeBoundaries={rangeBoundaries}
                             isDarkMode={isDarkMode}
                         />
                     ) : activeTab === 'logs' ? (

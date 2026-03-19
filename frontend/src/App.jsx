@@ -262,6 +262,7 @@ function App() {
     const [lastUpdated, setLastUpdated] = useState(null)
     const [dateRange, setDateRange] = useState('today')
     const [customRange, setCustomRange] = useState({ startDate: null, endDate: null })
+    const rangeBoundaries = useMemo(() => getDateBoundaries(dateRange, customRange), [dateRange, customRange])
 
     const [credentialData, setCredentialData] = useState(null)
     const [credentialTimeSeries, setCredentialTimeSeries] = useState({ byDay: [], byHour: [], meta: {} })
@@ -1456,6 +1457,7 @@ function App() {
                 dateRange={dateRange}
                 onDateRangeChange={handleDateRangeChange}
                 customRange={customRange}
+                rangeBoundaries={rangeBoundaries}
                 onCustomRangeApply={handleCustomRangeApply}
                 endpointUsage={endpointUsage}
                 credentialData={credentialData}

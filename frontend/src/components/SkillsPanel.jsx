@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
+import { supabase } from '../lib/supabase'
 import { CHART_COLORS, CHART_TYPOGRAPHY } from '../lib/brandColors'
 import ChartDialog from './ChartDialog'
 import DrilldownPanel from './DrilldownPanel'
@@ -224,12 +225,15 @@ const aggregateDimensionRows = (runs, dimension) => {
         .sort((a, b) => (b.run_count - a.run_count) || (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens))
 }
 
-function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRange, isDarkMode }) {
+function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRange, rangeBoundaries, isDarkMode }) {
     const [skillSort, setSkillSort] = useState('runs')
     const [trendTime, setTrendTime] = useState('day')
     const [tableSortCol, setTableSortCol] = useState('triggered_at')
     const [tableSortDir, setTableSortDir] = useState('desc')
     const [activeSkillName, setActiveSkillName] = useState(null)
+    const [previousAvgTokensPerRun, setPreviousAvgTokensPerRun] = useState(null)
+    const [previousPeriodRunCount, setPreviousPeriodRunCount] = useState(0)
+    const [isPreviousAvgLoading, setIsPreviousAvgLoading] = useState(false)
 
     const handleTableSort = (key) => {
         if (tableSortCol === key) {
@@ -363,22 +367,106 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
         const totalEstimatedCost = runs.reduce((sum, r) => sum + Number(r.estimated_cost_usd || 0), 0)
         const success = runs.filter(r => getStatus(r.status) === 'success').length
         const failure = runs.length - success
+        const totalTokens = totalInput + totalOutput
 
         return {
             totalRuns: runs.length,
             totalInputTokens: totalInput,
             totalOutputTokens: totalOutput,
+            totalTokens,
             totalCost: totalEstimatedCost,
             successCount: success,
             failureCount: failure,
             successRate: runs.length > 0 ? (success / runs.length) * 100 : 0,
             uniqueProjects: new Set(runs.map(r => getProjectLabel(r.project_dir))).size,
             uniqueMachines: new Set(runs.map(r => getMachineLabel(r.machine_id))).size,
+            currentAvgTokensPerRun: runs.length > 0 ? totalTokens / runs.length : 0,
         }
     }, [detailRuns])
 
     const detailDailySeries = useMemo(() => buildSeriesFromRuns(detailRuns, 'day'), [detailRuns])
     const detailHourlySeries = useMemo(() => buildSeriesFromRuns(detailRuns, 'hour'), [detailRuns])
+
+    useEffect(() => {
+        let isCancelled = false
+
+        const fetchPreviousWindowAvg = async () => {
+            if (!activeSkillName || !rangeBoundaries?.startTime) {
+                setPreviousAvgTokensPerRun(null)
+                setPreviousPeriodRunCount(0)
+                setIsPreviousAvgLoading(false)
+                return
+            }
+
+            const currentStartDate = new Date(rangeBoundaries.startTime)
+            if (Number.isNaN(currentStartDate.getTime())) {
+                setPreviousAvgTokensPerRun(null)
+                setPreviousPeriodRunCount(0)
+                setIsPreviousAvgLoading(false)
+                return
+            }
+
+            const currentEndDate = rangeBoundaries.endTime ? new Date(rangeBoundaries.endTime) : new Date()
+            if (Number.isNaN(currentEndDate.getTime())) {
+                setPreviousAvgTokensPerRun(null)
+                setPreviousPeriodRunCount(0)
+                setIsPreviousAvgLoading(false)
+                return
+            }
+
+            const durationMs = currentEndDate.getTime() - currentStartDate.getTime()
+            if (durationMs <= 0) {
+                setPreviousAvgTokensPerRun(null)
+                setPreviousPeriodRunCount(0)
+                setIsPreviousAvgLoading(false)
+                return
+            }
+
+            const prevEnd = new Date(currentStartDate)
+            const prevStart = new Date(currentStartDate.getTime() - durationMs)
+
+            setIsPreviousAvgLoading(true)
+
+            const { data, error } = await supabase
+                .from('skill_runs')
+                .select('tokens_used,output_tokens,triggered_at')
+                .eq('skill_name', activeSkillName)
+                .eq('is_skeleton', false)
+                .gte('triggered_at', prevStart.toISOString())
+                .lt('triggered_at', prevEnd.toISOString())
+
+            if (isCancelled) return
+
+            if (error) {
+                console.error('Error fetching previous skill window:', error)
+                setPreviousAvgTokensPerRun(null)
+                setPreviousPeriodRunCount(0)
+                setIsPreviousAvgLoading(false)
+                return
+            }
+
+            const rows = Array.isArray(data) ? data : []
+            if (rows.length === 0) {
+                setPreviousAvgTokensPerRun(0)
+                setPreviousPeriodRunCount(0)
+                setIsPreviousAvgLoading(false)
+                return
+            }
+
+            const prevTotalTokens = rows.reduce((sum, row) => sum + (row.tokens_used || 0) + (row.output_tokens || 0), 0)
+            const prevAvg = rows.length > 0 ? prevTotalTokens / rows.length : 0
+
+            setPreviousAvgTokensPerRun(prevAvg)
+            setPreviousPeriodRunCount(rows.length)
+            setIsPreviousAvgLoading(false)
+        }
+
+        fetchPreviousWindowAvg()
+
+        return () => {
+            isCancelled = true
+        }
+    }, [activeSkillName, rangeBoundaries])
     const detailTrendSeries = trendTime === 'hour' ? detailHourlySeries : detailDailySeries
     const detailHasTokenSignal = detailTrendSeries.some(p => (p.input_tokens || 0) > 0 || (p.output_tokens || 0) > 0)
     const detailUseRunFallbackSeries = detailTrendSeries.length > 0 && !detailHasTokenSignal
@@ -391,6 +479,63 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
             .sort((a, b) => new Date(b.triggered_at) - new Date(a.triggered_at))
             .slice(0, 20)
     }, [detailRuns])
+
+    const detailTokenDelta = useMemo(() => {
+        const currentAvg = detailSummary.currentAvgTokensPerRun || 0
+        const previousAvg = typeof previousAvgTokensPerRun === 'number' ? previousAvgTokensPerRun : null
+
+        if (isPreviousAvgLoading) {
+            return {
+                deltaLabel: 'Calculating vs previous...',
+                semanticLabel: '—',
+                tone: 'neutral',
+            }
+        }
+
+        if (detailSummary.totalRuns === 0 && previousPeriodRunCount === 0) {
+            return {
+                deltaLabel: '—',
+                semanticLabel: '—',
+                tone: 'neutral',
+            }
+        }
+
+        if (previousAvg === null) {
+            return {
+                deltaLabel: '—',
+                semanticLabel: '—',
+                tone: 'neutral',
+            }
+        }
+
+        if (previousAvg > 0) {
+            const delta = currentAvg - previousAvg
+            const deltaPct = (delta / previousAvg) * 100
+            const pctMagnitude = formatPercent(Math.abs(deltaPct))
+            const pctSigned = deltaPct > 0 ? `+${pctMagnitude}` : deltaPct < 0 ? `-${pctMagnitude}` : pctMagnitude
+            const arrow = delta > 0 ? '↑' : delta < 0 ? '↓' : '→'
+
+            return {
+                deltaLabel: `${arrow} ${pctSigned} vs previous`,
+                semanticLabel: delta > 0 ? 'Tốn hơn' : delta < 0 ? 'Tiết kiệm hơn' : 'Không đổi',
+                tone: delta > 0 ? 'higher' : delta < 0 ? 'saving' : 'neutral',
+            }
+        }
+
+        if (previousAvg === 0 && currentAvg > 0) {
+            return {
+                deltaLabel: 'New baseline',
+                semanticLabel: 'Tốn hơn',
+                tone: 'higher',
+            }
+        }
+
+        return {
+            deltaLabel: '—',
+            semanticLabel: '—',
+            tone: 'neutral',
+        }
+    }, [detailSummary.currentAvgTokensPerRun, detailSummary.totalRuns, previousAvgTokensPerRun, previousPeriodRunCount, isPreviousAvgLoading])
 
     const renderCell = (r, key, onOpenSkill) => {
         switch (key) {
@@ -651,8 +796,9 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
                             </div>
                             <div className="stat-card">
                                 <div className="stat-header"><span className="stat-label">TOKENS</span></div>
-                                <div className="stat-value">{formatNumber(detailSummary.totalInputTokens + detailSummary.totalOutputTokens)}</div>
+                                <div className="stat-value">{formatNumber(detailSummary.totalTokens)}</div>
                                 <div className="stat-meta">{formatNumber(detailSummary.totalInputTokens)} input · {formatNumber(detailSummary.totalOutputTokens)} output</div>
+                                <div className="stat-meta">Avg {formatNumber(detailSummary.currentAvgTokensPerRun)} / run · {detailTokenDelta.deltaLabel} · {detailTokenDelta.semanticLabel}</div>
                             </div>
                             <div className="stat-card">
                                 <div className="stat-header"><span className="stat-label">SUCCESS RATE</span></div>

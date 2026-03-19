@@ -144,15 +144,15 @@ docker compose up -d
 <details>
 <summary><h2>Skill Tracker Plugin Setup</h2></summary>
 
-Tracker plugin marketplace is maintained in the dedicated tracker repository.
+Tracker plugin is now distributed from the shared Claude skills marketplace.
 
-- **Marketplace repo:** `leolionart/claude-skills-tracker`
+- **Marketplace repo:** `leolionart/claude-skills`
 - **Plugin install ID:** `claude-skill-tracker`
 
 Inside Claude Code:
 
 ```claude
-/plugin marketplace add leolionart/claude-skills-tracker
+/plugin marketplace add leolionart/claude-skills
 /plugin install claude-skill-tracker
 /reload-plugins
 ```
@@ -311,7 +311,7 @@ python main.py
 - `collector/migrations/` – DB migrations (required for schema changes)
 - `frontend/src/` – dashboard UI
 - `plugin/claude-skills-tracker/` – tracker plugin submodule (source mirror for dashboard development)
-- Tracker marketplace source of truth: `leolionart/claude-skills-tracker`
+- Tracker marketplace source of truth: `leolionart/claude-skills`
 
 </details>
 

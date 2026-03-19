@@ -167,9 +167,9 @@ function SetupGuide({ isDarkMode }) {
                             This registers hooks automatically — no manual config needed.
                         </p>
                         <div className="guide-tip" style={{ marginBottom: 12 }}>
-                            Tracker distribution now comes from the shared <code>claude-skills-tracker</code> repository via this marketplace.
+                            Tracker distribution now comes from the shared <code>claude-skills</code> marketplace repository.
                         </div>
-                        <CodeBlock isDarkMode={isDarkMode} language="claude" code={`/plugin marketplace add leolionart/claude-skills-tracker`} />
+                        <CodeBlock isDarkMode={isDarkMode} language="claude" code={`/plugin marketplace add leolionart/claude-skills`} />
                         <CodeBlock isDarkMode={isDarkMode} language="claude" code={`/plugin install claude-skill-tracker`} />
                     </div>
                 </div>

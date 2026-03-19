@@ -428,7 +428,7 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
     }
 
     const renderRankedDimensionList = (title, rows) => (
-        <div className="chart-card">
+        <div className="chart-card chart-half">
             <div className="chart-header">
                 <h3>{title}</h3>
             </div>
@@ -498,7 +498,7 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
             </div>
 
             <div className="charts-row">
-                <div className="chart-card chart-full">
+                <div className="chart-card chart-half">
                     <div className="chart-header">
                         <h3>Top Skills</h3>
                         <div className="chart-tabs">
@@ -546,6 +546,8 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
                         )}
                     </div>
                 </div>
+                {renderRankedDimensionList('Top Projects', topProjects)}
+                {renderRankedDimensionList('Top Devices', topDevices)}
             </div>
 
             <div className="charts-row">
@@ -597,11 +599,6 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
                         )}
                     </div>
                 </div>
-            </div>
-
-            <div className="charts-row">
-                {renderRankedDimensionList('Top Projects', topProjects)}
-                {renderRankedDimensionList('Top Devices', topDevices)}
             </div>
 
             <div className="chart-card chart-full">

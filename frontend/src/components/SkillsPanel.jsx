@@ -17,6 +17,17 @@ const formatCost = (cost) => {
 
 const formatPercent = (value) => `${Number(value || 0).toFixed(1)}%`
 
+const formatTpr = (value) => {
+    if (value === undefined || value === null || Number.isNaN(value)) return '0.0'
+    return Number(value).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })
+}
+
+const formatTprAxis = (value) => {
+    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+    if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
+    return Math.round(value).toLocaleString('en-US')
+}
+
 const getStatus = (status) => status === 'failure' ? 'failure' : 'success'
 const getSkillLabel = (value) => value || 'Unknown'
 const getProjectLabel = (value) => value || 'Unknown Project'
@@ -468,8 +479,18 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
         }
     }, [activeSkillName, rangeBoundaries])
     const detailTrendSeries = trendTime === 'hour' ? detailHourlySeries : detailDailySeries
-    const detailHasTokenSignal = detailTrendSeries.some(p => (p.input_tokens || 0) > 0 || (p.output_tokens || 0) > 0)
-    const detailUseRunFallbackSeries = detailTrendSeries.length > 0 && !detailHasTokenSignal
+    const detailTprSeries = useMemo(() => {
+        return detailTrendSeries.map(point => {
+            const totalTokens = (point.input_tokens || 0) + (point.output_tokens || 0)
+            const runCount = point.run_count || 0
+            const tpr = runCount > 0 ? totalTokens / runCount : 0
+            return {
+                ...point,
+                total_tokens: totalTokens,
+                tpr,
+            }
+        })
+    }, [detailTrendSeries])
 
     const detailProjectRows = useMemo(() => aggregateDimensionRows(detailRuns, 'project'), [detailRuns])
     const detailDeviceRows = useMemo(() => aggregateDimensionRows(detailRuns, 'machine'), [detailRuns])
@@ -814,47 +835,54 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
 
                         <div className="chart-card chart-full">
                             <div className="chart-header">
-                                <h3>Token Trend</h3>
+                                <h3>TPR Trend (Tokens per Run)</h3>
                             </div>
                             <div className="chart-body chart-body-dark">
-                                {detailTrendSeries.length > 0 ? (
+                                {detailTprSeries.length > 0 ? (
                                     <ResponsiveContainer width="100%" height={260}>
-                                        <AreaChart data={detailTrendSeries} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                                        <AreaChart data={detailTprSeries} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                                             <defs>
-                                                <linearGradient id="gradSkillDetailTokens" x1="0" y1="0" x2="0" y2="1">
-                                                    <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.4} />
-                                                    <stop offset="100%" stopColor="#3b82f6" stopOpacity={0} />
+                                                <linearGradient id="gradSkillDetailTpr" x1="0" y1="0" x2="0" y2="1">
+                                                    <stop offset="0%" stopColor="#22c55e" stopOpacity={0.4} />
+                                                    <stop offset="100%" stopColor="#22c55e" stopOpacity={0} />
                                                 </linearGradient>
                                             </defs>
                                             <CartesianGrid strokeDasharray="4 4" stroke={isDarkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'} />
                                             <XAxis dataKey="label" stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={CHART_TYPOGRAPHY.axisTick} axisLine={false} tickLine={false} />
-                                            <YAxis stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={CHART_TYPOGRAPHY.axisTick} axisLine={false} tickLine={false} tickFormatter={(v) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v.toLocaleString()} />
+                                            <YAxis
+                                                stroke={isDarkMode ? '#6e7681' : '#57606a'}
+                                                tick={CHART_TYPOGRAPHY.axisTick}
+                                                axisLine={false}
+                                                tickLine={false}
+                                                tickFormatter={formatTprAxis}
+                                            />
                                             <Tooltip content={({ active, payload, label }) => {
                                                 if (!active || !payload?.length) return null
                                                 const item = payload[0].payload
                                                 return (
                                                     <div style={{ padding: '8px 10px', background: isDarkMode ? 'rgba(15,23,42,0.95)' : 'white', border: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.08)' : '#e2e8f0'}`, borderRadius: 8 }}>
                                                         <div style={{ ...CHART_TYPOGRAPHY.tooltipLabel, marginBottom: 4 }}>{label}</div>
-                                                        <div style={CHART_TYPOGRAPHY.tooltipItem}>Attempts: {(item.run_count || 0).toLocaleString()}</div>
-                                                        <div style={CHART_TYPOGRAPHY.tooltipItem}>Input: {formatNumber(item.input_tokens)}</div>
-                                                        <div style={CHART_TYPOGRAPHY.tooltipItem}>Output: {formatNumber(item.output_tokens)}</div>
-                                                        {detailUseRunFallbackSeries && <div style={CHART_TYPOGRAPHY.tooltipItem}>Runs: {formatNumber(item.run_count)}</div>}
+                                                        <div style={{ ...CHART_TYPOGRAPHY.tooltipItem, color: '#22c55e' }}>TPR: {formatTpr(item.tpr)} tokens/run</div>
+                                                        <div style={CHART_TYPOGRAPHY.tooltipItem}>Runs: {formatNumber(item.run_count || 0)}</div>
+                                                        <div style={CHART_TYPOGRAPHY.tooltipItem}>Total tokens: {formatNumber(item.total_tokens || 0)}</div>
+                                                        <div style={CHART_TYPOGRAPHY.tooltipItem}>Input: {formatNumber(item.input_tokens || 0)}</div>
+                                                        <div style={CHART_TYPOGRAPHY.tooltipItem}>Output: {formatNumber(item.output_tokens || 0)}</div>
                                                         <div style={{ ...CHART_TYPOGRAPHY.tooltipItem, color: '#10b981' }}>Cost: {formatCost(item.estimated_cost)}</div>
                                                     </div>
                                                 )
                                             }} />
-                                            {detailUseRunFallbackSeries ? (
-                                                <Area type="monotone" dataKey="run_count" name="Runs" stroke="#f59e0b" fillOpacity={0.25} fill="#f59e0b" strokeWidth={2} />
-                                            ) : (
-                                                <>
-                                                    <Area type="monotone" dataKey="input_tokens" name="Input" stroke="#3b82f6" fill="url(#gradSkillDetailTokens)" strokeWidth={2} />
-                                                    <Area type="monotone" dataKey="output_tokens" name="Output" stroke="#8b5cf6" fillOpacity={0.2} fill="#8b5cf6" strokeWidth={2} />
-                                                </>
-                                            )}
+                                            <Area
+                                                type="monotone"
+                                                dataKey="tpr"
+                                                name="TPR"
+                                                stroke="#22c55e"
+                                                fill="url(#gradSkillDetailTpr)"
+                                                strokeWidth={2}
+                                            />
                                         </AreaChart>
                                     </ResponsiveContainer>
                                 ) : (
-                                    <div className="empty-state">No trend data for this skill</div>
+                                    <div className="empty-state">No TPR trend data for this skill</div>
                                 )}
                             </div>
                         </div>

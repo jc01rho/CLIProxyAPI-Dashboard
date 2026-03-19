@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { supabase } from './lib/supabase'
 import Dashboard from './components/Dashboard'
 
@@ -6,6 +6,96 @@ const APP_LOGS_PAGE_SIZE = Number(import.meta.env.VITE_APP_LOGS_PAGE_SIZE || 500
 const FRONTEND_AUTO_REFRESH_MS = Math.max(1000, Number(import.meta.env.VITE_AUTO_REFRESH_SECONDS || 60) * 1000)
 const COLLECTOR_BASE = '/api/collector'
 const DEV_BYPASS_AUTH = import.meta.env.DEV && String(import.meta.env.VITE_DEV_BYPASS_AUTH || '').toLowerCase() === 'true'
+const DEV_MOCK_SKILLS = import.meta.env.DEV && String(import.meta.env.VITE_DEV_MOCK_SKILLS || '').toLowerCase() === 'true'
+
+const createMockSkillRuns = () => {
+    const now = Date.now()
+    const skills = [
+        { name: 'review-pr', model: 'claude-sonnet-4-6', project: '/Users/admin/projects/cliproxy-dashboard', machine: 'macbook-pro-m3', baseIn: 18000, baseOut: 4200, cost: 0.28 },
+        { name: 'commit', model: 'claude-sonnet-4-6', project: '/Users/admin/projects/cliproxy-dashboard', machine: 'macbook-pro-m3', baseIn: 9000, baseOut: 1800, cost: 0.09 },
+        { name: 'frontend-design', model: 'claude-opus-4-6', project: '/Users/admin/projects/marketing-site', machine: 'studio-imac', baseIn: 26000, baseOut: 6800, cost: 0.64 },
+        { name: 'debugging', model: 'claude-sonnet-4-6', project: '/Users/admin/projects/collector', machine: 'ubuntu-buildbox', baseIn: 15000, baseOut: 2500, cost: 0.21 },
+        { name: 'docs-seeker', model: 'claude-haiku-4-5-20251001', project: '/Users/admin/projects/agent-docs', machine: 'macbook-air', baseIn: 7000, baseOut: 1300, cost: 0.04 },
+        { name: 'web-testing', model: 'claude-sonnet-4-6', project: '/Users/admin/projects/dashboard-e2e', machine: 'ubuntu-buildbox', baseIn: 12000, baseOut: 2400, cost: 0.16 },
+    ]
+
+    const statuses = ['success', 'success', 'success', 'success', 'failure']
+    const runs = []
+
+    for (let day = 0; day < 12; day += 1) {
+        skills.forEach((skill, skillIndex) => {
+            const runCount = Math.max(1, 4 - Math.floor(skillIndex / 2))
+            for (let runIndex = 0; runIndex < runCount; runIndex += 1) {
+                const ts = new Date(now - ((day * 24 + (skillIndex * 3) + runIndex) * 60 * 60 * 1000))
+                const status = statuses[(day + skillIndex + runIndex) % statuses.length]
+                const input = skill.baseIn + (day * 350) + (runIndex * 420)
+                const output = status === 'failure' ? Math.round(skill.baseOut * 0.2) : skill.baseOut + (runIndex * 180)
+                runs.push({
+                    event_uid: `mock-${skill.name}-${day}-${runIndex}`,
+                    tool_use_id: `tool-${skill.name}-${day}-${runIndex}`,
+                    skill_name: skill.name,
+                    session_id: `session-${(skillIndex % 3) + 1}`,
+                    machine_id: skill.machine,
+                    source: 'mock-dev',
+                    triggered_at: ts.toISOString(),
+                    status,
+                    error_type: status === 'failure' ? 'tool_error' : null,
+                    error_message: status === 'failure' ? 'Mock failure to preview error states in recent runs.' : null,
+                    attempt_no: 1,
+                    tokens_used: input,
+                    output_tokens: output,
+                    duration_ms: 1200 + (skillIndex * 330) + (runIndex * 140),
+                    model: skill.model,
+                    tool_calls: 1 + ((day + runIndex) % 4),
+                    estimated_cost_usd: Number((skill.cost + day * 0.01 + runIndex * 0.005).toFixed(3)),
+                    is_skeleton: false,
+                    project_dir: skill.project,
+                })
+            }
+        })
+    }
+
+    return runs.sort((a, b) => new Date(b.triggered_at) - new Date(a.triggered_at))
+}
+
+const createMockSkillDailyStats = (runs) => {
+    const dailyMap = new Map()
+
+    for (const run of runs) {
+        const dt = new Date(run.triggered_at)
+        const statDate = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`
+        const key = `${statDate}|||${run.skill_name}|||${run.machine_id}`
+
+        if (!dailyMap.has(key)) {
+            dailyMap.set(key, {
+                stat_date: statDate,
+                skill_name: run.skill_name,
+                machine_id: run.machine_id,
+                run_count: 0,
+                success_count: 0,
+                failure_count: 0,
+                total_tokens: 0,
+                total_output_tokens: 0,
+                total_tool_calls: 0,
+                total_cost_usd: 0,
+            })
+        }
+
+        const row = dailyMap.get(key)
+        row.run_count += 1
+        row.success_count += run.status === 'failure' ? 0 : 1
+        row.failure_count += run.status === 'failure' ? 1 : 0
+        row.total_tokens += run.tokens_used || 0
+        row.total_output_tokens += run.output_tokens || 0
+        row.total_tool_calls += run.tool_calls || 0
+        row.total_cost_usd += Number(run.estimated_cost_usd || 0)
+    }
+
+    return Array.from(dailyMap.values()).sort((a, b) => a.stat_date.localeCompare(b.stat_date))
+}
+
+const MOCK_SKILL_RUNS = createMockSkillRuns()
+const MOCK_SKILL_DAILY_STATS = createMockSkillDailyStats(MOCK_SKILL_RUNS)
 
 // Helper to get date boundaries based on range ID
 // Uses local timezone for date display, converts to UTC for timestamp queries
@@ -44,17 +134,17 @@ const getDateBoundaries = (rangeId, customRange) => {
     switch (rangeId) {
         case 'today':
             return {
-                startDate: todayStr,      // For daily_stats (YYYY-MM-DD)
+                startDate: todayStr,
                 endDate: null,
-                startTime: todayUTC,      // For model_usage/snapshots (UTC ISO)
+                startTime: todayUTC,
                 endTime: null
             }
         case 'yesterday':
             return {
                 startDate: yesterdayStr,
-                endDate: todayStr,        // exclusive
-                startTime: yesterdayUTC,  // start of yesterday in UTC
-                endTime: todayUTC         // start of today in UTC (exclusive)
+                endDate: todayStr,
+                startTime: yesterdayUTC,
+                endTime: todayUTC
             }
         case '7d': {
             const d7 = new Date(now)
@@ -161,23 +251,47 @@ function App() {
     const [stats, setStats] = useState(null)
     const [dailyStats, setDailyStats] = useState([])
     const [modelUsage, setModelUsage] = useState([])
-    const [endpointUsage, setEndpointUsage] = useState([]) // NEW: granular usage for API Keys
-    const [hourlyStats, setHourlyStats] = useState([]) // NEW: hourly breakdown
+    const [endpointUsage, setEndpointUsage] = useState([])
+    const [hourlyStats, setHourlyStats] = useState([])
     const [skillRuns, setSkillRuns] = useState([])
     const [skillDailyStats, setSkillDailyStats] = useState([])
     const [appLogs, setAppLogs] = useState([])
-    const [loading, setLoading] = useState(true) // Only for initial load
-    const [isRefreshing, setIsRefreshing] = useState(false) // For date range changes
+    const [loading, setLoading] = useState(true)
+    const [isRefreshing, setIsRefreshing] = useState(false)
     const [hasInitialDataLoaded, setHasInitialDataLoaded] = useState(false)
     const [lastUpdated, setLastUpdated] = useState(null)
-    const [dateRange, setDateRange] = useState('today') // 'today', 'yesterday', '7d', '30d', 'year', 'custom'
+    const [dateRange, setDateRange] = useState('today')
     const [customRange, setCustomRange] = useState({ startDate: null, endDate: null })
 
-    // Credential stats state
     const [credentialData, setCredentialData] = useState(null)
     const [credentialTimeSeries, setCredentialTimeSeries] = useState({ byDay: [], byHour: [], meta: {} })
     const [credentialLoading, setCredentialLoading] = useState(true)
     const [credentialSetupRequired, setCredentialSetupRequired] = useState(false)
+
+    const mockSkillData = useMemo(() => {
+        if (!DEV_MOCK_SKILLS) {
+            return { skillRuns: skillRuns, skillDailyStats: skillDailyStats }
+        }
+
+        const { startTime, endTime, startDate, endDate } = getDateBoundaries(dateRange, customRange)
+        const filteredRuns = MOCK_SKILL_RUNS.filter((run) => {
+            const triggeredAt = run.triggered_at || ''
+            if (startTime && triggeredAt < startTime) return false
+            if (endTime && triggeredAt >= endTime) return false
+            return true
+        })
+
+        const filteredDailyStats = MOCK_SKILL_DAILY_STATS.filter((row) => {
+            if (startDate && row.stat_date < startDate) return false
+            if (endDate && row.stat_date >= endDate) return false
+            return true
+        })
+
+        return {
+            skillRuns: filteredRuns,
+            skillDailyStats: filteredDailyStats,
+        }
+    }, [skillRuns, skillDailyStats, dateRange, customRange])
 
     const authFetch = useCallback(async (url, options = {}) => {
         const { skipUnauthorized = false, headers, ...rest } = options
@@ -216,7 +330,7 @@ function App() {
             setAuthState({
                 loading: false,
                 authenticated: Boolean(session.authenticated),
-                                expiresAt: session.expires_at || null,
+                expiresAt: session.expires_at || null,
                 rememberMe: Boolean(session.remember_me),
             })
             return Boolean(session.authenticated)
@@ -227,7 +341,6 @@ function App() {
         }
     }, [authFetch])
 
-    // Fetch credential stats filtered by date range
     const fetchCredentialStats = useCallback(async (rangeId = dateRange) => {
         if (!authState.authenticated) {
             setCredentialLoading(false)
@@ -239,7 +352,6 @@ function App() {
 
             const { startDate, endDate } = getDateBoundaries(rangeId, customRange)
 
-            // Try credential_daily_stats first (date-range aware)
             let useDailyStats = false
             let dailyRowsForSeries = []
             try {
@@ -263,9 +375,8 @@ function App() {
                 if (!dailyError && dailyRows && dailyRows.length > 0) {
                     useDailyStats = true
 
-                    // Aggregate credentials across days
-                    const credMap = {}  // keyed by "auth_index||source"
-                    const akMap = {}    // keyed by "api_key_name"
+                    const credMap = {}
+                    const akMap = {}
 
                     const CRED_NUM = ['total_requests', 'success_count', 'failure_count',
                         'input_tokens', 'output_tokens', 'reasoning_tokens', 'cached_tokens', 'total_tokens']
@@ -276,7 +387,6 @@ function App() {
                     const MODEL_NUM_AK = ['requests', 'tokens', 'success', 'failure']
 
                     for (const row of dailyRows) {
-                        // Merge credentials
                         for (const c of (row.credentials || [])) {
                             const key = `${c.auth_index || ''}||${c.source || ''}`
                             if (!credMap[key]) {
@@ -286,7 +396,6 @@ function App() {
                                 for (const f of CRED_NUM) {
                                     ex[f] = (ex[f] || 0) + (c[f] || 0)
                                 }
-                                // Merge models
                                 for (const [mName, mData] of Object.entries(c.models || {})) {
                                     if (!ex.models[mName]) {
                                         ex.models[mName] = { ...mData }
@@ -296,16 +405,13 @@ function App() {
                                         }
                                     }
                                 }
-                                // Union api_keys
                                 ex.api_keys = [...new Set([...(ex.api_keys || []), ...(c.api_keys || [])])].sort()
-                                // Update metadata
                                 for (const f of ['provider', 'email', 'label', 'status', 'account_type']) {
                                     if (c[f]) ex[f] = c[f]
                                 }
                             }
                         }
 
-                        // Merge API keys
                         for (const a of (row.api_keys || [])) {
                             const key = a.api_key_name || ''
                             if (!akMap[key]) {
@@ -329,7 +435,6 @@ function App() {
                         }
                     }
 
-                    // Recalculate success_rate for aggregated credentials
                     const aggregatedCreds = Object.values(credMap).map(c => ({
                         ...c,
                         success_rate: c.total_requests > 0
@@ -353,11 +458,9 @@ function App() {
                     setCredentialSetupRequired(false)
                 }
             } catch (dailyErr) {
-                // credential_daily_stats table might not exist yet — fall through to summary
                 console.debug('credential_daily_stats not available, falling back to summary:', dailyErr.message)
             }
 
-            // Build API-key by-day series from credential_daily_stats + daily_stats.breakdown (cost)
             const dailyCostByDate = {}
             if (startDate || rangeId === 'all') {
                 let dailyBreakdownQuery = supabase
@@ -405,7 +508,6 @@ function App() {
                 })
                 .sort((a, b) => (a.stat_date || '').localeCompare(b.stat_date || ''))
 
-            // Build API-key by-hour series from usage_snapshots.raw_data (cumulative -> delta)
             const { startTime, endTime } = getDateBoundaries(rangeId, customRange)
             let snapshotsRawQuery = supabase
                 .from('usage_snapshots')
@@ -601,7 +703,6 @@ function App() {
                 },
             })
 
-            // Fallback: use credential_usage_summary (backward compat)
             if (!useDailyStats) {
                 const { data: rows, error } = await supabase
                     .from('credential_usage_summary')
@@ -644,7 +745,6 @@ function App() {
 
             const { startTime, endTime, startDate, endDate } = getDateBoundaries(rangeId, customRange)
 
-            // 1. Fetch latest snapshot for raw_data (used for Rate Limits)
             const { data: latestSnapshots } = await supabase
                 .from('usage_snapshots')
                 .select('*')
@@ -656,7 +756,6 @@ function App() {
                 setLastUpdated(new Date(latestSnapshots[0].collected_at))
             }
 
-            // 2. Fetch ALL snapshots within date range (including model_usage for granular delta)
             let snapshotsQuery = supabase
                 .from('usage_snapshots')
                 .select('id, collected_at, total_requests, success_count, failure_count, total_tokens, model_usage(model_name, request_count, total_tokens, estimated_cost_usd, input_tokens, output_tokens, reasoning_tokens, cached_tokens)')
@@ -671,7 +770,6 @@ function App() {
 
             const { data: snapshotsData } = await snapshotsQuery
 
-            // 2b. Fetch baseline snapshot (just before startTime) for accurate delta calculation
             let baselineSnapshot = null
             if (startTime && snapshotsData?.length > 0) {
                 const { data: baselineData } = await supabase
@@ -684,15 +782,14 @@ function App() {
                 baselineSnapshot = baselineData?.[0] || null
             }
 
-            // 3. Calculate daily and hourly stats from snapshots
             const dailyMap = {}
             const hourlyMap = {}
-            let prevSnapshot = baselineSnapshot  // Start with baseline instead of null
+            let prevSnapshot = baselineSnapshot
 
             if (snapshotsData?.length > 0) {
                 for (const snap of snapshotsData) {
                     const snapTime = new Date(snap.collected_at)
-                    const dateKey = snapTime.toLocaleDateString('en-CA') // YYYY-MM-DD in local timezone
+                    const dateKey = snapTime.toLocaleDateString('en-CA')
                     const hourKey = snapTime.getHours().toString().padStart(2, '0')
 
                     if (prevSnapshot) {
@@ -703,7 +800,6 @@ function App() {
                             failure: Math.max(0, snap.failure_count - prevSnapshot.failure_count)
                         }
 
-                        // Aggregate by day
                         if (!dailyMap[dateKey]) {
                             dailyMap[dateKey] = { requests: 0, tokens: 0, success: 0, failure: 0 }
                         }
@@ -712,14 +808,12 @@ function App() {
                         dailyMap[dateKey].success += delta.success
                         dailyMap[dateKey].failure += delta.failure
 
-                        // Aggregate by hour
                         if (!hourlyMap[hourKey]) {
                             hourlyMap[hourKey] = { requests: 0, tokens: 0, models: {} }
                         }
                         hourlyMap[hourKey].requests += delta.requests
                         hourlyMap[hourKey].tokens += delta.tokens
 
-                        // Model Breakdown Logic
                         const prevModels = new Map((prevSnapshot.model_usage || []).map(m => [m.model_name, m]))
                         const currModels = new Map((snap.model_usage || []).map(m => [m.model_name, m]))
                         const allModelNames = new Set([...prevModels.keys(), ...currModels.keys()])
@@ -728,8 +822,6 @@ function App() {
                             const p = prevModels.get(name) || { request_count: 0, total_tokens: 0, estimated_cost_usd: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0 }
                             const c = currModels.get(name) || { request_count: 0, total_tokens: 0, estimated_cost_usd: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0 }
 
-                            // Calculate delta for this model
-                            // Handle restarts (curr < prev) -> assume curr is the delta (approx)
                             let dReq = c.request_count - p.request_count
                             let dTok = c.total_tokens - p.total_tokens
                             let dCost = (c.estimated_cost_usd || 0) - (p.estimated_cost_usd || 0)
@@ -764,25 +856,11 @@ function App() {
                 }
             }
 
-            // Convert daily map to array (requests/tokens derived from snapshots)
-            const calculatedDailyArray = Object.entries(dailyMap)
-                .map(([date, data]) => ({
-                    stat_date: date,
-                    total_requests: data.requests,
-                    total_tokens: data.tokens,
-                    success_count: data.success,
-                    failure_count: data.failure,
-                    estimated_cost_usd: 0
-                }))
-                .sort((a, b) => a.stat_date.localeCompare(b.stat_date))
-
-            // Fetch authoritative data from daily_stats table
-            let dailyStatsFromDB = {}  // Keyed by stat_date
-            let breakdownByDate = {} // Store breakdown for daily stats
+            let dailyStatsFromDB = {}
+            let breakdownByDate = {}
             let aggregatedBreakdown = { models: {}, endpoints: {} }
             let hasBreakdownData = false
 
-            // For 'all' time, we want all daily stats, otherwise respect startDate
             if (rangeId === 'all' || startDate) {
                 let dailyStatsQuery = supabase
                     .from('daily_stats')
@@ -804,17 +882,14 @@ function App() {
                         estimated_cost_usd: parseFloat(row.estimated_cost_usd) || 0
                     }
 
-                    // Aggregate Breakdown from JSON
                     if (row.breakdown) {
                         hasBreakdownData = true
                         const b = row.breakdown
 
-                        // Store daily breakdown for charts
                         if (b.models) {
-                             breakdownByDate[row.stat_date] = b.models
+                            breakdownByDate[row.stat_date] = b.models
                         }
 
-                        // Merge Models
                         if (b.models) {
                             for (const [mName, data] of Object.entries(b.models)) {
                                 if (!aggregatedBreakdown.models[mName]) {
@@ -840,40 +915,36 @@ function App() {
                             }
                         }
 
-                        // Merge Endpoints
                         if (b.endpoints) {
-                             for (const [epName, data] of Object.entries(b.endpoints)) {
-                                 if (!aggregatedBreakdown.endpoints[epName]) {
-                                     aggregatedBreakdown.endpoints[epName] = {
-                                         api_endpoint: epName,
-                                         request_count: 0,
-                                         estimated_cost_usd: 0,
-                                         models: {} // Track nested model usage
-                                     }
-                                 }
-                                 const e = aggregatedBreakdown.endpoints[epName]
-                                 e.request_count += data.requests || 0
-                                 e.estimated_cost_usd += data.cost || 0
+                            for (const [epName, data] of Object.entries(b.endpoints)) {
+                                if (!aggregatedBreakdown.endpoints[epName]) {
+                                    aggregatedBreakdown.endpoints[epName] = {
+                                        api_endpoint: epName,
+                                        request_count: 0,
+                                        estimated_cost_usd: 0,
+                                        models: {}
+                                    }
+                                }
+                                const e = aggregatedBreakdown.endpoints[epName]
+                                e.request_count += data.requests || 0
+                                e.estimated_cost_usd += data.cost || 0
 
-                                 // Merge nested models if available
-                                 if (data.models) {
-                                     for (const [mName, mData] of Object.entries(data.models)) {
-                                         if (!e.models[mName]) {
-                                             e.models[mName] = { requests: 0, cost: 0, tokens: 0 }
-                                         }
-                                         e.models[mName].requests += mData.requests || 0
-                                         e.models[mName].cost += mData.cost || 0
-                                         e.models[mName].tokens += mData.tokens || 0
-                                     }
-                                 }
+                                if (data.models) {
+                                    for (const [mName, mData] of Object.entries(data.models)) {
+                                        if (!e.models[mName]) {
+                                            e.models[mName] = { requests: 0, cost: 0, tokens: 0 }
+                                        }
+                                        e.models[mName].requests += mData.requests || 0
+                                        e.models[mName].cost += mData.cost || 0
+                                        e.models[mName].tokens += mData.tokens || 0
+                                    }
+                                }
                             }
                         }
                     }
                 })
             }
 
-            // Merge calculated data with daily_stats data
-            // Priority: Use daily_stats if available (authoritative), fallback to calculated data
             const allDates = new Set([
                 ...Object.keys(dailyMap),
                 ...Object.keys(dailyStatsFromDB)
@@ -883,7 +954,6 @@ function App() {
                 const fromDB = dailyStatsFromDB[dateKey]
                 const calculated = dailyMap[dateKey]
 
-                // Prefer DB data if available, otherwise use calculated
                 return {
                     stat_date: dateKey,
                     total_requests: fromDB?.total_requests ?? (calculated?.requests || 0),
@@ -897,15 +967,11 @@ function App() {
 
             setDailyStats(mergedDailyArray)
 
-            // Convert hourly map to array
             const now = new Date()
             const hoursToShow = rangeId === 'today' ? now.getHours() + 1 : 24
             const hourlyArray = Array.from({ length: hoursToShow }, (_, i) => {
                 const hourKey = i.toString().padStart(2, '0')
                 const hData = hourlyMap[hourKey] || { requests: 0, tokens: 0, models: {} }
-
-                // Flatten model usage for easy chart consumption
-                // Structure: { time, requests, tokens, models: { "gpt-4": { requests: 10, tokens: 100, cost: 0.05 }, ... } }
                 return {
                     time: `${hourKey}:00`,
                     requests: hData.requests,
@@ -915,257 +981,183 @@ function App() {
             })
             setHourlyStats(hourlyArray)
 
-            // 4. Get model usage
-            // PRIORITY: Use Aggregated Breakdown if available (Performance Optimization)
             if (hasBreakdownData) {
-                 const finalModels = Object.values(aggregatedBreakdown.models)
+                const finalModels = Object.values(aggregatedBreakdown.models)
                     .sort((a, b) => b.estimated_cost_usd - a.estimated_cost_usd)
-                 setModelUsage(finalModels)
+                setModelUsage(finalModels)
 
-                 const finalEndpoints = Object.values(aggregatedBreakdown.endpoints)
+                const finalEndpoints = Object.values(aggregatedBreakdown.endpoints)
                     .sort((a, b) => b.estimated_cost_usd - a.estimated_cost_usd)
-                 setEndpointUsage(finalEndpoints)
+                setEndpointUsage(finalEndpoints)
             } else {
-                // FALLBACK: Old Snapshot Logic (Slow, but full detail including input/output tokens)
-                // ... (Keep existing logic as else block)
                 if (snapshotsData?.length > 0) {
-                     // ... existing snapshot processing ...
-                     // I need to wrap the existing logic in this else block.
-                     // But wait, the existing logic is huge.
-                     // I will implement this by conditionally executing the snapshot logic.
+                    let totalByModel = new Map()
+                    const cleanArray = (arr) => arr.filter(x => x !== null && x !== undefined)
+
+                    let baselineId = null
+                    if (startTime) {
+                        const { data: baselineData } = await supabase.from('usage_snapshots')
+                            .select('id, collected_at, total_requests, success_count, failure_count, total_tokens')
+                            .lt('collected_at', startTime)
+                            .order('collected_at', { ascending: false })
+                            .limit(1)
+
+                        baselineId = baselineData?.[0]?.id
+                    }
+
+                    let effectiveBaselineId = baselineId
+                    let startIdx = 0
+
+                    if (startTime && !baselineId && snapshotsData.length > 0) {
+                        effectiveBaselineId = snapshotsData[0].id
+                        startIdx = 0
+                    }
+
+                    const criticalSnapIds = []
+
+                    for (let i = startIdx; i < snapshotsData.length - 1; i++) {
+                        const curr = snapshotsData[i]
+                        const next = snapshotsData[i + 1]
+                        if (next.total_requests < curr.total_requests || next.total_tokens < curr.total_tokens) {
+                            criticalSnapIds.push(curr.id)
+                        }
+                    }
+                    if (snapshotsData.length > 0) {
+                        const lastId = snapshotsData[snapshotsData.length - 1].id
+                        if (lastId !== effectiveBaselineId) {
+                            criticalSnapIds.push(lastId)
+                        }
+                    }
+
+                    const allSnapIdsToFetch = cleanArray([effectiveBaselineId, ...criticalSnapIds])
+                    const uniqueSnapIds = [...new Set(allSnapIdsToFetch)]
+
+                    const { data: usageRecords } = await supabase.from('model_usage')
+                        .select('snapshot_id, model_name, api_endpoint, request_count, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, estimated_cost_usd')
+                        .in('snapshot_id', uniqueSnapIds)
+                        .limit(100000)
+
+                    const snapMap = new Map()
+                    usageRecords?.forEach(record => {
+                        if (!snapMap.has(record.snapshot_id)) {
+                            snapMap.set(record.snapshot_id, new Map())
+                        }
+                        const key = `${record.model_name}|||${record.api_endpoint}`
+                        snapMap.get(record.snapshot_id).set(key, record)
+                    })
+
+                    let prevModelUsageMap = snapMap.get(effectiveBaselineId) || new Map()
+
+                    for (const currentSnapId of criticalSnapIds) {
+                        const currentModelUsageMap = snapMap.get(currentSnapId)
+                        if (!currentModelUsageMap) {
+                            continue
+                        }
+
+                        const allKeys = new Set([...prevModelUsageMap.keys(), ...currentModelUsageMap.keys()])
+
+                        for (const key of allKeys) {
+                            const prev = prevModelUsageMap.get(key) || { request_count: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 }
+                            const curr = currentModelUsageMap.get(key) || { request_count: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 }
+
+                            let deltaReq = 0, deltaIn = 0, deltaOut = 0, deltaReasoning = 0, deltaCached = 0, deltaTotal = 0, deltaCost = 0
+
+                            const isReset = curr.total_tokens < prev.total_tokens || curr.request_count < prev.request_count
+
+                            if (isReset) {
+                                deltaReq = curr.request_count
+                                deltaIn = curr.input_tokens
+                                deltaOut = curr.output_tokens
+                                deltaReasoning = curr.reasoning_tokens || 0
+                                deltaCached = curr.cached_tokens || 0
+                                deltaTotal = curr.total_tokens
+                                deltaCost = parseFloat(curr.estimated_cost_usd || 0)
+                            } else {
+                                deltaReq = curr.request_count - prev.request_count
+                                deltaIn = curr.input_tokens - prev.input_tokens
+                                deltaOut = curr.output_tokens - prev.output_tokens
+                                deltaReasoning = (curr.reasoning_tokens || 0) - (prev.reasoning_tokens || 0)
+                                deltaCached = (curr.cached_tokens || 0) - (prev.cached_tokens || 0)
+                                deltaTotal = curr.total_tokens - prev.total_tokens
+                                deltaCost = parseFloat(curr.estimated_cost_usd || 0) - parseFloat(prev.estimated_cost_usd || 0)
+                            }
+
+                            if (deltaReq > 0 || deltaCost > 0) {
+                                if (!totalByModel.has(key)) {
+                                    totalByModel.set(key, {
+                                        model_name: curr.model_name || prev.model_name,
+                                        api_endpoint: curr.api_endpoint || prev.api_endpoint,
+                                        request_count: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0, total_tokens: 0, estimated_cost_usd: 0
+                                    })
+                                }
+                                const item = totalByModel.get(key)
+                                item.request_count += deltaReq
+                                item.input_tokens += deltaIn
+                                item.output_tokens += deltaOut
+                                item.reasoning_tokens += deltaReasoning
+                                item.cached_tokens += deltaCached
+                                item.total_tokens += deltaTotal
+                                item.estimated_cost_usd += deltaCost
+                            }
+                        }
+                        prevModelUsageMap = currentModelUsageMap
+                    }
+
+                    const modelMap = new Map()
+                    for (const [, data] of totalByModel) {
+                        const mName = data.model_name
+                        if (!modelMap.has(mName)) {
+                            modelMap.set(mName, {
+                                model_name: mName,
+                                api_endpoint: data.api_endpoint,
+                                request_count: 0,
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                reasoning_tokens: 0,
+                                cached_tokens: 0,
+                                total_tokens: 0,
+                                estimated_cost_usd: 0
+                            })
+                        }
+                        const mExisting = modelMap.get(mName)
+                        mExisting.request_count += data.request_count
+                        mExisting.input_tokens += data.input_tokens
+                        mExisting.output_tokens += data.output_tokens
+                        mExisting.reasoning_tokens += data.reasoning_tokens || 0
+                        mExisting.cached_tokens += data.cached_tokens || 0
+                        mExisting.total_tokens += data.total_tokens
+                        mExisting.estimated_cost_usd += data.estimated_cost_usd
+                    }
+
+                    const finalModels = Array.from(modelMap.values())
+                    setModelUsage(finalModels.sort((a, b) => b.estimated_cost_usd - a.estimated_cost_usd))
+
+                    const endpointMap = new Map()
+                    for (const [, data] of totalByModel) {
+                        const ep = data.api_endpoint
+                        if (!endpointMap.has(ep)) {
+                            endpointMap.set(ep, {
+                                api_endpoint: ep,
+                                model_name: data.model_name,
+                                request_count: 0,
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                total_tokens: 0,
+                                estimated_cost_usd: 0
+                            })
+                        }
+                        const eExisting = endpointMap.get(ep)
+                        eExisting.request_count += data.request_count
+                        eExisting.estimated_cost_usd += data.estimated_cost_usd
+                    }
+
+                    setEndpointUsage(Array.from(endpointMap.values()))
                 } else {
                     setModelUsage([])
                     setEndpointUsage([])
                 }
             }
 
-            // To properly wrap, I'll use a guard clause or boolean flag.
-            const runSnapshotLogic = !hasBreakdownData && snapshotsData?.length > 0;
-
-            if (runSnapshotLogic) {
-                let totalByModel = new Map()
-                // ... (rest of the existing logic) ...
-
-
-                // Helper function to clean arrays (remove null/undefined)
-                const cleanArray = (arr) => arr.filter(x => x !== null && x !== undefined);
-
-                // 1. Identify "Critical Points" (Baseline, Peaks, Last Snapshot)
-
-                // We need a baseline (snapshot BEFORE the range) to calculate valid delta for the first segment.
-                // If no baseline (e.g. All Time), assume 0 for all counters.
-                let baselineId = null;
-                if (startTime) {
-                    const { data: baselineData } = await supabase.from('usage_snapshots')
-                        .select('id, collected_at, total_requests, success_count, failure_count, total_tokens')
-                        .lt('collected_at', startTime)
-                        .order('collected_at', { ascending: false })
-                        .limit(1)
-
-                    baselineId = baselineData?.[0]?.id;
-                }
-
-                // Handling for "Missing Baseline" in specific date ranges (e.g. "Today" but first install was at noon)
-                // If we have a startTime (not All Time) but NO baseline found, we must treat the FIRST snapshot
-                // of the range as the baseline to avoid counting its cumulative value as "Today's usage".
-                let effectiveBaselineId = baselineId;
-                let startIdx = 0;
-
-                if (startTime && !baselineId && snapshotsData.length > 0) {
-                     effectiveBaselineId = snapshotsData[0].id;
-                     // We start processing critical points from the NEXT snapshot,
-                     // effectively ignoring the first snapshot's absolute value (delta = 0)
-                     // But we still need to check if it's a critical point itself?
-                     // No, if it's the baseline, it's the reference.
-                     startIdx = 0; // We will handle this by filtering criticalSnapIds
-                }
-
-                const criticalSnapIds = [];
-
-                // Iterate snapshotsData to find "peaks" (snapshots immediately preceding a reset)
-                for (let i = startIdx; i < snapshotsData.length - 1; i++) {
-                    const curr = snapshotsData[i];
-                    const next = snapshotsData[i + 1];
-
-                    // Detect a global restart if total_requests or total_tokens drop significantly
-                    // A simple drop check is sufficient for CLIProxy's global counters
-                    if (next.total_requests < curr.total_requests || next.total_tokens < curr.total_tokens) {
-                        criticalSnapIds.push(curr.id); // This 'curr' is a peak before a reset
-                    }
-                }
-                // Always include the very last snapshot in the range as a critical point
-                // Unless the range only had 1 snapshot and we used it as baseline?
-                if (snapshotsData.length > 0) {
-                     const lastId = snapshotsData[snapshotsData.length - 1].id;
-                     if (lastId !== effectiveBaselineId) {
-                         criticalSnapIds.push(lastId);
-                     }
-                }
-
-                // 2. Fetch detailed model usage for Baseline and all Critical Points
-                const allSnapIdsToFetch = cleanArray([effectiveBaselineId, ...criticalSnapIds]);
-                // Ensure unique IDs
-                const uniqueSnapIds = [...new Set(allSnapIdsToFetch)];
-
-                // If we have a lot of critical points (e.g. erratic server over a year), we might need to batch this.
-                // For now, assuming < 100 restarts is safe for a single 'in' query.
-                // CRITICAL: Supabase defaults to 1000 rows. With many snapshots, this query can return thousands of rows.
-                // We MUST increase the limit.
-                const { data: usageRecords } = await supabase.from('model_usage')
-                    .select('snapshot_id, model_name, api_endpoint, request_count, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, estimated_cost_usd')
-                    .in('snapshot_id', uniqueSnapIds)
-                    .limit(100000); // Increase limit to ensure we get all records
-
-                // Group fetched usage records by Snapshot ID -> Map<snapshot_id, Map<composite_key, model_usage_data>>
-                const snapMap = new Map();
-                usageRecords?.forEach(record => {
-                    if (!snapMap.has(record.snapshot_id)) {
-                        snapMap.set(record.snapshot_id, new Map());
-                    }
-                    const key = `${record.model_name}|||${record.api_endpoint}`;
-                    snapMap.get(record.snapshot_id).set(key, record);
-                });
-
-                // 3. Calculate total usage by summing deltas between critical points
-                let prevModelUsageMap = snapMap.get(effectiveBaselineId) || new Map(); // Start with baseline or empty map
-
-                // If effectiveBaselineId was snapshotsData[0] (because real baseline missing),
-                // prevModelUsageMap is populated with its data.
-                // If effectiveBaselineId was null (All Time), prevModelUsageMap is empty.
-
-                for (const currentSnapId of criticalSnapIds) {
-                    const currentModelUsageMap = snapMap.get(currentSnapId);
-                    if (!currentModelUsageMap) {
-                         // If we requested it but it's missing (e.g. partial data), skip to avoid crash
-                         // But we must NOT update prevModelUsageMap to keep continuity from valid baseline
-                         continue;
-                    }
-
-                    // Get all unique model+endpoint keys present in either previous or current map
-                    const allKeys = new Set([...prevModelUsageMap.keys(), ...currentModelUsageMap.keys()]);
-
-                    for (const key of allKeys) {
-                        const prev = prevModelUsageMap.get(key) || { request_count: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
-                        const curr = currentModelUsageMap.get(key) || { request_count: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
-
-                        let deltaReq = 0, deltaIn = 0, deltaOut = 0, deltaReasoning = 0, deltaCached = 0, deltaTotal = 0, deltaCost = 0;
-
-                        // Determine if a reset occurred for this specific model+endpoint key
-                        // A reset is indicated if current counters are less than previous counters
-                        const isReset = curr.total_tokens < prev.total_tokens || curr.request_count < prev.request_count;
-
-                        if (isReset) {
-                            // If reset, the usage for this segment is simply the current value
-                            // (assuming it started from ~0 after the reset)
-                            deltaReq = curr.request_count;
-                            deltaIn = curr.input_tokens;
-                            deltaOut = curr.output_tokens;
-                            deltaReasoning = curr.reasoning_tokens || 0;
-                            deltaCached = curr.cached_tokens || 0;
-                            deltaTotal = curr.total_tokens;
-                            deltaCost = parseFloat(curr.estimated_cost_usd || 0);
-                        } else {
-                            // No reset, calculate the difference
-                            deltaReq = curr.request_count - prev.request_count;
-                            deltaIn = curr.input_tokens - prev.input_tokens;
-                            deltaOut = curr.output_tokens - prev.output_tokens;
-                            deltaReasoning = (curr.reasoning_tokens || 0) - (prev.reasoning_tokens || 0);
-                            deltaCached = (curr.cached_tokens || 0) - (prev.cached_tokens || 0);
-                            deltaTotal = curr.total_tokens - prev.total_tokens;
-                            deltaCost = parseFloat(curr.estimated_cost_usd || 0) - parseFloat(prev.estimated_cost_usd || 0);
-                        }
-
-                        // Only add positive deltas (usage cannot be negative)
-                        if (deltaReq > 0 || deltaCost > 0) {
-                            if (!totalByModel.has(key)) {
-                                totalByModel.set(key, {
-                                    model_name: curr.model_name || prev.model_name,
-                                    api_endpoint: curr.api_endpoint || prev.api_endpoint,
-                                    request_count: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0, total_tokens: 0, estimated_cost_usd: 0
-                                });
-                            }
-                            const item = totalByModel.get(key);
-                            item.request_count += deltaReq;
-                            item.input_tokens += deltaIn;
-                            item.output_tokens += deltaOut;
-                            item.reasoning_tokens += deltaReasoning;
-                            item.cached_tokens += deltaCached;
-                            item.total_tokens += deltaTotal;
-                            item.estimated_cost_usd += deltaCost;
-                        }
-                    }
-                    // Move current map to previous for the next iteration
-                    prevModelUsageMap = currentModelUsageMap;
-                }
-
-                // Final Aggregation: Split into Model Usage (Summed) and Endpoint Usage (Granular)
-
-                // 1. Model Usage: Group by model_name
-                const modelMap = new Map()
-                // 2. Endpoint Usage: This is already totalByModel (keyed by composite), but we should ensure valid list
-
-                for (const [key, data] of totalByModel) {
-                    const mName = data.model_name
-                    if (!modelMap.has(mName)) {
-                        modelMap.set(mName, {
-                            model_name: mName,
-                            api_endpoint: data.api_endpoint,
-                            request_count: 0,
-                            input_tokens: 0,
-                            output_tokens: 0,
-                            reasoning_tokens: 0,
-                            cached_tokens: 0,
-                            total_tokens: 0,
-                            estimated_cost_usd: 0
-                        })
-                    }
-                    const mExisting = modelMap.get(mName)
-                    mExisting.request_count += data.request_count
-                    mExisting.input_tokens += data.input_tokens
-                    mExisting.output_tokens += data.output_tokens
-                    mExisting.reasoning_tokens += data.reasoning_tokens || 0
-                    mExisting.cached_tokens += data.cached_tokens || 0
-                    mExisting.total_tokens += data.total_tokens
-                    mExisting.estimated_cost_usd += data.estimated_cost_usd
-                    // Note: api_endpoint aggregation for Model List isn't strictly needed as list doesn't show it,
-                    // but if it does, we'd need a Set. For now, one endpoint is fine or ignore.
-                }
-
-                const finalModels = Array.from(modelMap.values())
-                setModelUsage(finalModels.sort((a, b) => b.estimated_cost_usd - a.estimated_cost_usd))
-
-                // Endpoint Usage (for API Keys chart)
-                // We aggregate by api_endpoint (summing across models for the same key) or keep separate?
-                // The API Keys chart typically shows: "sk-abc (Gemini)": Usage?
-                // Or just "sk-abc": Usage?
-                // The Dashboard previously derived it from "modelUsage".
-                // If we want "One bar per API Key", we sort by API Key.
-                // If one API key is used for multiple models, do we group them? YES.
-
-                const endpointMap = new Map()
-                for (const [key, data] of totalByModel) {
-                    const ep = data.api_endpoint
-                    if (!endpointMap.has(ep)) {
-                        endpointMap.set(ep, {
-                            api_endpoint: ep,
-                            model_name: data.model_name, // Representative
-                            request_count: 0,
-                            input_tokens: 0,
-                            output_tokens: 0,
-                            total_tokens: 0,
-                            estimated_cost_usd: 0
-                        })
-                    }
-                    const eExisting = endpointMap.get(ep)
-                    eExisting.request_count += data.request_count
-                    eExisting.estimated_cost_usd += data.estimated_cost_usd
-                    // We can track models used too
-                }
-
-                setEndpointUsage(Array.from(endpointMap.values()))
-            }
-
-            // 5. Fetch skill runs + daily stats
             let skillRunsQuery = supabase
                 .from('skill_runs')
                 .select('event_uid,tool_use_id,skill_name,session_id,machine_id,source,triggered_at,status,error_type,error_message,attempt_no,tokens_used,output_tokens,duration_ms,model,tool_calls,estimated_cost_usd,is_skeleton,project_dir')
@@ -1238,7 +1230,6 @@ function App() {
         fetchSession()
     }, [fetchSession])
 
-    // Refetch when dateRange changes (both main data and credential stats)
     useEffect(() => {
         if (!authState.authenticated) return
         fetchData(dateRange, true)
@@ -1258,13 +1249,12 @@ function App() {
         }
     }, [authState.authenticated, dateRange, fetchData, fetchCredentialStats])
 
-    // Trigger collector to fetch fresh data from CLIProxy
     const triggerCollector = async () => {
         const collectorUrl = `${COLLECTOR_BASE}/trigger`
 
         try {
             const controller = new AbortController()
-            const timeoutId = setTimeout(() => controller.abort(), 10000) // 10s timeout
+            const timeoutId = setTimeout(() => controller.abort(), 10000)
 
             const response = await authFetch(collectorUrl, {
                 method: 'POST',
@@ -1295,10 +1285,8 @@ function App() {
             setIsRefreshing(true)
             try {
                 await triggerCollector()
-                // Small delay to let collector store data
                 await new Promise(resolve => setTimeout(resolve, 500))
 
-                // If date range hasn't changed, useEffect won't run, so we must fetch manually
                 if (days === dateRange) {
                     await fetchData()
                     await fetchCredentialStats(dateRange)
@@ -1474,8 +1462,8 @@ function App() {
                 credentialTimeSeries={credentialTimeSeries}
                 credentialLoading={credentialLoading}
                 credentialSetupRequired={credentialSetupRequired}
-                skillRuns={skillRuns}
-                skillDailyStats={skillDailyStats}
+                skillRuns={mockSkillData.skillRuns}
+                skillDailyStats={mockSkillData.skillDailyStats}
                 appLogs={appLogs}
                 onClearAllLogs={clearAllAppLogs}
                 onLogout={handleLogout}

@@ -4076,7 +4076,7 @@ body {
   margin-top: 12px;
   padding: 12px 16px;
   background: var(--color-bg-card);
-  border: 1px solid var(--color-primary);
+  border: 1px solid var(--color-border-glass);
   border-radius: var(--radius-md);
   animation: slideUp 0.2s ease;
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
+import { AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip, ResponsiveContainer, ComposedChart, Bar, Line } from 'recharts'
 import { supabase } from '../lib/supabase'
 import { CHART_COLORS, CHART_TYPOGRAPHY } from '../lib/brandColors'
 import ChartDialog from './ChartDialog'
@@ -26,6 +26,13 @@ const formatTprAxis = (value) => {
     if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
     if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
     return Math.round(value).toLocaleString('en-US')
+}
+
+const SERIES_COLORS = {
+    requests: '#8b5cf6',
+    input: 'var(--color-info)',
+    output: 'var(--color-cyan)',
+    cost: 'var(--color-success)',
 }
 
 const getStatus = (status) => status === 'failure' ? 'failure' : 'success'
@@ -363,8 +370,6 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
     }, [activeSkillName, baseRuns])
 
     const trendSeries = trendTime === 'hour' ? overviewHourlySeries : overviewDailySeries
-    const hasTokenSignal = trendSeries.some(p => (p.input_tokens || 0) > 0 || (p.output_tokens || 0) > 0)
-    const useRunFallbackSeries = trendSeries.length > 0 && !hasTokenSignal
 
     const detailRuns = useMemo(() => {
         if (!activeSkillName) return []
@@ -638,6 +643,13 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
         { key: 'top_skill', label: 'Top Skill' },
     ]
 
+    const runAxisTickFormatter = (v) => formatNumber(v)
+    const tokenAxisTickFormatter = (v) => {
+        if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`
+        if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`
+        return formatNumber(v)
+    }
+
     return (
         <div className="skills-panel">
             <div className="stats-grid">
@@ -719,47 +731,105 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
             <div className="charts-row">
                 <div className="chart-card chart-full">
                     <div className="chart-header">
-                        <h3>Skill Funnel & Token Usage Over Time</h3>
+                        <h3>Skill Requests + Token Trend</h3>
                     </div>
                     <div className="chart-body chart-body-dark">
                         {trendSeries.length > 0 ? (
-                            <ResponsiveContainer width="100%" height={280}>
-                                <AreaChart data={trendSeries} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                                    <defs>
-                                        <linearGradient id="gradSkillTokens" x1="0" y1="0" x2="0" y2="1">
-                                            <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.4} />
-                                            <stop offset="100%" stopColor="#3b82f6" stopOpacity={0} />
-                                        </linearGradient>
-                                    </defs>
-                                    <CartesianGrid strokeDasharray="4 4" stroke={isDarkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'} />
-                                    <XAxis dataKey="label" stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={CHART_TYPOGRAPHY.axisTick} axisLine={false} tickLine={false} />
-                                    <YAxis stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={CHART_TYPOGRAPHY.axisTick} axisLine={false} tickLine={false} tickFormatter={(v) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v.toLocaleString()} />
-                                    <Tooltip content={({ active, payload, label }) => {
-                                        if (!active || !payload?.length) return null
-                                        const item = payload[0].payload
-                                        return (
-                                            <div style={{ padding: '8px 10px', background: isDarkMode ? 'rgba(15,23,42,0.95)' : 'white', border: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.08)' : '#e2e8f0'}`, borderRadius: 8 }}>
-                                                <div style={{ ...CHART_TYPOGRAPHY.tooltipLabel, marginBottom: 4 }}>{label}</div>
-                                                <div style={CHART_TYPOGRAPHY.tooltipItem}>Attempts: {(item.run_count || 0).toLocaleString()}</div>
-                                                <div style={CHART_TYPOGRAPHY.tooltipItem}>Success: {(item.success_count || 0).toLocaleString()}</div>
-                                                <div style={CHART_TYPOGRAPHY.tooltipItem}>Failure: {(item.failure_count || 0).toLocaleString()}</div>
-                                                <div style={CHART_TYPOGRAPHY.tooltipItem}>Input: {formatNumber(item.input_tokens)}</div>
-                                                <div style={CHART_TYPOGRAPHY.tooltipItem}>Output: {formatNumber(item.output_tokens)}</div>
-                                                {useRunFallbackSeries && <div style={CHART_TYPOGRAPHY.tooltipItem}>Runs: {formatNumber(item.run_count)}</div>}
-                                                <div style={{ ...CHART_TYPOGRAPHY.tooltipItem, color: '#10b981' }}>Cost: {formatCost(item.estimated_cost)}</div>
-                                            </div>
-                                        )
-                                    }} />
-                                    {useRunFallbackSeries ? (
-                                        <Area type="monotone" dataKey="run_count" name="Runs" stroke="#f59e0b" fillOpacity={0.25} fill="#f59e0b" strokeWidth={2} />
-                                    ) : (
-                                        <>
-                                            <Area type="monotone" dataKey="input_tokens" name="Input" stroke="#3b82f6" fill="url(#gradSkillTokens)" strokeWidth={2} />
-                                            <Area type="monotone" dataKey="output_tokens" name="Output" stroke="#8b5cf6" fillOpacity={0.2} fill="#8b5cf6" strokeWidth={2} />
-                                        </>
-                                    )}
-                                </AreaChart>
-                            </ResponsiveContainer>
+                            <>
+                                <div className="skills-mixed-chart-legend">
+                                    <span className="skills-legend-chip requests">
+                                        <span className="skills-legend-dot requests" aria-hidden="true" />
+                                        Requests (column)
+                                    </span>
+                                    <span className="skills-legend-chip input">
+                                        <span className="skills-legend-dot input" aria-hidden="true" />
+                                        Input Tokens (line)
+                                    </span>
+                                    <span className="skills-legend-chip output">
+                                        <span className="skills-legend-dot output" aria-hidden="true" />
+                                        Output Tokens (line)
+                                    </span>
+                                </div>
+                                <ResponsiveContainer width="100%" height={280}>
+                                    <ComposedChart data={trendSeries} margin={{ top: 10, right: 18, left: 4, bottom: 0 }}>
+                                        <defs>
+                                            <linearGradient id="gradSkillRequests" x1="0" y1="0" x2="1" y2="0">
+                                                <stop offset="0%" stopColor="#8b5cf6" stopOpacity={0.3} />
+                                                <stop offset="100%" stopColor="#8b5cf6" stopOpacity={0.9} />
+                                            </linearGradient>
+                                        </defs>
+                                        <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'} vertical={false} />
+                                        <XAxis dataKey="label" stroke={isDarkMode ? '#6e7681' : '#57606a'} tick={CHART_TYPOGRAPHY.axisTick} axisLine={false} tickLine={false} />
+                                        <YAxis
+                                            yAxisId="left"
+                                            stroke={isDarkMode ? '#6e7681' : '#57606a'}
+                                            tick={CHART_TYPOGRAPHY.axisTick}
+                                            axisLine={false}
+                                            tickLine={false}
+                                            tickFormatter={runAxisTickFormatter}
+                                            width={52}
+                                        />
+                                        <YAxis
+                                            yAxisId="right"
+                                            orientation="right"
+                                            stroke={isDarkMode ? '#6e7681' : '#57606a'}
+                                            tick={CHART_TYPOGRAPHY.axisTick}
+                                            axisLine={false}
+                                            tickLine={false}
+                                            tickFormatter={tokenAxisTickFormatter}
+                                            width={56}
+                                        />
+                                        <Tooltip
+                                            cursor={{ fill: isDarkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)' }}
+                                            content={({ active, payload, label }) => {
+                                                if (!active || !payload?.length) return null
+                                                const item = payload[0].payload
+                                                return (
+                                                    <div className="skills-chart-tooltip">
+                                                        <div className="skills-chart-tooltip-label">{label}</div>
+                                                        <div className="skills-chart-tooltip-item requests">Requests: {formatNumber(item.run_count || 0)}</div>
+                                                        <div className="skills-chart-tooltip-item input">Input Tokens: {formatNumber(item.input_tokens || 0)}</div>
+                                                        <div className="skills-chart-tooltip-item output">Output Tokens: {formatNumber(item.output_tokens || 0)}</div>
+                                                        <div className="skills-chart-tooltip-item">Success: {(item.success_count || 0).toLocaleString()}</div>
+                                                        <div className="skills-chart-tooltip-item">Failure: {(item.failure_count || 0).toLocaleString()}</div>
+                                                        <div className="skills-chart-tooltip-item cost">Cost: {formatCost(item.estimated_cost)}</div>
+                                                    </div>
+                                                )
+                                            }}
+                                        />
+                                        <Bar
+                                            yAxisId="left"
+                                            dataKey="run_count"
+                                            name="Requests"
+                                            fill="url(#gradSkillRequests)"
+                                            stroke={SERIES_COLORS.requests}
+                                            strokeWidth={1}
+                                            radius={[0, 4, 4, 0]}
+                                            maxBarSize={30}
+                                        />
+                                        <Line
+                                            yAxisId="right"
+                                            type="monotone"
+                                            dataKey="input_tokens"
+                                            name="Input"
+                                            stroke={SERIES_COLORS.input}
+                                            strokeWidth={2.4}
+                                            dot={false}
+                                            activeDot={{ r: 4, strokeWidth: 2, fill: isDarkMode ? '#0b1220' : '#ffffff' }}
+                                        />
+                                        <Line
+                                            yAxisId="right"
+                                            type="monotone"
+                                            dataKey="output_tokens"
+                                            name="Output"
+                                            stroke={SERIES_COLORS.output}
+                                            strokeWidth={2.4}
+                                            dot={false}
+                                            activeDot={{ r: 4, strokeWidth: 2, fill: isDarkMode ? '#0b1220' : '#ffffff' }}
+                                        />
+                                    </ComposedChart>
+                                </ResponsiveContainer>
+                            </>
                         ) : (
                             <div className="empty-state">No {trendTime}ly stats yet</div>
                         )}

@@ -4251,6 +4251,116 @@ body {
   transition: width 0.4s ease;
 }
 
+/* ===== Skills Mixed Chart ===== */
+.skills-mixed-chart-legend {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  padding: 0 4px;
+}
+
+.skills-legend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-body);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-glass);
+  background: var(--color-bg-hover);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  line-height: 1.3;
+}
+
+.skills-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.skills-legend-dot.requests {
+  background: #8b5cf6;
+  box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.28);
+}
+
+.skills-legend-dot.input {
+  background: var(--color-info);
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.28);
+}
+
+.skills-legend-dot.output {
+  background: var(--color-cyan);
+  box-shadow: 0 0 0 1px rgba(6, 182, 212, 0.28);
+}
+
+.skills-legend-chip.requests {
+  border-color: color-mix(in srgb, #8b5cf6 50%, transparent);
+  color: #8b5cf6;
+}
+
+.skills-legend-chip.input {
+  border-color: color-mix(in srgb, var(--color-info) 50%, transparent);
+  color: var(--color-info);
+}
+
+.skills-legend-chip.output {
+  border-color: color-mix(in srgb, var(--color-cyan) 50%, transparent);
+  color: var(--color-cyan);
+}
+
+.skills-chart-tooltip {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-glass);
+  background: color-mix(in srgb, var(--color-bg-surface) 92%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  min-width: 172px;
+}
+
+.skills-chart-tooltip-label {
+  margin-bottom: 4px;
+  font-family: var(--font-heading);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.skills-chart-tooltip-item {
+  font-family: var(--font-body);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.skills-chart-tooltip-item + .skills-chart-tooltip-item {
+  margin-top: 2px;
+}
+
+.skills-chart-tooltip-item.requests {
+  color: #8b5cf6;
+}
+
+.skills-chart-tooltip-item.input {
+  color: var(--color-info);
+}
+
+.skills-chart-tooltip-item.output {
+  color: var(--color-cyan);
+}
+
+.skills-chart-tooltip-item.cost {
+  color: var(--color-success);
+}
+
+.dashboard.light .skills-chart-tooltip {
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+}
+
 @media (max-width: 640px) {
   .skill-rank-top {
     flex-direction: column;
@@ -4258,5 +4368,28 @@ body {
   }
   .skill-rank-stats {
     flex-wrap: wrap;
+  }
+
+  .skills-mixed-chart-legend {
+    gap: 6px;
+  }
+
+  .skills-legend-chip {
+    font-size: 10px;
+    padding: 2px 7px;
+  }
+}
+
+@supports not (color-mix(in srgb, #000 50%, transparent)) {
+  .skills-legend-chip.requests {
+    border-color: rgba(139, 92, 246, 0.5);
+  }
+
+  .skills-legend-chip.input {
+    border-color: rgba(59, 130, 246, 0.5);
+  }
+
+  .skills-legend-chip.output {
+    border-color: rgba(6, 182, 212, 0.5);
   }
 }

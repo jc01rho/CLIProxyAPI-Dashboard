@@ -46,12 +46,16 @@ Claude Code → Skill tool called
 
 ### Development
 
+> **Docker dev convention:** `docker-compose.yml` is the base runtime config. `docker-compose.override.yml` is the local dev override and is loaded automatically by `docker compose`.
+>
+> **When editing source code only:** prefer bind mounts + `docker compose restart <service>` (or local process like `npm run dev` / `python main.py`). **Do not rebuild Docker images** unless Dockerfile, base image, or dependencies changed.
+
 **Frontend (requires postgres + postgrest running in Docker):**
 ```bash
-docker compose up -d postgres postgrest   # Start DB services first
+docker compose up -d postgres postgrest   # Starts with docker-compose.override.yml automatically
 cd frontend
 npm install
-npm run dev          # Start Vite dev server on localhost:5173
+POSTGREST_HOST_PORT=8418 npm run dev      # Start Vite dev server on localhost:5173
 ```
 
 **Collector (local testing):**

@@ -3,6 +3,8 @@ import {
     AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
     XAxis, YAxis, CartesianGrid, Tooltip, Legend
 } from 'recharts'
+
+const APP_VERSION = import.meta.env.VITE_APP_VERSION || 'dev'
 import { DateRange } from 'react-date-range'
 import { BarGraph, PieGraph, DollarSign, Moon, Sun, Refresh } from './Icons'
 import CredentialStatsCard from './CredentialStatsCard'
@@ -216,7 +218,7 @@ const TREND_CONFIG = {
     cost: { stroke: '#f59e0b', name: 'Cost' },
 }
 
-function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefreshing, lastUpdated, dateRange, onDateRangeChange, customRange, onCustomRangeApply, endpointUsage: rawEndpointUsage, credentialData, credentialTimeSeries, credentialLoading, credentialSetupRequired, onLogout, isAuthenticated, skillRuns, skillDailyStats, appLogs, onClearAllLogs }) {
+function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefreshing, lastUpdated, dateRange, onDateRangeChange, customRange, rangeBoundaries, onCustomRangeApply, endpointUsage: rawEndpointUsage, credentialData, credentialTimeSeries, credentialLoading, credentialSetupRequired, isAuthenticated, skillRuns, skillDailyStats, appLogs, onClearAllLogs, onLogout }) {
     // Auto-select time range based on dateRange: hour for today/yesterday, day for longer ranges
     const defaultTimeRange = (dateRange === 'today' || dateRange === 'yesterday') ? 'hour' : 'day'
 
@@ -904,6 +906,23 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                         <span className="drawer-nav-label">Setup Guide</span>
                     </button>
                 </nav>
+
+                <div className="drawer-footer">
+                    <button className="drawer-logout-btn" onClick={onLogout} title="Logout">
+                        <span className="drawer-nav-icon">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                                <polyline points="16 17 21 12 16 7" />
+                                <line x1="21" y1="12" x2="9" y2="12" />
+                            </svg>
+                        </span>
+                        <span className="drawer-nav-label">Logout</span>
+                    </button>
+                    <div className="drawer-footer-badge">
+                        <span className="drawer-footer-dot"></span>
+                        <span className="drawer-footer-text">Version v{APP_VERSION}</span>
+                    </div>
+                </div>
             </aside>
 
             <div className="content-shell">
@@ -1001,27 +1020,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                     <button className="theme-toggle" onClick={toggleTheme} title="Toggle theme">
                         {isDarkMode ? <Sun /> : <Moon />}
                     </button>
-                    {isAuthenticated && (
-                        <button 
-                            className="logout-btn" 
-                            onClick={onLogout} 
-                            title="Logout"
-                            style={{
-                                padding: '8px 16px',
-                                background: 'rgba(239, 68, 68, 0.1)',
-                                border: '1px solid rgba(239, 68, 68, 0.3)',
-                                borderRadius: '8px',
-                                color: '#ef4444',
-                                cursor: 'pointer',
-                                fontSize: '14px',
-                                fontWeight: '500',
-                                marginLeft: '10px'
-                            }}
-                        >
-                            Logout
-                        </button>
-                    )}
-            </header>
+                </header>
 
                 <div className="page-content">
                     {activeTab === 'usage' ? (
@@ -1745,6 +1744,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                             skillDailyStats={skillDailyStats}
                             dateRange={dateRange}
                             customRange={customRange}
+                            rangeBoundaries={rangeBoundaries}
                             isDarkMode={isDarkMode}
                         />
                     ) : activeTab === 'logs' ? (
@@ -1760,7 +1760,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                     )}
                 </div>
             </div>
-        </div>
+        </div >
     )
 }
 

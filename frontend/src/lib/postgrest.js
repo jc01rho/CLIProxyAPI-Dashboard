@@ -31,6 +31,7 @@ async function request(table, { select = '*', filters = [], order, limit } = {})
   }
 
   const response = await fetch(url.toString(), {
+    credentials: 'include',
     headers: {
       Accept: 'application/json',
     },

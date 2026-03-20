@@ -30,7 +30,7 @@ services:
       PGRST_LOG_LEVEL: warn
       PGRST_SERVER_PORT: 3000
     ports:
-      - "127.0.0.1:3000:3000"  # Dev only: expose for Vite proxy (localhost:5173)
+      - "127.0.0.1:${POSTGREST_HOST_PORT:-8418}:3000"  # Dev only: expose for Vite proxy
     depends_on:
       postgres:
         condition: service_healthy
@@ -40,8 +40,7 @@ services:
 
   # ── Collector: polls CLIProxy, writes to postgres ───────────
   collector:
-    build:
-      context: ./collector
+    image: ghcr.io/leolionart/cliproxy-collector:latest
     platform: linux/amd64
     container_name: cliproxy-collector
     environment:
@@ -51,8 +50,12 @@ services:
       COLLECTOR_INTERVAL_SECONDS: ${COLLECTOR_INTERVAL_SECONDS:-300}
       COLLECTOR_TRIGGER_PORT: 5001
       TIMEZONE_OFFSET_HOURS: ${TIMEZONE_OFFSET_HOURS:-7}
-      AUTH_PASSWORD: ${AUTH_PASSWORD:-}
-      JWT_SECRET: ${JWT_SECRET:-cliproxy-dashboard-secret-key-change-in-production}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      ADMIN_SESSION_TTL_DAYS: ${ADMIN_SESSION_TTL_DAYS:-30}
+      ADMIN_SESSION_COOKIE_NAME: ${ADMIN_SESSION_COOKIE_NAME:-cliproxy_admin_session}
+      ADMIN_SESSION_SECURE_COOKIE: ${ADMIN_SESSION_SECURE_COOKIE:-false}
+      ADMIN_SESSION_SAMESITE: ${ADMIN_SESSION_SAMESITE:-Lax}
+      ADMIN_ALLOWED_ORIGINS: ${ADMIN_ALLOWED_ORIGINS:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
@@ -70,8 +73,7 @@ services:
 
   # ── Frontend: nginx proxies /rest/v1 → postgrest, /api → collector
   frontend:
-    build:
-      context: ./frontend
+    image: ghcr.io/leolionart/cliproxy-dashboard:latest
     platform: linux/amd64
     container_name: cliproxy-dashboard
     ports:

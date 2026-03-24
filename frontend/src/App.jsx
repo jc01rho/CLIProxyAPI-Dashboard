@@ -976,15 +976,20 @@ function App() {
             const mergedDailyArray = Array.from(allDates).map(dateKey => {
                 const fromDB = dailyStatsFromDB[dateKey]
                 const calculated = dailyMap[dateKey]
+                const dayModels = breakdownByDate[dateKey] || {}
+                const fallbackInputTokens = Object.values(dayModels).reduce((sum, model) => sum + (model.input_tokens || 0), 0)
+                const fallbackOutputTokens = Object.values(dayModels).reduce((sum, model) => sum + (model.output_tokens || 0), 0)
 
                 return {
                     stat_date: dateKey,
                     total_requests: fromDB?.total_requests ?? (calculated?.requests || 0),
                     total_tokens: fromDB?.total_tokens ?? (calculated?.tokens || 0),
+                    input_tokens: fromDB?.input_tokens ?? fallbackInputTokens,
+                    output_tokens: fromDB?.output_tokens ?? fallbackOutputTokens,
                     success_count: fromDB?.success_count ?? (calculated?.success || 0),
                     failure_count: fromDB?.failure_count ?? (calculated?.failure || 0),
                     estimated_cost_usd: fromDB?.estimated_cost_usd ?? 0,
-                    models: breakdownByDate[dateKey] || {}
+                    models: dayModels
                 }
             }).sort((a, b) => a.stat_date.localeCompare(b.stat_date))
 

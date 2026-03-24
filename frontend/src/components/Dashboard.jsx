@@ -356,6 +356,8 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
     // Calculate totals from filtered daily stats (properly filtered by date range)
     const totalRequests = filteredDailyStats.reduce((sum, d) => sum + (d.total_requests || 0), 0)
     const totalTokens = filteredDailyStats.reduce((sum, d) => sum + (d.total_tokens || 0), 0)
+    const totalInputTokens = filteredDailyStats.reduce((sum, d) => sum + (d.input_tokens || 0), 0)
+    const totalOutputTokens = filteredDailyStats.reduce((sum, d) => sum + (d.output_tokens || 0), 0)
     const successCount = filteredDailyStats.reduce((sum, d) => sum + (d.success_count || 0), 0)
     const failureCount = filteredDailyStats.reduce((sum, d) => sum + (d.failure_count || 0), 0)
 
@@ -1040,7 +1042,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                                 <StatCard
                                     label="TOTAL TOKENS"
                                     value={formatNumber(totalTokens)}
-                                    meta={`TPM: ${formatNumber(tpm)}`}
+                                    meta={`Input: ${formatNumber(totalInputTokens)} · Output: ${formatNumber(totalOutputTokens)} · TPM ${formatNumber(tpm)}`}
                                     icon={<PieGraph />}
                                     sparklineData={sparklineData}
                                     dataKey="tokens"

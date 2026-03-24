@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS daily_stats (
     success_count BIGINT NOT NULL DEFAULT 0,
     failure_count BIGINT NOT NULL DEFAULT 0,
     total_tokens BIGINT NOT NULL DEFAULT 0,
+    input_tokens BIGINT NOT NULL DEFAULT 0,
+    output_tokens BIGINT NOT NULL DEFAULT 0,
     estimated_cost_usd DECIMAL(20, 6) DEFAULT 0,
     breakdown JSONB,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

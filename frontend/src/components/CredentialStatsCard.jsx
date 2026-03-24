@@ -493,6 +493,7 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
   const [dialogCred, setDialogCred] = useState(null)
   const [sortConfig, setSortConfig] = useState({ key: 'total_requests', dir: 'desc' })
   const [expandedApiKey, setExpandedApiKey] = useState(null)
+  const [topologyReady, setTopologyReady] = useState(false)
   const isDesktop = useIsDesktop(900)
 
   const credentials = data?.credentials || []
@@ -529,6 +530,26 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
     })
     return Object.entries(groups).sort(([, a], [, b]) => b.totalReqs - a.totalReqs)
   }, [credentials])
+
+  useEffect(() => {
+    if (activeView !== 'credentials' || providerGroups.length === 0) {
+      setTopologyReady(true)
+      return
+    }
+
+    setTopologyReady(false)
+    let cancelled = false
+    const frameId = requestAnimationFrame(() => {
+      if (!cancelled) {
+        setTopologyReady(true)
+      }
+    })
+
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(frameId)
+    }
+  }, [activeView, providerGroups])
 
   // API Keys sorting
   const sortedApiKeys = useMemo(() => {
@@ -666,17 +687,80 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
       {activeView === 'credentials' ? (
         <div className="cred-monitor-split">
           <div className="cred-monitor-body">
-            {providerGroups.map(([provider, group]) => (
-              <ProviderTopology
-                key={provider}
-                provider={provider}
-                group={group}
-                selectedCred={selectedCred}
-                onCredClick={handleCredClick}
-              />
-            ))}
+            {topologyReady ? (
+              providerGroups.map(([provider, group]) => (
+                <ProviderTopology
+                  key={provider}
+                  provider={provider}
+                  group={group}
+                  selectedCred={selectedCred}
+                  onCredClick={handleCredClick}
+                />
+              ))
+            ) : (
+              <div style={{ display: 'grid', gap: '14px' }}>
+                {providerGroups.map(([provider, group]) => {
+                  const providerMeta = getProviderDisplay(provider)
+                  const providerColor = getProviderHex(provider)
+                  return (
+                    <div
+                      key={provider}
+                      style={{
+                        border: '1px solid var(--color-border)',
+                        borderRadius: '18px',
+                        padding: '18px 20px',
+                        background: 'linear-gradient(180deg, rgba(148,163,184,0.06), rgba(148,163,184,0.02))',
+                        boxShadow: '0 10px 30px rgba(0,0,0,0.12)',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', marginBottom: '12px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
+                          <div
+                            style={{
+                              width: '38px',
+                              height: '38px',
+                              borderRadius: '999px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              background: providerColor,
+                              color: '#fff',
+                              fontWeight: 700,
+                              flexShrink: 0,
+                            }}
+                          >
+                            {providerMeta.name.charAt(0)}
+                          </div>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontSize: '0.95rem', fontWeight: 700 }}>{getProviderSubtitle(provider, group.credentials[0])}</div>
+                            <div style={{ fontSize: '0.72rem', opacity: 0.72, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                              Loading topology…
+                            </div>
+                          </div>
+                        </div>
+                        <div style={{ fontSize: '0.8rem', opacity: 0.8, whiteSpace: 'nowrap' }}>
+                          {group.credentials.length} accounts
+                        </div>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px' }}>
+                        <div>
+                          <div style={{ fontSize: '0.72rem', opacity: 0.7 }}>Requests</div>
+                          <div style={{ fontSize: '1rem', fontWeight: 700 }}>{formatNumber(group.totalReqs)}</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '0.72rem', opacity: 0.7 }}>Top account</div>
+                          <div style={{ fontSize: '0.9rem', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {getCredDisplayName(group.credentials[0])}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
           </div>
-          {isDesktop && dialogCred && (
+          {isDesktop && dialogCred && topologyReady && (
             <CredentialDetailPanel
               cred={dialogCred}
               onClose={() => { setDialogCred(null); setSelectedCred(null) }}

@@ -714,77 +714,23 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
         setMenuOpen(false)
     }
 
-    // AI Boot Sequence loading screen
-    const bootLines = useMemo(() => [
-        { text: '> Initializing CLIProxy Dashboard v2.4.0...', type: 'system' },
-        { text: '  ✓ PostgreSQL connection pool established', type: 'success' },
-        { text: '  ✓ PostgREST API endpoint verified', type: 'success' },
-        { text: '> Loading model pricing matrix...', type: 'system' },
-        { text: '  ✓ 24 models configured (OpenAI, Anthropic, Google, DeepSeek)', type: 'success' },
-        { text: '> Querying usage snapshots...', type: 'system' },
-        { text: '  → Fetching daily_stats for date range', type: 'info' },
-        { text: '  → Calculating token deltas & cost aggregation', type: 'info' },
-        { text: '  ✓ Data pipeline ready', type: 'success' },
-        { text: '> Rendering dashboard components...', type: 'system' },
-        { text: '  ✓ Charts initialized', type: 'success' },
-        { text: '> System online. Welcome back.', type: 'final' },
-    ], [])
-
-    const [bootStep, setBootStep] = useState(0)
-    const bootTimers = useRef([])
-
-    useEffect(() => {
-        if (!loading) {
-            bootTimers.current.forEach(clearTimeout)
-            bootTimers.current = []
-            return
-        }
-        setBootStep(0)
-        let cumulative = 0
-        bootLines.forEach((_, i) => {
-            const delay = i === 0 ? 200 : (bootLines[i].type === 'system' ? 250 : 100) + Math.random() * 150
-            cumulative += delay
-            const t = setTimeout(() => setBootStep(i + 1), cumulative)
-            bootTimers.current.push(t)
-        })
-        return () => {
-            bootTimers.current.forEach(clearTimeout)
-            bootTimers.current = []
-        }
-    }, [loading, bootLines])
-
-    if (loading) {
-        return (
-            <div className={`dashboard ${isDarkMode ? 'dark' : 'light'}`}>
-                <div className="loading ai-boot-screen">
-                    <div className="boot-terminal">
-                        <div className="boot-header">
-                            <span className="boot-dot red"></span>
-                            <span className="boot-dot yellow"></span>
-                            <span className="boot-dot green"></span>
-                            <span className="boot-title">cliproxy-dashboard — boot</span>
-                        </div>
-                        <div className="boot-body">
-                            {bootLines.slice(0, bootStep).map((line, i) => (
-                                <div
-                                    key={i}
-                                    className={`boot-line boot-${line.type} ${i === bootStep - 1 ? 'boot-latest' : ''}`}
-                                >
-                                    {line.text}
-                                </div>
-                            ))}
-                            {bootStep < bootLines.length && (
-                                <span className="boot-cursor">▋</span>
-                            )}
-                        </div>
-                    </div>
-                </div>
-            </div>
-        )
-    }
-
     return (
         <div className={`dashboard ${isDarkMode ? 'dark' : 'light'} ${menuOpen ? 'drawer-open' : ''}`}>
+            {loading && (
+                <div className="loading" style={{
+                    position: 'fixed',
+                    inset: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    background: isDarkMode ? 'rgba(2, 6, 23, 0.28)' : 'rgba(255, 255, 255, 0.45)',
+                    backdropFilter: 'blur(2px)',
+                    zIndex: 30,
+                    pointerEvents: 'none',
+                }}>
+                    <div className="spinner" />
+                </div>
+            )}
             <div className={`drawer-overlay ${menuOpen ? 'visible' : ''}`} onClick={() => setMenuOpen(false)}></div>
 
             {/* Invisible hover trigger on the left edge when unpinned */}

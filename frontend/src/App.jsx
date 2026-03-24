@@ -1247,7 +1247,10 @@ function App() {
     useEffect(() => {
         if (!authState.authenticated) return
         fetchData(dateRange, true)
-        fetchCredentialStats(dateRange)
+        const timer = setTimeout(() => {
+            fetchCredentialStats(dateRange)
+        }, 0)
+        return () => clearTimeout(timer)
     }, [authState.authenticated, dateRange, fetchData, fetchCredentialStats])
 
     useEffect(() => {

@@ -486,7 +486,7 @@ function CredentialDetailPanel({ cred, onClose }) {
 /* ================================================================
    Main Exported Component
    ================================================================ */
-export default function CredentialStatsCard({ onRowClick, data, timeSeries, dateRange, isLoading, setupRequired }) {
+export default function CredentialStatsCard({ onRowClick, data, timeSeries, dateRange, isLoading, isSeriesLoading, setupRequired, onViewStateChange }) {
   const [activeView, setActiveView] = useState('credentials')
   const [apiKeysSubView, setApiKeysSubView] = useState('overview')
   const [selectedCred, setSelectedCred] = useState(null)
@@ -500,6 +500,13 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
   const apiKeyDailySeries = timeSeries?.byDay || []
   const apiKeyHourlySeries = timeSeries?.byHour || []
   const hasRawSnapshots = timeSeries?.meta?.hasRawSnapshots !== false
+  const hourlySupported = timeSeries?.meta?.hourlySupported !== false
+  const dailyLoaded = timeSeries?.meta?.dailyLoaded === true
+  const hourlyLoaded = timeSeries?.meta?.hourlyLoaded === true
+
+  useEffect(() => {
+    onViewStateChange?.({ activeView, apiKeysSubView })
+  }, [activeView, apiKeysSubView, onViewStateChange])
 
   // Summary stats
   const summary = useMemo(() => {
@@ -604,7 +611,9 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
         <ViewTabs activeView={activeView} onSwitch={(v) => {
           setActiveView(v)
           setSelectedCred(null)
-          if (v !== 'api_keys') setApiKeysSubView('overview')
+          if (v !== 'api_keys') {
+            setApiKeysSubView('overview')
+          }
         }} />
       </div>
 
@@ -711,11 +720,17 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
           )}
 
           {apiKeysSubView === 'by_day' && (
-            <ApiKeyTimeSeriesChart
-              rows={apiKeyDailySeries}
-              bucketKey="stat_date"
-              emptyMessage="No daily API key data in selected range"
-            />
+            isSeriesLoading && !dailyLoaded ? (
+              <div className="cred-time-empty">
+                Loading daily API key trend data...
+              </div>
+            ) : (
+              <ApiKeyTimeSeriesChart
+                rows={apiKeyDailySeries}
+                bucketKey="stat_date"
+                emptyMessage="No daily API key data in selected range"
+              />
+            )
           )}
 
           {apiKeysSubView === 'by_hour' && (
@@ -725,7 +740,15 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
                   Tip: By Hour is most useful for today/yesterday to spot request peaks quickly.
                 </div>
               )}
-              {!hasRawSnapshots ? (
+              {!hourlySupported ? (
+                <div className="cred-time-empty">
+                  Hourly view is only available for today, yesterday, or a single custom day. Overview and By Day stay available for longer ranges.
+                </div>
+              ) : isSeriesLoading && !hourlyLoaded ? (
+                <div className="cred-time-empty">
+                  Loading hourly API key trend data...
+                </div>
+              ) : !hasRawSnapshots ? (
                 <div className="cred-time-empty">
                   Hourly view needs usage snapshots with raw_data. Overview and By Day are still available.
                 </div>

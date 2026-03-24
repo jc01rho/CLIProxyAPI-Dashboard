@@ -40,7 +40,8 @@ services:
 
   # ── Collector: polls CLIProxy, writes to postgres ───────────
   collector:
-    image: ghcr.io/leolionart/cliproxy-collector:latest
+    build:
+      context: ./collector
     platform: linux/amd64
     container_name: cliproxy-collector
     environment:
@@ -73,7 +74,8 @@ services:
 
   # ── Frontend: nginx proxies /rest/v1 → postgrest, /api → collector
   frontend:
-    image: ghcr.io/leolionart/cliproxy-dashboard:latest
+    build:
+      context: ./frontend
     platform: linux/amd64
     container_name: cliproxy-dashboard
     ports:

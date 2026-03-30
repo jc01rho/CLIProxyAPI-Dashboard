@@ -124,7 +124,7 @@ Notes:
 - The dashboard still uses `/api/collector/*` for admin login, health checks, trigger, and logs.
 - Supabase mode bypasses local `/rest/v1` reads and uses `@supabase/supabase-js` in the browser.
 - Collector uses the Python Supabase client with `SUPABASE_SECRET_KEY` in this mode.
-- Your Supabase project must expose the same tables/views used by the dashboard and allow the publishable key to read them through RLS/policies as needed.
+- Your Supabase project must have the required tables. Run `init-db/schema.supabase.sql` in the Supabase SQL Editor to create them with proper RLS policies.
 - In Supabase mode you do not need the `localdb` compose profile.
 
 Start Supabase mode with:

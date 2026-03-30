@@ -74,6 +74,11 @@ class QueryBuilder:
         self._data = data
         return self
 
+    def delete(self) -> 'QueryBuilder':
+        self._operation = 'delete'
+        self._data = None
+        return self
+
     def upsert(self, data: Dict, on_conflict: Optional[str] = None) -> 'QueryBuilder':
         self._operation = 'upsert'
         self._data = data
@@ -125,10 +130,12 @@ class QueryBuilder:
                     result = self._exec_insert(cur)
                 elif self._operation == 'update':
                     result = self._exec_update(cur)
+                elif self._operation == 'delete':
+                    result = self._exec_delete(cur)
                 elif self._operation == 'upsert':
                     result = self._exec_upsert(cur)
                 else:
-                    raise ValueError(f"No operation set. Call select/insert/update/upsert first.")
+                    raise ValueError(f"No operation set. Call select/insert/update/delete/upsert first.")
             conn.commit()
             return result
         except Exception:
@@ -210,6 +217,17 @@ class QueryBuilder:
         sql += ' RETURNING *'
 
         cur.execute(sql, vals + where_params)
+        rows = [dict(r) for r in cur.fetchall()]
+        return QueryResult(data=rows)
+
+    def _exec_delete(self, cur) -> QueryResult:
+        where_parts, where_params = self._build_where()
+        sql = f'DELETE FROM "{self._table}"'
+        if where_parts:
+            sql += ' WHERE ' + ' AND '.join(where_parts)
+        sql += ' RETURNING *'
+
+        cur.execute(sql, where_params)
         rows = [dict(r) for r in cur.fetchall()]
         return QueryResult(data=rows)
 

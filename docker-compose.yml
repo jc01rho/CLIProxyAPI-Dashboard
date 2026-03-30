@@ -18,13 +18,14 @@ services:
       retries: 10
       start_period: 30s
     restart: unless-stopped
+    profiles: ["localdb"]
 
   # ── REST API layer (read-only, anonymous) ───────────────────
   postgrest:
     image: postgrest/postgrest:v12.2.3
     container_name: cliproxy-postgrest
     environment:
-      PGRST_DB_URI: postgres://cliproxy:${DB_PASSWORD}@postgres:5432/cliproxy
+      PGRST_DB_URI: ${PGRST_DB_URI:-postgres://cliproxy:${DB_PASSWORD}@postgres:5432/cliproxy}
       PGRST_DB_ANON_ROLE: web_anon
       PGRST_DB_SCHEMA: public
       PGRST_LOG_LEVEL: warn
@@ -37,6 +38,7 @@ services:
       collector:
         condition: service_healthy
     restart: unless-stopped
+    profiles: ["localdb"]
 
   # ── Collector: polls CLIProxy, writes to postgres ───────────
   collector:
@@ -45,7 +47,10 @@ services:
     platform: linux/amd64
     container_name: cliproxy-collector
     environment:
-      DATABASE_URL: postgres://cliproxy:${DB_PASSWORD}@postgres:5432/cliproxy
+      DATABASE_PROVIDER: ${DATABASE_PROVIDER:-local}
+      DATABASE_URL: ${DATABASE_URL:-postgres://cliproxy:${DB_PASSWORD}@postgres:5432/cliproxy}
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SECRET_KEY: ${SUPABASE_SECRET_KEY:-}
       CLIPROXY_URL: ${CLIPROXY_URL:-http://host.docker.internal:8317}
       CLIPROXY_MANAGEMENT_KEY: ${CLIPROXY_MANAGEMENT_KEY}
       COLLECTOR_INTERVAL_SECONDS: ${COLLECTOR_INTERVAL_SECONDS:-300}
@@ -65,9 +70,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
-    depends_on:
-      postgres:
-        condition: service_healthy
     restart: unless-stopped
     labels:
       com.centurylinklabs.watchtower.enable: "true"
@@ -78,13 +80,18 @@ services:
       context: ./frontend
     platform: linux/amd64
     container_name: cliproxy-dashboard
+    environment:
+      DATABASE_PROVIDER: ${DATABASE_PROVIDER:-local}
+      VITE_DATABASE_PROVIDER: ${VITE_DATABASE_PROVIDER:-}
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      VITE_SUPABASE_URL: ${VITE_SUPABASE_URL:-}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
+      VITE_SUPABASE_PUBLISHABLE_KEY: ${VITE_SUPABASE_PUBLISHABLE_KEY:-}
     ports:
       - "${DASHBOARD_PORT:-8417}:80"
     depends_on:
       collector:
         condition: service_healthy
-      postgrest:
-        condition: service_started
     restart: unless-stopped
     labels:
       com.centurylinklabs.watchtower.enable: "true"

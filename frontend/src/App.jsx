@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import { selectRows, selectSingle } from './lib/postgrest'
+import { selectRows, selectSingle } from './lib/database'
 import Dashboard from './components/Dashboard'
 
 const APP_LOGS_PAGE_SIZE = Number(import.meta.env.VITE_APP_LOGS_PAGE_SIZE || 500)

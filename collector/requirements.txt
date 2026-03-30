@@ -1,5 +1,6 @@
 requests
 psycopg2-binary
+supabase
 python-dateutil
 flask
 flask-cors

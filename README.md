@@ -8,19 +8,20 @@ Real-time dashboard for monitoring CLIProxy usage, token consumption, estimated 
 
 ## What this project includes
 
-- **Collector (Python/Flask)**: polls CLIProxy Management API, computes deltas/costs, writes to PostgreSQL
+- **Collector (Python/Flask)**: polls CLIProxy Management API, computes deltas/costs, writes to local PostgreSQL or Supabase
 - **Frontend (React + Nginx)**: charts and analytics UI
-- **PostgreSQL**: self-hosted DB initialized from `init-db/schema.sql`
-- **PostgREST**: read-only API layer for frontend
+- **PostgreSQL**: self-hosted DB initialized from `init-db/schema.sql` when using local mode
+- **PostgREST**: read-only API layer for frontend in local mode
 - **Skill tracker plugin distribution** via marketplace + submodule (`plugin/claude-skills-tracker`)
 
 ## Architecture
 
 ```text
-CLIProxy API → Collector (Python) → PostgreSQL
+CLIProxy API → Collector (Python) → local PostgreSQL or Supabase
 Browser → Nginx:8417
-          ├── /rest/v1/*       → PostgREST:3000 → PostgreSQL (read)
-          └── /api/collector/* → collector:5001 (write/trigger)
+          ├── local mode: /rest/v1/*       → PostgREST:3000 → PostgreSQL (read)
+          ├── supabase mode: frontend      → Supabase REST (read)
+          └── /api/collector/*             → collector:5001 (write/trigger)
 ```
 
 ---
@@ -68,6 +69,8 @@ cp .env.example .env
 Edit `.env`:
 
 ```env
+DATABASE_PROVIDER=local
+VITE_DATABASE_PROVIDER=local
 DB_PASSWORD=your_secure_password_here
 CLIPROXY_URL=http://host.docker.internal:8317
 CLIPROXY_MANAGEMENT_KEY=<your-management-secret>
@@ -87,21 +90,48 @@ Notes:
 - If you deploy behind HTTPS, set `ADMIN_SESSION_SECURE_COOKIE=true`.
 - Default host port for PostgREST is now `8418` to avoid common conflicts on `3000`. Override with `POSTGREST_HOST_PORT` if needed.
 - `ADMIN_ALLOWED_ORIGINS` is optional. Leave it empty for the default same-compose setup; set it only if you want stricter Origin/Referer enforcement.
+- For local mode, services `postgres` and `postgrest` run under the `localdb` compose profile.
+- To use Supabase mode, set `DATABASE_PROVIDER=supabase` and provide `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `SUPABASE_PUBLISHABLE_KEY`.
 
 ### 5) Start services
 ```bash
-docker compose up -d
+COMPOSE_PROFILES=localdb docker compose up -d
 ```
 
 Open dashboard at: **http://localhost:8417**
 
-Expected startup order:
+Expected startup order in local mode:
 1. `postgres` healthy
 2. `collector` healthy (DB init + migrations)
 3. `postgrest` starts
 4. `frontend` starts
 
 > First data usually appears after the first collector interval.
+
+### Optional: run with Supabase as database
+
+If you want both collector and dashboard reads to use Supabase again:
+
+```env
+DATABASE_PROVIDER=supabase
+VITE_DATABASE_PROVIDER=supabase
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SECRET_KEY=<your-service-role-key>
+SUPABASE_PUBLISHABLE_KEY=<your-publishable-key>
+```
+
+Notes:
+- The dashboard still uses `/api/collector/*` for admin login, health checks, trigger, and logs.
+- Supabase mode bypasses local `/rest/v1` reads and uses `@supabase/supabase-js` in the browser.
+- Collector uses the Python Supabase client with `SUPABASE_SECRET_KEY` in this mode.
+- Your Supabase project must expose the same tables/views used by the dashboard and allow the publishable key to read them through RLS/policies as needed.
+- In Supabase mode you do not need the `localdb` compose profile.
+
+Start Supabase mode with:
+
+```bash
+docker compose up -d collector frontend
+```
 
 ---
 
@@ -246,12 +276,44 @@ For source-only changes, prefer bind mounts + service restart. Rebuild images on
 docker compose up -d postgres postgrest
 cd frontend
 npm install
-POSTGREST_HOST_PORT=8418 npm run dev
+DATABASE_PROVIDER=local VITE_DATABASE_PROVIDER=local POSTGREST_HOST_PORT=8418 npm run dev
 ```
 
 Open Vite dev UI at `http://localhost:5173`.
 
 > Keep the local collector running too. Vite dev proxy now checks the same auth session flow as production, so `/rest/v1/*` stays locked until you log in.
+
+For Supabase dev mode:
+
+```bash
+VITE_DATABASE_PROVIDER=supabase \
+SUPABASE_URL=https://<project-ref>.supabase.co \
+SUPABASE_PUBLISHABLE_KEY=<your-publishable-key> \
+npm run dev
+```
+
+Collector with Supabase in local development:
+
+```bash
+cd collector
+SUPABASE_URL=https://<project-ref>.supabase.co \
+SUPABASE_SECRET_KEY=<your-service-role-key> \
+DATABASE_PROVIDER=supabase \
+python main.py
+```
+
+If you run the collector outside Docker, install Python dependencies first and then run it, for example:
+
+```bash
+cd collector
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+DATABASE_PROVIDER=supabase \
+SUPABASE_URL=https://<project-ref>.supabase.co \
+SUPABASE_SECRET_KEY=<your-service-role-key> \
+python main.py
+```
 
 ### Collector (local)
 

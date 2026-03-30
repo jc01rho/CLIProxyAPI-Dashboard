@@ -25,6 +25,7 @@ from db import PostgreSQLClient
 from credential_stats_sync import sync_credential_stats
 from waitress import serve
 from apscheduler.schedulers.background import BackgroundScheduler
+from supabase import create_client
 
 # Configurable timezone via environment variable (default: UTC+7 for Vietnam)
 TIMEZONE_OFFSET_HOURS = int(os.environ.get("TIMEZONE_OFFSET_HOURS", "7"))
@@ -52,7 +53,10 @@ def _env_int(name: str, default: int, min_value: int = 1) -> int:
 
 
 # Configuration from environment
+DATABASE_PROVIDER = str(os.getenv("DATABASE_PROVIDER", "local")).strip().lower() or "local"
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY", "")
 CLIPROXY_URL = os.getenv("CLIPROXY_URL", "http://localhost:8317")
 CLIPROXY_MANAGEMENT_KEY = os.getenv("CLIPROXY_MANAGEMENT_KEY", "")
 COLLECTOR_INTERVAL = _env_int("COLLECTOR_INTERVAL_SECONDS", 60)
@@ -137,7 +141,7 @@ DEFAULT_PRICING = {
 LLM_PRICES_URL = "https://www.llm-prices.com/current-v1.json"
 
 # --- Globals ---
-db_client: Optional[PostgreSQLClient] = None
+db_client: Optional[Any] = None
 remote_pricing_cache: Dict[str, Dict[str, float]] = {}
 remote_pricing_last_fetch: float = 0
 
@@ -466,19 +470,14 @@ def _cleanup_old_app_logs() -> int:
     cutoff_local = now_local - timedelta(days=APP_LOG_RETENTION_DAYS)
     cutoff_utc = cutoff_local.astimezone(timezone.utc).isoformat()
 
-    conn = db_client._pool.getconn()
     try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM app_logs WHERE logged_at < %s", (cutoff_utc,))
-            deleted = cur.rowcount or 0
-        conn.commit()
-        return deleted
+        deleted_rows = (
+            db_client.table("app_logs").delete().lt("logged_at", cutoff_utc).execute().data
+        ) or []
+        return len(deleted_rows)
     except Exception as e:
-        conn.rollback()
         logger.error(f"Failed to cleanup old app logs: {e}", exc_info=True)
         return 0
-    finally:
-        db_client._pool.putconn(conn)
 
 
 def _normalize_app_log_event(evt: Any) -> Optional[Dict[str, Any]]:
@@ -551,8 +550,22 @@ def _log_app_event(
 @api_bp.route("/health", methods=["GET"])
 def health_check():
     """Health check endpoint."""
+    database = {"provider": DATABASE_PROVIDER, "connected": False}
+
+    if db_client:
+        try:
+            db_client.table("admin_sessions").select("id").limit(1).execute()
+            database["connected"] = True
+        except Exception as e:
+            database["error"] = str(e)
+
+    status = "healthy" if database["connected"] else "degraded"
     return jsonify(
-        {"status": "healthy", "timestamp": datetime.now(APP_TIMEZONE).isoformat()}
+        {
+            "status": status,
+            "timestamp": datetime.now(APP_TIMEZONE).isoformat(),
+            "database": database,
+        }
     )
 
 
@@ -680,12 +693,9 @@ def clear_logs_endpoint():
     if clear_scope != "all":
         return jsonify({"error": "scope must be all"}), 400
 
-    conn = db_client._pool.getconn()
     try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM app_logs")
-            deleted = cur.rowcount or 0
-        conn.commit()
+        deleted_rows = db_client.table("app_logs").delete().execute().data or []
+        deleted = len(deleted_rows)
 
         _log_app_event(
             source="collector",
@@ -698,11 +708,8 @@ def clear_logs_endpoint():
 
         return jsonify({"status": "ok", "deleted": deleted})
     except Exception as e:
-        conn.rollback()
         logger.error(f"Failed to clear app logs: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
-    finally:
-        db_client._pool.putconn(conn)
 
 
 @api_bp.route("/log-events", methods=["POST"])
@@ -1081,7 +1088,14 @@ def fetch_remote_pricing() -> Dict[str, Dict[str, float]]:
     return {}
 
 
-def init_db() -> PostgreSQLClient:
+def init_db() -> Any:
+    if DATABASE_PROVIDER == "supabase":
+        if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
+            raise ValueError(
+                "SUPABASE_URL and SUPABASE_SECRET_KEY must be set when DATABASE_PROVIDER=supabase"
+            )
+        return create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
+
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL must be set")
     return PostgreSQLClient(DATABASE_URL)
@@ -1997,8 +2011,9 @@ def main():
     # Initialize PostgreSQL
     try:
         db_client = init_db()
-        logger.info("PostgreSQL client initialized.")
-        db_client.run_migrations()
+        logger.info("Database client initialized for provider=%s.", DATABASE_PROVIDER)
+        if DATABASE_PROVIDER == "local" and hasattr(db_client, "run_migrations"):
+            db_client.run_migrations()
         deleted = _cleanup_old_app_logs()
         if deleted > 0:
             logger.info(
@@ -2006,7 +2021,7 @@ def main():
             )
     except Exception as e:
         logger.critical(
-            f"CRITICAL: Failed to initialize PostgreSQL: {e}", exc_info=True
+            f"CRITICAL: Failed to initialize database provider '{DATABASE_PROVIDER}': {e}", exc_info=True
         )
         return
 

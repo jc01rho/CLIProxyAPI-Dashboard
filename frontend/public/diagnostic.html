@@ -59,11 +59,13 @@
         </div>
     </div>
 
+    <script src="/app-config.js"></script>
     <script type="module">
         // Check environment variables
         const envCheck = document.getElementById('env-check');
-        const supabaseUrl = import.meta.env.SUPABASE_URL;
-        const supabaseKey = import.meta.env.SUPABASE_PUBLISHABLE_KEY;
+        const runtimeConfig = window.__APP_CONFIG__ || {};
+        const supabaseUrl = runtimeConfig.VITE_SUPABASE_URL || runtimeConfig.SUPABASE_URL || '';
+        const supabaseKey = runtimeConfig.VITE_SUPABASE_PUBLISHABLE_KEY || runtimeConfig.SUPABASE_PUBLISHABLE_KEY || '';
 
         let envHtml = '';
         if (supabaseUrl) {
@@ -78,7 +80,7 @@
             envHtml += `<div class="status error">❌ SUPABASE_PUBLISHABLE_KEY: Not found</div>`;
         }
 
-        envHtml += `<div class="status info">ℹ️ All env vars: <pre>${JSON.stringify(import.meta.env, null, 2)}</pre></div>`;
+        envHtml += `<div class="status info">ℹ️ Runtime config: <pre>${JSON.stringify(runtimeConfig, null, 2)}</pre></div>`;
         envCheck.innerHTML = envHtml;
 
         // Make test functions available globally

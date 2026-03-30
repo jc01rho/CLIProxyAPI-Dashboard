@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react'
 import pkg from './package.json'
 
 const devBypassAuth = String(process.env.VITE_DEV_BYPASS_AUTH || '').toLowerCase() === 'true'
+const databaseProvider = String(process.env.DATABASE_PROVIDER || process.env.VITE_DATABASE_PROVIDER || 'local').toLowerCase()
 
 const authBypassPaths = new Set([
     '/api/collector/health',
@@ -24,6 +25,7 @@ export default defineConfig({
         port: 5173,
         proxy: {
             // PostgREST — proxied by nginx in prod, and gated via collector auth in dev
+            ...(databaseProvider === 'local' ? {
             '/rest/v1': {
                 target: `http://localhost:${process.env.POSTGREST_HOST_PORT || '8418'}`,
                 rewrite: (path) => path.replace(/^\/rest\/v1/, ''),
@@ -60,6 +62,7 @@ export default defineConfig({
                     })
                 },
             },
+            } : {}),
             // Collector API — keep cookie/session semantics same as production
             '/api/collector': {
                 target: 'http://localhost:5001',

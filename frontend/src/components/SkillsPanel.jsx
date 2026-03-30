@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AreaChart, Area, CartesianGrid, XAxis, YAxis, Tooltip, ResponsiveContainer, ComposedChart, Bar, Line } from 'recharts'
-import { selectRows } from '../lib/postgrest'
+import { selectRows } from '../lib/database'
 import { CHART_COLORS, CHART_TYPOGRAPHY } from '../lib/brandColors'
 import ChartDialog from './ChartDialog'
 import DrilldownPanel from './DrilldownPanel'

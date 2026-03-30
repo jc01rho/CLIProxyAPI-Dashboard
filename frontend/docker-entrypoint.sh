@@ -17,3 +17,11 @@ EOF
 }
 
 write_config
+
+NGINX_CONF="/etc/nginx/conf.d/default.conf"
+PROVIDER="${DATABASE_PROVIDER:-${VITE_DATABASE_PROVIDER:-local}}"
+
+if [ "$PROVIDER" = "supabase" ]; then
+  sed -i '/upstream postgrest_backend/,/}/c\upstream postgrest_backend {\n    server 127.0.0.1:1;\n}' "$NGINX_CONF"
+  sed -i 's|proxy_pass http://postgrest_backend/;|return 404;|' "$NGINX_CONF"
+fi

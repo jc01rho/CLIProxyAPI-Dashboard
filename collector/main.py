@@ -99,6 +99,7 @@ LOG_DEBUG_EVENTS_MAX_PER_SYNC = _env_int(
     "LOG_DEBUG_EVENTS_MAX_PER_SYNC", 200, min_value=0
 )
 APP_LOG_RETENTION_DAYS = _env_int("APP_LOG_RETENTION_DAYS", 30)
+RAW_DATA_RETENTION_DAYS = _env_int("RAW_DATA_RETENTION_DAYS", 7)
 
 
 # Default pricing (USD per 1M tokens) - Updated Dec 2024
@@ -478,6 +479,73 @@ def _cleanup_old_app_logs() -> int:
     except Exception as e:
         logger.error(f"Failed to cleanup old app logs: {e}", exc_info=True)
         return 0
+
+
+def _cleanup_old_raw_data() -> Dict[str, int]:
+    """Cleanup old raw data: usage_snapshots, model_usage, skill_runs.
+    
+    Aggregate tables (daily_stats, skill_daily_stats, credential_daily_stats) are preserved.
+    
+    Returns:
+        Dict with counts of deleted rows per table.
+    """
+    if not db_client:
+        return {"snapshots": 0, "model_usage": 0, "skill_runs": 0}
+
+    now_local = datetime.now(APP_TIMEZONE)
+    cutoff_local = now_local - timedelta(days=RAW_DATA_RETENTION_DAYS)
+    cutoff_utc = cutoff_local.astimezone(timezone.utc).isoformat()
+
+    result = {"snapshots": 0, "model_usage": 0, "skill_runs": 0}
+
+    try:
+        old_snapshots = (
+            db_client.table("usage_snapshots")
+            .select("id")
+            .lt("collected_at", cutoff_utc)
+            .execute()
+            .data
+        ) or []
+        
+        snapshot_ids = [s["id"] for s in old_snapshots]
+        result["snapshots"] = len(snapshot_ids)
+
+        if snapshot_ids:
+            for snapshot_id in snapshot_ids:
+                try:
+                    db_client.table("model_usage").delete().eq("snapshot_id", snapshot_id).execute()
+                except Exception:
+                    pass
+            
+            for snapshot_id in snapshot_ids:
+                try:
+                    db_client.table("usage_snapshots").delete().eq("id", snapshot_id).execute()
+                except Exception:
+                    pass
+
+    except Exception as e:
+        logger.error(f"Failed to cleanup old snapshots: {e}", exc_info=True)
+
+    try:
+        deleted_skill_runs = (
+            db_client.table("skill_runs")
+            .delete()
+            .lt("triggered_at", cutoff_utc)
+            .execute()
+            .data
+        ) or []
+        result["skill_runs"] = len(deleted_skill_runs)
+    except Exception as e:
+        logger.error(f"Failed to cleanup old skill_runs: {e}", exc_info=True)
+
+    total = result["snapshots"] + result["skill_runs"]
+    if total > 0:
+        logger.info(
+            f"Raw data cleanup: {result['snapshots']} snapshots (with model_usage), "
+            f"{result['skill_runs']} skill_runs older than {RAW_DATA_RETENTION_DAYS} days"
+        )
+
+    return result
 
 
 def _normalize_app_log_event(evt: Any) -> Optional[Dict[str, Any]]:
@@ -2054,6 +2122,15 @@ def main():
         next_run_time=datetime.now() + timedelta(seconds=20),
     )
 
+    # Cleanup old raw data (snapshots, model_usage, skill_runs) daily
+    scheduler.add_job(
+        _cleanup_old_raw_data,
+        "interval",
+        hours=24,
+        id="raw_data_cleanup",
+        next_run_time=datetime.now() + timedelta(seconds=30),
+    )
+
     scheduler.start()
     logger.info(f"Background sync scheduled every {COLLECTOR_INTERVAL} seconds.")
     logger.info(
@@ -2061,6 +2138,9 @@ def main():
     )
     logger.info(
         f"App logs cleanup scheduled every {APP_LOG_CLEANUP_INTERVAL_MINUTES} minute(s) (retention={APP_LOG_RETENTION_DAYS} day(s))."
+    )
+    logger.info(
+        f"Raw data cleanup scheduled every 24h (retention={RAW_DATA_RETENTION_DAYS} day(s))."
     )
 
     # Start the Flask app using Waitress

@@ -522,7 +522,7 @@ def _plan_historical_snapshot_compaction(
 
 
 def _run_maintenance_vacuum() -> None:
-    """Run VACUUM ANALYZE on cleanup tables if MAINTENANCE_DATABASE_URL is set."""
+    """Run VACUUM (ANALYZE, TRUNCATE ON) on cleanup tables if MAINTENANCE_DATABASE_URL is set."""
     if not MAINTENANCE_DATABASE_URL:
         return
     

@@ -536,10 +536,10 @@ def _run_maintenance_vacuum() -> None:
         tables = ["app_logs", "usage_snapshots", "model_usage", "skill_runs"]
         for table in tables:
             try:
-                cursor.execute(f"VACUUM ANALYZE {table}")
-                logger.info(f"Maintenance: VACUUM ANALYZE {table} completed")
+                cursor.execute(f"VACUUM (ANALYZE, TRUNCATE ON) {table}")
+                logger.info(f"Maintenance: VACUUM (ANALYZE, TRUNCATE ON) {table} completed")
             except Exception as e:
-                logger.warning(f"Maintenance: VACUUM ANALYZE {table} failed: {e}")
+                logger.warning(f"Maintenance: VACUUM (ANALYZE, TRUNCATE ON) {table} failed: {e}")
         
         cursor.close()
         conn.close()

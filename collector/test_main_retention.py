@@ -146,6 +146,24 @@ def _install_dependency_stubs() -> None:
     supabase.create_client = lambda *args, **kwargs: None
     sys.modules.setdefault("supabase", supabase)
 
+    psycopg2 = types.ModuleType("psycopg2")
+    
+    class MockCursor:
+        def execute(self, sql):
+            pass
+        def close(self):
+            pass
+    
+    class MockConn:
+        autocommit = True
+        def cursor(self):
+            return MockCursor()
+        def close(self):
+            pass
+    
+    psycopg2.connect = lambda url: MockConn()
+    sys.modules.setdefault("psycopg2", psycopg2)
+
 
 def _load_module():
     _RecordedScheduler.instances = []
@@ -250,6 +268,36 @@ class RetentionTests(unittest.TestCase):
         result = self.module._cleanup_old_raw_data()
         self.assertIsInstance(result, dict)
         self.assertEqual(vacuum_calls, ["called"])
+
+    def test_maintenance_vacuum_uses_truncate_on(self):
+        executed_sqls = []
+        
+        class MockCursor:
+            def execute(self, sql):
+                executed_sqls.append(sql)
+            def close(self):
+                pass
+        
+        class MockConn:
+            autocommit = True
+            def cursor(self):
+                return MockCursor()
+            def close(self):
+                pass
+        
+        import psycopg2
+        original_connect = psycopg2.connect
+        psycopg2.connect = lambda url: MockConn()
+        
+        try:
+            self.module.MAINTENANCE_DATABASE_URL = "postgresql://test"
+            self.module._run_maintenance_vacuum()
+            
+            for sql in executed_sqls:
+                self.assertIn("TRUNCATE ON", sql)
+                self.assertIn("ANALYZE", sql)
+        finally:
+            psycopg2.connect = original_connect
 
 
 if __name__ == "__main__":

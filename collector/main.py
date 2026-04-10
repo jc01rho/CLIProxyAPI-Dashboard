@@ -98,7 +98,7 @@ LOG_DEBUG_EVENTS = str(os.getenv("LOG_DEBUG_EVENTS", "false")).strip().lower() i
 LOG_DEBUG_EVENTS_MAX_PER_SYNC = _env_int(
     "LOG_DEBUG_EVENTS_MAX_PER_SYNC", 200, min_value=0
 )
-APP_LOG_RETENTION_DAYS = _env_int("APP_LOG_RETENTION_DAYS", 30)
+APP_LOG_RETENTION_DAYS = _env_int("APP_LOG_RETENTION_DAYS", 1)
 RAW_DATA_RETENTION_DAYS = _env_int("RAW_DATA_RETENTION_DAYS", 7)
 
 
@@ -463,6 +463,63 @@ def _current_local_day_bounds_utc() -> tuple[str, str]:
     ).isoformat()
 
 
+def _snapshot_local_day(snapshot: Dict[str, Any]) -> Optional[str]:
+    collected_at = _parse_iso_datetime(snapshot.get("collected_at"))
+    if not collected_at:
+        return None
+    return collected_at.astimezone(APP_TIMEZONE).date().isoformat()
+
+
+def _plan_historical_snapshot_compaction(
+    snapshots: Any,
+) -> Dict[str, Any]:
+    snapshots = snapshots or []
+    keep_by_day: Dict[str, Dict[str, Any]] = {}
+    keep_ids = set()
+    skipped_ids = []
+
+    def _sort_key(snapshot: Dict[str, Any]) -> tuple[datetime, int]:
+        collected_at = _parse_iso_datetime(snapshot.get("collected_at"))
+        try:
+            snapshot_id = int(snapshot.get("id") or 0)
+        except Exception:
+            snapshot_id = 0
+        if not collected_at:
+            return datetime.min.replace(tzinfo=timezone.utc), snapshot_id
+        return collected_at.astimezone(timezone.utc), snapshot_id
+
+    for snapshot in sorted(snapshots, key=_sort_key):
+        snapshot_id = snapshot.get("id")
+        if snapshot_id is None:
+            continue
+
+        day_key = _snapshot_local_day(snapshot)
+        if not day_key:
+            keep_ids.add(snapshot_id)
+            skipped_ids.append(snapshot_id)
+            continue
+
+        keep_by_day[day_key] = snapshot
+
+    for snapshot in keep_by_day.values():
+        snapshot_id = snapshot.get("id")
+        if snapshot_id is not None:
+            keep_ids.add(snapshot_id)
+
+    delete_ids = [
+        snapshot.get("id")
+        for snapshot in sorted(snapshots, key=_sort_key)
+        if snapshot.get("id") is not None and snapshot.get("id") not in keep_ids
+    ]
+
+    return {
+        "keep_snapshot_ids": sorted(keep_ids),
+        "delete_snapshot_ids": delete_ids,
+        "retained_days": len(keep_by_day),
+        "skipped_snapshot_ids": skipped_ids,
+    }
+
+
 def _cleanup_old_app_logs() -> int:
     if not db_client:
         return 0
@@ -482,7 +539,7 @@ def _cleanup_old_app_logs() -> int:
 
 
 def _cleanup_old_raw_data() -> Dict[str, int]:
-    """Cleanup old raw data: usage_snapshots, model_usage, skill_runs.
+    """Cleanup old raw data: compact historical usage and trim old skill_runs.
     
     Aggregate tables (daily_stats, skill_daily_stats, credential_daily_stats) are preserved.
     
@@ -490,38 +547,60 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
         Dict with counts of deleted rows per table.
     """
     if not db_client:
-        return {"snapshots": 0, "model_usage": 0, "skill_runs": 0}
+        return {
+            "snapshots": 0,
+            "model_usage": 0,
+            "skill_runs": 0,
+            "retained_days": 0,
+            "skipped_snapshots": 0,
+        }
 
     now_local = datetime.now(APP_TIMEZONE)
     cutoff_local = now_local - timedelta(days=RAW_DATA_RETENTION_DAYS)
     cutoff_utc = cutoff_local.astimezone(timezone.utc).isoformat()
+    today_start_utc, _ = _current_local_day_bounds_utc()
 
-    result = {"snapshots": 0, "model_usage": 0, "skill_runs": 0}
+    result = {
+        "snapshots": 0,
+        "model_usage": 0,
+        "skill_runs": 0,
+        "retained_days": 0,
+        "skipped_snapshots": 0,
+    }
 
     try:
-        old_snapshots = (
+        historical_snapshots = (
             db_client.table("usage_snapshots")
-            .select("id")
-            .lt("collected_at", cutoff_utc)
+            .select("id, collected_at")
+            .lt("collected_at", today_start_utc)
+            .order("collected_at")
             .execute()
             .data
         ) or []
-        
-        snapshot_ids = [s["id"] for s in old_snapshots]
-        result["snapshots"] = len(snapshot_ids)
+
+        compaction_plan = _plan_historical_snapshot_compaction(historical_snapshots)
+        snapshot_ids = compaction_plan["delete_snapshot_ids"]
+        result["retained_days"] = compaction_plan["retained_days"]
+        result["skipped_snapshots"] = len(compaction_plan["skipped_snapshot_ids"])
 
         if snapshot_ids:
-            for snapshot_id in snapshot_ids:
-                try:
-                    db_client.table("model_usage").delete().eq("snapshot_id", snapshot_id).execute()
-                except Exception:
-                    pass
-            
-            for snapshot_id in snapshot_ids:
-                try:
-                    db_client.table("usage_snapshots").delete().eq("id", snapshot_id).execute()
-                except Exception:
-                    pass
+            deleted_usage = (
+                db_client.table("model_usage")
+                .delete()
+                .in_("snapshot_id", snapshot_ids)
+                .execute()
+                .data
+            ) or []
+            result["model_usage"] = len(deleted_usage)
+
+            deleted_snapshots = (
+                db_client.table("usage_snapshots")
+                .delete()
+                .in_("id", snapshot_ids)
+                .execute()
+                .data
+            ) or []
+            result["snapshots"] = len(deleted_snapshots)
 
     except Exception as e:
         logger.error(f"Failed to cleanup old snapshots: {e}", exc_info=True)
@@ -538,11 +617,22 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
     except Exception as e:
         logger.error(f"Failed to cleanup old skill_runs: {e}", exc_info=True)
 
-    total = result["snapshots"] + result["skill_runs"]
-    if total > 0:
+    total = result["snapshots"] + result["model_usage"] + result["skill_runs"]
+    if total > 0 or result["skipped_snapshots"] > 0:
         logger.info(
-            f"Raw data cleanup: {result['snapshots']} snapshots (with model_usage), "
-            f"{result['skill_runs']} skill_runs older than {RAW_DATA_RETENTION_DAYS} days"
+            "Raw data cleanup: compacted %s historical snapshots, deleted %s model_usage rows, "
+            "retained %s day-end snapshots before today, removed %s skill_runs older than %s days"
+            "%s",
+            result["snapshots"],
+            result["model_usage"],
+            result["retained_days"],
+            result["skill_runs"],
+            RAW_DATA_RETENTION_DAYS,
+            (
+                f", skipped {result['skipped_snapshots']} snapshot(s) with invalid timestamps"
+                if result["skipped_snapshots"] > 0
+                else ""
+            ),
         )
 
     return result
@@ -2085,8 +2175,9 @@ def main():
         deleted = _cleanup_old_app_logs()
         if deleted > 0:
             logger.info(
-                f"Initial app logs cleanup removed {deleted} rows older than today."
+                f"Initial app logs cleanup removed {deleted} rows older than {APP_LOG_RETENTION_DAYS} day(s)."
             )
+        _cleanup_old_raw_data()
     except Exception as e:
         logger.critical(
             f"CRITICAL: Failed to initialize database provider '{DATABASE_PROVIDER}': {e}", exc_info=True
@@ -2122,13 +2213,14 @@ def main():
         next_run_time=datetime.now() + timedelta(seconds=20),
     )
 
-    # Cleanup old raw data (snapshots, model_usage, skill_runs) daily
+    # Compact historical usage data daily at local midnight; trim old skill_runs
     scheduler.add_job(
         _cleanup_old_raw_data,
-        "interval",
-        hours=24,
+        "cron",
+        hour=0,
+        minute=0,
         id="raw_data_cleanup",
-        next_run_time=datetime.now() + timedelta(seconds=30),
+        timezone=APP_TIMEZONE,
     )
 
     scheduler.start()
@@ -2140,7 +2232,8 @@ def main():
         f"App logs cleanup scheduled every {APP_LOG_CLEANUP_INTERVAL_MINUTES} minute(s) (retention={APP_LOG_RETENTION_DAYS} day(s))."
     )
     logger.info(
-        f"Raw data cleanup scheduled every 24h (retention={RAW_DATA_RETENTION_DAYS} day(s))."
+        "Raw data compaction scheduled daily at 00:00 local time "
+        f"(skill_runs retention={RAW_DATA_RETENTION_DAYS} day(s))."
     )
 
     # Start the Flask app using Waitress

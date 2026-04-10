@@ -1,0 +1,230 @@
+import importlib.util
+import sys
+import types
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent
+MODULE_PATH = ROOT / "main.py"
+
+
+class _DummyResponse:
+    def __init__(self, data=None):
+        self.data = data if data is not None else []
+
+
+class _DummyTable:
+    def select(self, *args, **kwargs):
+        return self
+
+    def insert(self, *args, **kwargs):
+        return _DummyResponse([{"id": 1}])
+
+    def update(self, *args, **kwargs):
+        return self
+
+    def delete(self, *args, **kwargs):
+        return self
+
+    def upsert(self, *args, **kwargs):
+        return self
+
+    def eq(self, *args, **kwargs):
+        return self
+
+    def gte(self, *args, **kwargs):
+        return self
+
+    def lt(self, *args, **kwargs):
+        return self
+
+    def in_(self, *args, **kwargs):
+        return self
+
+    def order(self, *args, **kwargs):
+        return self
+
+    def limit(self, *args, **kwargs):
+        return self
+
+    def single(self, *args, **kwargs):
+        return self
+
+    def execute(self):
+        return _DummyResponse([])
+
+
+class _DummyDB:
+    def table(self, *args, **kwargs):
+        return _DummyTable()
+
+
+class _RecordedScheduler:
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        self.jobs = []
+        self.started = False
+        _RecordedScheduler.instances.append(self)
+
+    def add_job(self, func, trigger, **kwargs):
+        self.jobs.append({"func": func, "trigger": trigger, "kwargs": kwargs})
+
+    def start(self):
+        self.started = True
+
+
+def _install_dependency_stubs() -> None:
+    requests = types.ModuleType("requests")
+    requests.get = lambda *args, **kwargs: None
+    sys.modules.setdefault("requests", requests)
+
+    dotenv = types.ModuleType("dotenv")
+    dotenv.load_dotenv = lambda *args, **kwargs: None
+    sys.modules.setdefault("dotenv", dotenv)
+
+    flask = types.ModuleType("flask")
+
+    class Flask:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def before_request(self, func):
+            return func
+
+        def register_blueprint(self, *args, **kwargs):
+            return None
+
+    class Blueprint:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def route(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
+    flask.Flask = Flask
+    flask.Blueprint = Blueprint
+    flask.jsonify = lambda *args, **kwargs: {"json": args or kwargs}
+    flask.make_response = lambda x: x
+    flask.request = types.SimpleNamespace(
+        headers={}, path="/", method="GET", host_url="http://localhost/", cookies={}
+    )
+    flask.Response = object
+    flask.g = types.SimpleNamespace()
+    sys.modules.setdefault("flask", flask)
+
+    flask_cors = types.ModuleType("flask_cors")
+    flask_cors.CORS = lambda *args, **kwargs: None
+    sys.modules.setdefault("flask_cors", flask_cors)
+
+    db = types.ModuleType("db")
+    db.PostgreSQLClient = object
+    sys.modules.setdefault("db", db)
+
+    credential_stats_sync = types.ModuleType("credential_stats_sync")
+    credential_stats_sync.sync_credential_stats = lambda *args, **kwargs: None
+    sys.modules.setdefault("credential_stats_sync", credential_stats_sync)
+
+    waitress = types.ModuleType("waitress")
+    waitress.serve = lambda *args, **kwargs: None
+    sys.modules.setdefault("waitress", waitress)
+
+    apscheduler = types.ModuleType("apscheduler")
+    schedulers = types.ModuleType("apscheduler.schedulers")
+    background = types.ModuleType("apscheduler.schedulers.background")
+
+    background.BackgroundScheduler = _RecordedScheduler
+    sys.modules["apscheduler"] = apscheduler
+    sys.modules["apscheduler.schedulers"] = schedulers
+    sys.modules["apscheduler.schedulers.background"] = background
+
+    supabase = types.ModuleType("supabase")
+    supabase.create_client = lambda *args, **kwargs: None
+    sys.modules.setdefault("supabase", supabase)
+
+
+def _load_module():
+    _RecordedScheduler.instances = []
+    _install_dependency_stubs()
+    spec = importlib.util.spec_from_file_location("collector_main_retention", MODULE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+class RetentionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = _load_module()
+
+    def test_app_log_retention_defaults_to_one_day(self):
+        self.assertEqual(self.module.APP_LOG_RETENTION_DAYS, 1)
+
+    def test_compaction_keeps_last_snapshot_per_local_day(self):
+        plan = self.module._plan_historical_snapshot_compaction(
+            [
+                {"id": 1, "collected_at": "2026-04-08T00:10:00+07:00"},
+                {"id": 2, "collected_at": "2026-04-08T23:59:00+07:00"},
+                {"id": 3, "collected_at": "2026-04-09T00:01:00+07:00"},
+                {"id": 4, "collected_at": "2026-04-09T23:58:00+07:00"},
+            ]
+        )
+
+        self.assertEqual(plan["delete_snapshot_ids"], [1, 3])
+        self.assertEqual(plan["keep_snapshot_ids"], [2, 4])
+        self.assertEqual(plan["retained_days"], 2)
+
+    def test_compaction_preserves_invalid_timestamp_rows(self):
+        plan = self.module._plan_historical_snapshot_compaction(
+            [
+                {"id": 10, "collected_at": "invalid"},
+                {"id": 11, "collected_at": "2026-04-08T01:00:00+07:00"},
+                {"id": 12, "collected_at": "2026-04-08T23:00:00+07:00"},
+            ]
+        )
+
+        self.assertEqual(plan["delete_snapshot_ids"], [11])
+        self.assertEqual(plan["keep_snapshot_ids"], [10, 12])
+        self.assertEqual(plan["skipped_snapshot_ids"], [10])
+
+    def test_main_keeps_startup_compaction_and_midnight_schedule(self):
+        cleanup_calls = []
+        serve_calls = []
+        fake_db = object()
+
+        self.module.init_db = lambda: fake_db
+        self.module.db_client = fake_db
+        self.module.flask_app = self.module.Flask(__name__)
+        self.module._cleanup_old_app_logs = lambda: 0
+        self.module._cleanup_old_raw_data = lambda: cleanup_calls.append("startup") or {}
+        self.module.run_full_sync_once = lambda: None
+        self.module.sync_credential_stats = lambda *args, **kwargs: None
+        self.module.serve = lambda *args, **kwargs: serve_calls.append((args, kwargs))
+
+        self.module.main()
+
+        self.assertEqual(cleanup_calls, ["startup"])
+        self.assertTrue(_RecordedScheduler.instances)
+
+        scheduler = _RecordedScheduler.instances[-1]
+        raw_cleanup_jobs = [
+            job
+            for job in scheduler.jobs
+            if job["kwargs"].get("id") == "raw_data_cleanup"
+        ]
+        self.assertEqual(len(raw_cleanup_jobs), 1)
+        raw_cleanup_job = raw_cleanup_jobs[0]
+        self.assertEqual(raw_cleanup_job["trigger"], "cron")
+        self.assertEqual(raw_cleanup_job["kwargs"].get("hour"), 0)
+        self.assertEqual(raw_cleanup_job["kwargs"].get("minute"), 0)
+        self.assertTrue(scheduler.started)
+        self.assertEqual(len(serve_calls), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

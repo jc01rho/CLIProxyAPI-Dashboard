@@ -560,8 +560,7 @@ def _cleanup_old_app_logs() -> int:
             db_client.table("app_logs").delete().lt("logged_at", cutoff_utc).execute().data
         ) or []
         deleted_count = len(deleted_rows)
-        if deleted_count > 0:
-            _run_maintenance_vacuum()
+        _run_maintenance_vacuum()
         return deleted_count
     except Exception as e:
         logger.error(f"Failed to cleanup old app logs: {e}", exc_info=True)
@@ -664,8 +663,7 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
                 else ""
             ),
         )
-        if total > 0:
-            _run_maintenance_vacuum()
+    _run_maintenance_vacuum()
 
     return result
 

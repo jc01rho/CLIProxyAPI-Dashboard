@@ -299,6 +299,71 @@ class RetentionTests(unittest.TestCase):
         finally:
             psycopg2.connect = original_connect
 
+    def test_slim_raw_data_keeps_model_counters_removes_details(self):
+        raw_data = {
+            "usage": {
+                "apis": {
+                    "api-key-1": {
+                        "models": {
+                            "gpt-4": {
+                                "total_requests": 100,
+                                "success_count": 95,
+                                "failure_count": 5,
+                                "input_tokens": 50000,
+                                "output_tokens": 25000,
+                                "total_tokens": 75000,
+                                "details": [
+                                    {"timestamp": "2026-04-08T10:00:00Z", "tokens": 1000},
+                                    {"timestamp": "2026-04-08T11:00:00Z", "tokens": 2000},
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        slimmed = self.module._slim_raw_data(raw_data)
+        
+        self.assertIn("usage", slimmed)
+        self.assertIn("apis", slimmed["usage"])
+        self.assertIn("api-key-1", slimmed["usage"]["apis"])
+        self.assertIn("models", slimmed["usage"]["apis"]["api-key-1"])
+        self.assertIn("gpt-4", slimmed["usage"]["apis"]["api-key-1"]["models"])
+        
+        model_data = slimmed["usage"]["apis"]["api-key-1"]["models"]["gpt-4"]
+        self.assertEqual(model_data["total_requests"], 100)
+        self.assertEqual(model_data["success_count"], 95)
+        self.assertEqual(model_data["failure_count"], 5)
+        self.assertEqual(model_data["input_tokens"], 50000)
+        self.assertEqual(model_data["output_tokens"], 25000)
+        self.assertEqual(model_data["total_tokens"], 75000)
+        self.assertNotIn("details", model_data)
+
+    def test_cleanup_old_raw_data_slims_retained_snapshots_only(self):
+        self.module.db_client = _DummyDB()
+        self.module.MAINTENANCE_DATABASE_URL = ""
+        self.module._run_maintenance_vacuum = lambda: None
+        
+        result = self.module._cleanup_old_raw_data()
+        
+        self.assertIsInstance(result, dict)
+        self.assertIn("slimmed_snapshots", result)
+        self.assertIn("retained_days", result)
+
+    def test_cleanup_skips_invalid_timestamp_snapshots(self):
+        plan = self.module._plan_historical_snapshot_compaction(
+            [
+                {"id": 10, "collected_at": "invalid"},
+                {"id": 11, "collected_at": "2026-04-08T01:00:00+07:00"},
+                {"id": 12, "collected_at": "2026-04-08T23:00:00+07:00"},
+            ]
+        )
+        
+        self.assertIn(10, plan["skipped_snapshot_ids"])
+        self.assertNotIn(10, plan["delete_snapshot_ids"])
+        self.assertIn(10, plan["keep_snapshot_ids"])
+
 
 if __name__ == "__main__":
     unittest.main()

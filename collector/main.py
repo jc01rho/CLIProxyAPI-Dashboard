@@ -471,6 +471,42 @@ def _snapshot_local_day(snapshot: Dict[str, Any]) -> Optional[str]:
     return collected_at.astimezone(APP_TIMEZONE).date().isoformat()
 
 
+def _slim_raw_data(raw_data: Any) -> Any:
+    if not raw_data or not isinstance(raw_data, dict):
+        return raw_data
+    
+    slimmed = {}
+    usage = raw_data.get("usage", {})
+    if isinstance(usage, dict):
+        slimmed_usage = {}
+        apis = usage.get("apis", {})
+        if isinstance(apis, dict):
+            slimmed_apis = {}
+            for api_key, api_data in apis.items():
+                if isinstance(api_data, dict):
+                    slimmed_api = {}
+                    models = api_data.get("models", {})
+                    if isinstance(models, dict):
+                        slimmed_models = {}
+                        for model_name, model_data in models.items():
+                            if isinstance(model_data, dict):
+                                slimmed_model = {
+                                    "total_requests": model_data.get("total_requests", 0),
+                                    "success_count": model_data.get("success_count", 0),
+                                    "failure_count": model_data.get("failure_count", 0),
+                                    "input_tokens": model_data.get("input_tokens", 0),
+                                    "output_tokens": model_data.get("output_tokens", 0),
+                                    "total_tokens": model_data.get("total_tokens", 0),
+                                }
+                                slimmed_models[model_name] = slimmed_model
+                        slimmed_api["models"] = slimmed_models
+                    slimmed_apis[api_key] = slimmed_api
+            slimmed_usage["apis"] = slimmed_apis
+        slimmed["usage"] = slimmed_usage
+    
+    return slimmed
+
+
 def _plan_historical_snapshot_compaction(
     snapshots: Any,
 ) -> Dict[str, Any]:
@@ -568,13 +604,6 @@ def _cleanup_old_app_logs() -> int:
 
 
 def _cleanup_old_raw_data() -> Dict[str, int]:
-    """Cleanup old raw data: compact historical usage and trim old skill_runs.
-    
-    Aggregate tables (daily_stats, skill_daily_stats, credential_daily_stats) are preserved.
-    
-    Returns:
-        Dict with counts of deleted rows per table.
-    """
     if not db_client:
         return {
             "snapshots": 0,
@@ -582,6 +611,7 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
             "skill_runs": 0,
             "retained_days": 0,
             "skipped_snapshots": 0,
+            "slimmed_snapshots": 0,
         }
 
     now_local = datetime.now(APP_TIMEZONE)
@@ -595,6 +625,7 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
         "skill_runs": 0,
         "retained_days": 0,
         "skipped_snapshots": 0,
+        "slimmed_snapshots": 0,
     }
 
     try:
@@ -608,15 +639,17 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
         ) or []
 
         compaction_plan = _plan_historical_snapshot_compaction(historical_snapshots)
-        snapshot_ids = compaction_plan["delete_snapshot_ids"]
+        delete_ids = compaction_plan["delete_snapshot_ids"]
+        keep_ids = compaction_plan["keep_snapshot_ids"]
+        skipped_ids = compaction_plan["skipped_snapshot_ids"]
         result["retained_days"] = compaction_plan["retained_days"]
-        result["skipped_snapshots"] = len(compaction_plan["skipped_snapshot_ids"])
+        result["skipped_snapshots"] = len(skipped_ids)
 
-        if snapshot_ids:
+        if delete_ids:
             deleted_usage = (
                 db_client.table("model_usage")
                 .delete()
-                .in_("snapshot_id", snapshot_ids)
+                .in_("snapshot_id", delete_ids)
                 .execute()
                 .data
             ) or []
@@ -625,11 +658,37 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
             deleted_snapshots = (
                 db_client.table("usage_snapshots")
                 .delete()
-                .in_("id", snapshot_ids)
+                .in_("id", delete_ids)
                 .execute()
                 .data
             ) or []
             result["snapshots"] = len(deleted_snapshots)
+
+        retained_to_slim = [sid for sid in keep_ids if sid not in skipped_ids]
+        if retained_to_slim:
+            try:
+                retained_snapshots = (
+                    db_client.table("usage_snapshots")
+                    .select("id, raw_data")
+                    .in_("id", retained_to_slim)
+                    .execute()
+                    .data
+                ) or []
+                
+                for snap in retained_snapshots:
+                    snap_id = snap.get("id")
+                    raw_data = snap.get("raw_data")
+                    if snap_id and raw_data:
+                        slimmed = _slim_raw_data(raw_data)
+                        try:
+                            db_client.table("usage_snapshots").update(
+                                {"raw_data": slimmed}
+                            ).eq("id", snap_id).execute()
+                            result["slimmed_snapshots"] += 1
+                        except Exception as e:
+                            logger.warning(f"Failed to slim snapshot {snap_id}: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to slim retained snapshots: {e}")
 
     except Exception as e:
         logger.error(f"Failed to cleanup old snapshots: {e}", exc_info=True)
@@ -647,14 +706,16 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
         logger.error(f"Failed to cleanup old skill_runs: {e}", exc_info=True)
 
     total = result["snapshots"] + result["model_usage"] + result["skill_runs"]
-    if total > 0 or result["skipped_snapshots"] > 0:
+    if total > 0 or result["skipped_snapshots"] > 0 or result["slimmed_snapshots"] > 0:
         logger.info(
-            "Raw data cleanup: compacted %s historical snapshots, deleted %s model_usage rows, "
-            "retained %s day-end snapshots before today, removed %s skill_runs older than %s days"
+            "Raw data cleanup: deleted %s historical snapshots, deleted %s model_usage rows, "
+            "retained %s day-end snapshots before today, slimmed %s retained snapshot(s), "
+            "removed %s skill_runs older than %s days"
             "%s",
             result["snapshots"],
             result["model_usage"],
             result["retained_days"],
+            result["slimmed_snapshots"],
             result["skill_runs"],
             RAW_DATA_RETENTION_DAYS,
             (

@@ -474,36 +474,34 @@ def _snapshot_local_day(snapshot: Dict[str, Any]) -> Optional[str]:
 def _slim_raw_data(raw_data: Any) -> Any:
     if not raw_data or not isinstance(raw_data, dict):
         return raw_data
-    
-    slimmed = {}
+
+    slimmed = dict(raw_data)
     usage = raw_data.get("usage", {})
     if isinstance(usage, dict):
-        slimmed_usage = {}
+        slimmed_usage = dict(usage)
         apis = usage.get("apis", {})
         if isinstance(apis, dict):
             slimmed_apis = {}
             for api_key, api_data in apis.items():
                 if isinstance(api_data, dict):
-                    slimmed_api = {}
+                    slimmed_api = dict(api_data)
                     models = api_data.get("models", {})
                     if isinstance(models, dict):
                         slimmed_models = {}
                         for model_name, model_data in models.items():
                             if isinstance(model_data, dict):
-                                slimmed_model = {
-                                    "total_requests": model_data.get("total_requests", 0),
-                                    "success_count": model_data.get("success_count", 0),
-                                    "failure_count": model_data.get("failure_count", 0),
-                                    "input_tokens": model_data.get("input_tokens", 0),
-                                    "output_tokens": model_data.get("output_tokens", 0),
-                                    "total_tokens": model_data.get("total_tokens", 0),
-                                }
+                                slimmed_model = dict(model_data)
+                                slimmed_model.pop("details", None)
                                 slimmed_models[model_name] = slimmed_model
+                            else:
+                                slimmed_models[model_name] = model_data
                         slimmed_api["models"] = slimmed_models
                     slimmed_apis[api_key] = slimmed_api
+                else:
+                    slimmed_apis[api_key] = api_data
             slimmed_usage["apis"] = slimmed_apis
         slimmed["usage"] = slimmed_usage
-    
+
     return slimmed
 
 

@@ -304,6 +304,7 @@ class RetentionTests(unittest.TestCase):
             "usage": {
                 "apis": {
                     "api-key-1": {
+                        "api_label": "Primary API Key",
                         "models": {
                             "gpt-4": {
                                 "total_requests": 100,
@@ -312,6 +313,7 @@ class RetentionTests(unittest.TestCase):
                                 "input_tokens": 50000,
                                 "output_tokens": 25000,
                                 "total_tokens": 75000,
+                                "extra_blob": {"retained": True},
                                 "details": [
                                     {"timestamp": "2026-04-08T10:00:00Z", "tokens": 1000},
                                     {"timestamp": "2026-04-08T11:00:00Z", "tokens": 2000},
@@ -320,7 +322,8 @@ class RetentionTests(unittest.TestCase):
                         }
                     }
                 }
-            }
+            },
+            "meta": {"collector": "v1"},
         }
         
         slimmed = self.module._slim_raw_data(raw_data)
@@ -330,7 +333,9 @@ class RetentionTests(unittest.TestCase):
         self.assertIn("api-key-1", slimmed["usage"]["apis"])
         self.assertIn("models", slimmed["usage"]["apis"]["api-key-1"])
         self.assertIn("gpt-4", slimmed["usage"]["apis"]["api-key-1"]["models"])
-        
+        self.assertEqual(slimmed["usage"]["apis"]["api-key-1"]["api_label"], "Primary API Key")
+        self.assertEqual(slimmed["meta"]["collector"], "v1")
+
         model_data = slimmed["usage"]["apis"]["api-key-1"]["models"]["gpt-4"]
         self.assertEqual(model_data["total_requests"], 100)
         self.assertEqual(model_data["success_count"], 95)
@@ -338,6 +343,7 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(model_data["input_tokens"], 50000)
         self.assertEqual(model_data["output_tokens"], 25000)
         self.assertEqual(model_data["total_tokens"], 75000)
+        self.assertEqual(model_data["extra_blob"], {"retained": True})
         self.assertNotIn("details", model_data)
 
     def test_cleanup_old_raw_data_slims_retained_snapshots_only(self):

@@ -102,6 +102,9 @@ LOG_DEBUG_EVENTS_MAX_PER_SYNC = _env_int(
 APP_LOG_RETENTION_DAYS = _env_int("APP_LOG_RETENTION_DAYS", 1)
 RAW_DATA_RETENTION_DAYS = _env_int("RAW_DATA_RETENTION_DAYS", 7)
 
+# Batch size for cleanup operations to avoid Supabase REST timeout
+CLEANUP_BATCH_SIZE = 500
+
 
 # Default pricing (USD per 1M tokens) - Updated Dec 2024
 DEFAULT_PRICING = {
@@ -555,6 +558,46 @@ def _plan_historical_snapshot_compaction(
     }
 
 
+def _batch_delete(table_name: str, column_name: str, ids: list, batch_size: int = CLEANUP_BATCH_SIZE) -> int:
+    """Delete rows in batches to avoid Supabase REST timeout."""
+    if not db_client or not ids:
+        return 0
+    
+    total_deleted = 0
+    for i in range(0, len(ids), batch_size):
+        batch = ids[i:i + batch_size]
+        deleted = (
+            db_client.table(table_name)
+            .delete()
+            .in_(column_name, batch)
+            .execute()
+            .data
+        ) or []
+        total_deleted += len(deleted)
+    
+    return total_deleted
+
+
+def _batch_select_and_update(table_name: str, column_name: str, ids: list, batch_size: int = CLEANUP_BATCH_SIZE) -> list:
+    """Select rows in batches and return all results."""
+    if not db_client or not ids:
+        return []
+    
+    all_results = []
+    for i in range(0, len(ids), batch_size):
+        batch = ids[i:i + batch_size]
+        results = (
+            db_client.table(table_name)
+            .select("id, raw_data")
+            .in_(column_name, batch)
+            .execute()
+            .data
+        ) or []
+        all_results.extend(results)
+    
+    return all_results
+
+
 def _run_maintenance_vacuum() -> None:
     """Run VACUUM (ANALYZE, TRUNCATE ON) on cleanup tables if MAINTENANCE_DATABASE_URL is set."""
     if not MAINTENANCE_DATABASE_URL:
@@ -644,34 +687,18 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
         result["skipped_snapshots"] = len(skipped_ids)
 
         if delete_ids:
-            deleted_usage = (
-                db_client.table("model_usage")
-                .delete()
-                .in_("snapshot_id", delete_ids)
-                .execute()
-                .data
-            ) or []
-            result["model_usage"] = len(deleted_usage)
-
-            deleted_snapshots = (
-                db_client.table("usage_snapshots")
-                .delete()
-                .in_("id", delete_ids)
-                .execute()
-                .data
-            ) or []
-            result["snapshots"] = len(deleted_snapshots)
+            try:
+                result["model_usage"] = _batch_delete("model_usage", "snapshot_id", delete_ids)
+                result["snapshots"] = _batch_delete("usage_snapshots", "id", delete_ids)
+            except Exception as e:
+                logger.error(f"Failed to delete old snapshots/model_usage: {e}", exc_info=True)
+                result["model_usage"] = 0
+                result["snapshots"] = 0
 
         retained_to_slim = [sid for sid in keep_ids if sid not in skipped_ids]
         if retained_to_slim:
             try:
-                retained_snapshots = (
-                    db_client.table("usage_snapshots")
-                    .select("id, raw_data")
-                    .in_("id", retained_to_slim)
-                    .execute()
-                    .data
-                ) or []
+                retained_snapshots = _batch_select_and_update("usage_snapshots", "id", retained_to_slim)
                 
                 for snap in retained_snapshots:
                     snap_id = snap.get("id")

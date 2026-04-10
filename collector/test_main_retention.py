@@ -370,6 +370,145 @@ class RetentionTests(unittest.TestCase):
         self.assertNotIn(10, plan["delete_snapshot_ids"])
         self.assertIn(10, plan["keep_snapshot_ids"])
 
+    def test_cleanup_batches_large_delete_ids(self):
+        delete_calls = []
+        select_calls = []
+        
+        class MockTable:
+            def __init__(self, table_name):
+                self.table_name = table_name
+            
+            def select(self, *args, **kwargs):
+                return self
+            
+            def delete(self, *args, **kwargs):
+                return self
+            
+            def in_(self, column, ids):
+                if self.table_name == "usage_snapshots" and column == "id":
+                    select_calls.append(("usage_snapshots", "id", len(ids)))
+                elif self.table_name == "model_usage" and column == "snapshot_id":
+                    delete_calls.append(("model_usage", "snapshot_id", len(ids)))
+                elif self.table_name == "usage_snapshots" and column == "id":
+                    delete_calls.append(("usage_snapshots", "id", len(ids)))
+                return self
+            
+            def execute(self):
+                return _DummyResponse([{"id": i} for i in range(10)])
+            
+            def eq(self, *args, **kwargs):
+                return self
+            
+            def lt(self, *args, **kwargs):
+                return self
+            
+            def order(self, *args, **kwargs):
+                return self
+        
+        class MockDB:
+            def table(self, name):
+                return MockTable(name)
+        
+        self.module.db_client = MockDB()
+        self.module.MAINTENANCE_DATABASE_URL = ""
+        self.module._run_maintenance_vacuum = lambda: None
+        
+        large_delete_ids = list(range(1, 1001))
+        
+        original_plan = self.module._plan_historical_snapshot_compaction
+        def mock_plan(snapshots):
+            return {
+                "delete_snapshot_ids": large_delete_ids,
+                "keep_snapshot_ids": [],
+                "retained_days": 0,
+                "skipped_snapshot_ids": [],
+            }
+        
+        self.module._plan_historical_snapshot_compaction = mock_plan
+        
+        try:
+            result = self.module._cleanup_old_raw_data()
+            
+            self.assertGreater(len(delete_calls), 1, "Expected multiple delete batches")
+            
+            for table, column, batch_size in delete_calls:
+                self.assertLessEqual(batch_size, 500, f"Batch size {batch_size} exceeds limit")
+            
+            self.assertIsInstance(result, dict)
+            self.assertIn("model_usage", result)
+            self.assertIn("snapshots", result)
+        finally:
+            self.module._plan_historical_snapshot_compaction = original_plan
+
+    def test_cleanup_stops_on_model_usage_delete_failure(self):
+        call_sequence = []
+        
+        class MockTable:
+            def __init__(self, table_name):
+                self.table_name = table_name
+                self._is_delete = False
+            
+            def select(self, *args, **kwargs):
+                return self
+            
+            def delete(self, *args, **kwargs):
+                self._is_delete = True
+                return self
+            
+            def in_(self, column, ids):
+                action = "delete" if self._is_delete else "select"
+                call_sequence.append((self.table_name, column, action, len(ids)))
+                if self.table_name == "model_usage":
+                    raise Exception("Simulated delete failure")
+                return self
+            
+            def execute(self):
+                return _DummyResponse([{"id": i} for i in range(10)])
+            
+            def eq(self, *args, **kwargs):
+                return self
+            
+            def lt(self, *args, **kwargs):
+                return self
+            
+            def order(self, *args, **kwargs):
+                return self
+        
+        class MockDB:
+            def table(self, name):
+                return MockTable(name)
+        
+        self.module.db_client = MockDB()
+        self.module.MAINTENANCE_DATABASE_URL = ""
+        self.module._run_maintenance_vacuum = lambda: None
+        
+        delete_ids = list(range(1, 11))
+        
+        original_plan = self.module._plan_historical_snapshot_compaction
+        def mock_plan(snapshots):
+            return {
+                "delete_snapshot_ids": delete_ids,
+                "keep_snapshot_ids": [],
+                "retained_days": 1,
+                "skipped_snapshot_ids": [],
+            }
+        
+        self.module._plan_historical_snapshot_compaction = mock_plan
+        
+        try:
+            result = self.module._cleanup_old_raw_data()
+            
+            model_usage_calls = [c for c in call_sequence if c[0] == "model_usage"]
+            snapshot_delete_calls = [c for c in call_sequence if c[0] == "usage_snapshots" and c[2] == "delete"]
+            
+            self.assertGreater(len(model_usage_calls), 0, "model_usage delete should be attempted")
+            self.assertEqual(len(snapshot_delete_calls), 0, "usage_snapshots delete should NOT be called after model_usage failure")
+            
+            self.assertEqual(result["model_usage"], 0)
+            self.assertEqual(result["snapshots"], 0)
+        finally:
+            self.module._plan_historical_snapshot_compaction = original_plan
+
 
 if __name__ == "__main__":
     unittest.main()

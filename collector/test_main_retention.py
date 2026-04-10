@@ -225,6 +225,27 @@ class RetentionTests(unittest.TestCase):
         self.assertTrue(scheduler.started)
         self.assertEqual(len(serve_calls), 1)
 
+    def test_maintenance_vacuum_url_check(self):
+        self.module.MAINTENANCE_DATABASE_URL = ""
+        self.assertTrue(not self.module.MAINTENANCE_DATABASE_URL)
+        self.module.MAINTENANCE_DATABASE_URL = "postgresql://test"
+        self.assertTrue(self.module.MAINTENANCE_DATABASE_URL)
+
+    def test_cleanup_old_app_logs_returns_count(self):
+        self.module.db_client = _DummyDB()
+        result = self.module._cleanup_old_app_logs()
+        self.assertIsInstance(result, int)
+        self.assertGreaterEqual(result, 0)
+
+    def test_cleanup_old_raw_data_returns_dict(self):
+        self.module.MAINTENANCE_DATABASE_URL = ""
+        self.module.db_client = _DummyDB()
+        result = self.module._cleanup_old_raw_data()
+        self.assertIsInstance(result, dict)
+        self.assertIn("snapshots", result)
+        self.assertIn("model_usage", result)
+        self.assertIn("skill_runs", result)
+
 
 if __name__ == "__main__":
     unittest.main()

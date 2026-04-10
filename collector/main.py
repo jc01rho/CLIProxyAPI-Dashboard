@@ -57,6 +57,7 @@ DATABASE_PROVIDER = str(os.getenv("DATABASE_PROVIDER", "local")).strip().lower()
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY", "")
+MAINTENANCE_DATABASE_URL = os.getenv("MAINTENANCE_DATABASE_URL", "")
 CLIPROXY_URL = os.getenv("CLIPROXY_URL", "http://localhost:8317")
 CLIPROXY_MANAGEMENT_KEY = os.getenv("CLIPROXY_MANAGEMENT_KEY", "")
 COLLECTOR_INTERVAL = _env_int("COLLECTOR_INTERVAL_SECONDS", 60)
@@ -520,6 +521,32 @@ def _plan_historical_snapshot_compaction(
     }
 
 
+def _run_maintenance_vacuum() -> None:
+    """Run VACUUM ANALYZE on cleanup tables if MAINTENANCE_DATABASE_URL is set."""
+    if not MAINTENANCE_DATABASE_URL:
+        return
+    
+    try:
+        import psycopg2
+        conn = psycopg2.connect(MAINTENANCE_DATABASE_URL)
+        conn.autocommit = True
+        cursor = conn.cursor()
+        
+        # Vacuum only tables touched by cleanup
+        tables = ["app_logs", "usage_snapshots", "model_usage", "skill_runs"]
+        for table in tables:
+            try:
+                cursor.execute(f"VACUUM ANALYZE {table}")
+                logger.info(f"Maintenance: VACUUM ANALYZE {table} completed")
+            except Exception as e:
+                logger.warning(f"Maintenance: VACUUM ANALYZE {table} failed: {e}")
+        
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Maintenance vacuum failed: {e}")
+
+
 def _cleanup_old_app_logs() -> int:
     if not db_client:
         return 0
@@ -532,7 +559,10 @@ def _cleanup_old_app_logs() -> int:
         deleted_rows = (
             db_client.table("app_logs").delete().lt("logged_at", cutoff_utc).execute().data
         ) or []
-        return len(deleted_rows)
+        deleted_count = len(deleted_rows)
+        if deleted_count > 0:
+            _run_maintenance_vacuum()
+        return deleted_count
     except Exception as e:
         logger.error(f"Failed to cleanup old app logs: {e}", exc_info=True)
         return 0
@@ -634,6 +664,8 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
                 else ""
             ),
         )
+        if total > 0:
+            _run_maintenance_vacuum()
 
     return result
 

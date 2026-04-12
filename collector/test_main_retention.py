@@ -211,6 +211,7 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(plan["skipped_snapshot_ids"], [10])
 
     def test_main_keeps_startup_compaction_and_midnight_schedule(self):
+        _original_run_startup_cleanup = self.module._run_startup_cleanup
         cleanup_calls = []
         serve_calls = []
         fake_db = object()
@@ -346,6 +347,21 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(model_data["extra_blob"], {"retained": True})
         self.assertNotIn("details", model_data)
 
+    def test_slim_raw_data_returns_same_object_when_already_slimmed(self):
+        already_slimmed = {
+            "usage": {
+                "apis": {
+                    "api-key-1": {
+                        "models": {
+                            "gpt-4": {"total_requests": 100, "total_tokens": 75000}
+                        }
+                    }
+                }
+            }
+        }
+        result = self.module._slim_raw_data(already_slimmed)
+        self.assertIs(result, already_slimmed)
+
     def test_cleanup_old_raw_data_slims_retained_snapshots_only(self):
         self.module.db_client = _DummyDB()
         self.module.MAINTENANCE_DATABASE_URL = ""
@@ -403,6 +419,9 @@ class RetentionTests(unittest.TestCase):
                 return self
             
             def order(self, *args, **kwargs):
+                return self
+            
+            def limit(self, *args, **kwargs):
                 return self
         
         class MockDB:
@@ -473,6 +492,9 @@ class RetentionTests(unittest.TestCase):
             
             def order(self, *args, **kwargs):
                 return self
+            
+            def limit(self, *args, **kwargs):
+                return self
         
         class MockDB:
             def table(self, name):
@@ -508,6 +530,47 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(result["snapshots"], 0)
         finally:
             self.module._plan_historical_snapshot_compaction = original_plan
+
+    def test_slim_raw_data_returns_same_object_when_already_slimmed(self):
+        already_slimmed = {
+            "usage": {
+                "apis": {
+                    "api-key-1": {
+                        "models": {
+                            "gpt-4": {"total_requests": 100, "total_tokens": 75000}
+                        }
+                    }
+                }
+            }
+        }
+        result = self.module._slim_raw_data(already_slimmed)
+        self.assertIs(result, already_slimmed)
+
+    def test_startup_cleanup_stops_when_only_already_slimmed_remain(self):
+        cleanup_results = [
+            {"snapshots": 0, "model_usage": 0, "skill_runs": 0, "retained_days": 1, "skipped_snapshots": 0, "slimmed_snapshots": 3},
+            {"snapshots": 0, "model_usage": 0, "skill_runs": 0, "retained_days": 1, "skipped_snapshots": 0, "slimmed_snapshots": 0},
+        ]
+        call_count = 0
+
+        def mock_cleanup():
+            nonlocal call_count
+            if call_count >= len(cleanup_results):
+                return {"snapshots": 0, "model_usage": 0, "skill_runs": 0, "retained_days": 0, "skipped_snapshots": 0, "slimmed_snapshots": 0}
+            result = cleanup_results[call_count]
+            call_count += 1
+            return result
+
+        self.module.db_client = _DummyDB()
+        self.module.MAINTENANCE_DATABASE_URL = ""
+        self.module._run_maintenance_vacuum = lambda: None
+        self.module._cleanup_old_raw_data = mock_cleanup
+
+        result = self.module._run_startup_cleanup()
+
+        self.assertEqual(call_count, 2)
+        self.assertEqual(result["iterations"], 2)
+        self.assertEqual(result["slimmed_snapshots"], 3)
 
 
 if __name__ == "__main__":

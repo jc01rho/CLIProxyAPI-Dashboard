@@ -105,6 +105,9 @@ RAW_DATA_RETENTION_DAYS = _env_int("RAW_DATA_RETENTION_DAYS", 7)
 # Batch size for cleanup operations to avoid Supabase REST timeout
 CLEANUP_BATCH_SIZE = 500
 
+# Page size for historical snapshot query per cleanup iteration (smaller for startup safety)
+CLEANUP_SNAPSHOT_PAGE_SIZE = _env_int("CLEANUP_SNAPSHOT_PAGE_SIZE", 100)
+
 
 # Default pricing (USD per 1M tokens) - Updated Dec 2024
 DEFAULT_PRICING = {
@@ -478,32 +481,51 @@ def _slim_raw_data(raw_data: Any) -> Any:
     if not raw_data or not isinstance(raw_data, dict):
         return raw_data
 
-    slimmed = dict(raw_data)
     usage = raw_data.get("usage", {})
-    if isinstance(usage, dict):
-        slimmed_usage = dict(usage)
-        apis = usage.get("apis", {})
-        if isinstance(apis, dict):
-            slimmed_apis = {}
-            for api_key, api_data in apis.items():
-                if isinstance(api_data, dict):
-                    slimmed_api = dict(api_data)
-                    models = api_data.get("models", {})
-                    if isinstance(models, dict):
-                        slimmed_models = {}
-                        for model_name, model_data in models.items():
-                            if isinstance(model_data, dict):
-                                slimmed_model = dict(model_data)
-                                slimmed_model.pop("details", None)
-                                slimmed_models[model_name] = slimmed_model
-                            else:
-                                slimmed_models[model_name] = model_data
-                        slimmed_api["models"] = slimmed_models
-                    slimmed_apis[api_key] = slimmed_api
-                else:
-                    slimmed_apis[api_key] = api_data
-            slimmed_usage["apis"] = slimmed_apis
-        slimmed["usage"] = slimmed_usage
+    if not isinstance(usage, dict):
+        return raw_data
+
+    apis = usage.get("apis", {})
+    if not isinstance(apis, dict):
+        return raw_data
+
+    has_details = False
+    for api_data in apis.values():
+        if isinstance(api_data, dict):
+            models = api_data.get("models", {})
+            if isinstance(models, dict):
+                for model_data in models.values():
+                    if isinstance(model_data, dict) and "details" in model_data:
+                        has_details = True
+                        break
+        if has_details:
+            break
+
+    if not has_details:
+        return raw_data
+
+    slimmed = dict(raw_data)
+    slimmed_usage = dict(usage)
+    slimmed_apis = {}
+    for api_key, api_data in apis.items():
+        if isinstance(api_data, dict):
+            slimmed_api = dict(api_data)
+            models = api_data.get("models", {})
+            if isinstance(models, dict):
+                slimmed_models = {}
+                for model_name, model_data in models.items():
+                    if isinstance(model_data, dict):
+                        slimmed_model = dict(model_data)
+                        slimmed_model.pop("details", None)
+                        slimmed_models[model_name] = slimmed_model
+                    else:
+                        slimmed_models[model_name] = model_data
+                slimmed_api["models"] = slimmed_models
+            slimmed_apis[api_key] = slimmed_api
+        else:
+            slimmed_apis[api_key] = api_data
+    slimmed_usage["apis"] = slimmed_apis
+    slimmed["usage"] = slimmed_usage
 
     return slimmed
 
@@ -675,6 +697,7 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
             .select("id, collected_at")
             .lt("collected_at", today_start_utc)
             .order("collected_at")
+            .limit(CLEANUP_SNAPSHOT_PAGE_SIZE)
             .execute()
             .data
         ) or []
@@ -705,6 +728,8 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
                     raw_data = snap.get("raw_data")
                     if snap_id and raw_data:
                         slimmed = _slim_raw_data(raw_data)
+                        if slimmed is raw_data:
+                            continue
                         try:
                             db_client.table("usage_snapshots").update(
                                 {"raw_data": slimmed}
@@ -752,6 +777,88 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
     _run_maintenance_vacuum()
 
     return result
+
+
+# Maximum number of startup cleanup iterations to prevent infinite loops.
+STARTUP_CLEANUP_MAX_ITERATIONS = _env_int("STARTUP_CLEANUP_MAX_ITERATIONS", 200)
+
+
+def _run_startup_cleanup() -> Dict[str, int]:
+    """Run cleanup in a loop at startup until the full backlog is drained.
+
+    Each iteration calls ``_cleanup_old_raw_data()`` which processes one batch
+    of historical snapshots.  The loop continues as long as the previous
+    iteration made measurable progress (deleted or slimmed at least one row).
+    A hard cap (``STARTUP_CLEANUP_MAX_ITERATIONS``) prevents runaway loops.
+    """
+    logger.info("Startup cleanup: beginning backlog drain loop")
+    aggregate: Dict[str, int] = {
+        "snapshots": 0,
+        "model_usage": 0,
+        "skill_runs": 0,
+        "retained_days": 0,
+        "skipped_snapshots": 0,
+        "slimmed_snapshots": 0,
+        "iterations": 0,
+    }
+
+    iteration = 0
+    while iteration < STARTUP_CLEANUP_MAX_ITERATIONS:
+        iteration += 1
+        try:
+            result = _cleanup_old_raw_data()
+        except Exception as exc:
+            logger.error(
+                "Startup cleanup: iteration %d raised %s; stopping loop.",
+                iteration,
+                exc,
+                exc_info=True,
+            )
+            break
+
+        deleted = result.get("snapshots", 0) + result.get("model_usage", 0) + result.get("skill_runs", 0)
+        slimmed = result.get("slimmed_snapshots", 0)
+        progress = deleted + slimmed
+
+        for key in ("snapshots", "model_usage", "skill_runs", "skipped_snapshots", "slimmed_snapshots"):
+            aggregate[key] = aggregate.get(key, 0) + result.get(key, 0)
+        if result.get("retained_days", 0) > aggregate.get("retained_days", 0):
+            aggregate["retained_days"] = result["retained_days"]
+
+        if progress == 0:
+            logger.info(
+                "Startup cleanup: no progress on iteration %d; backlog drained.",
+                iteration,
+            )
+            break
+
+        logger.info(
+            "Startup cleanup: iteration %d deleted %d rows (snapshots=%d, model_usage=%d, skill_runs=%d), slimmed=%d",
+            iteration,
+            deleted,
+            result.get("snapshots", 0),
+            result.get("model_usage", 0),
+            result.get("skill_runs", 0),
+            slimmed,
+        )
+    else:
+        logger.warning(
+            "Startup cleanup: reached max iterations (%d) with remaining backlog. "
+            "Remaining data will be cleaned by scheduled cron.",
+            STARTUP_CLEANUP_MAX_ITERATIONS,
+        )
+
+    aggregate["iterations"] = iteration
+    logger.info(
+        "Startup cleanup: completed in %d iteration(s). "
+        "Total deleted: snapshots=%d, model_usage=%d, skill_runs=%d; slimmed=%d.",
+        iteration,
+        aggregate["snapshots"],
+        aggregate["model_usage"],
+        aggregate["skill_runs"],
+        aggregate["slimmed_snapshots"],
+    )
+    return aggregate
 
 
 def _normalize_app_log_event(evt: Any) -> Optional[Dict[str, Any]]:
@@ -2293,7 +2400,7 @@ def main():
             logger.info(
                 f"Initial app logs cleanup removed {deleted} rows older than {APP_LOG_RETENTION_DAYS} day(s)."
             )
-        _cleanup_old_raw_data()
+        _run_startup_cleanup()
     except Exception as e:
         logger.critical(
             f"CRITICAL: Failed to initialize database provider '{DATABASE_PROVIDER}': {e}", exc_info=True

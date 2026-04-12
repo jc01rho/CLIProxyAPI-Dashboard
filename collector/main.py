@@ -102,6 +102,10 @@ LOG_DEBUG_EVENTS_MAX_PER_SYNC = _env_int(
 APP_LOG_RETENTION_DAYS = _env_int("APP_LOG_RETENTION_DAYS", 1)
 RAW_DATA_RETENTION_DAYS = _env_int("RAW_DATA_RETENTION_DAYS", 7)
 
+# Intraday compaction: compact same-day snapshots hourly, keeping last per hour
+INTRADAY_COMPACTION_INTERVAL_MINUTES = _env_int("INTRADAY_COMPACTION_INTERVAL_MINUTES", 60)
+INTRADAY_COMPACTION_MIN_AGE_MINUTES = _env_int("INTRADAY_COMPACTION_MIN_AGE_MINUTES", 30)
+
 # Batch size for cleanup operations to avoid Supabase REST timeout
 CLEANUP_BATCH_SIZE = 500
 
@@ -580,6 +584,64 @@ def _plan_historical_snapshot_compaction(
     }
 
 
+def _plan_intraday_snapshot_compaction(
+    snapshots: Any, min_age_minutes: int = 30
+) -> Dict[str, Any]:
+    snapshots = snapshots or []
+    keep_by_bucket: Dict[str, Dict[str, Any]] = {}
+    keep_ids = set()
+    skipped_ids = []
+    now_utc = _utcnow()
+
+    def _sort_key(snapshot: Dict[str, Any]) -> tuple[datetime, int]:
+        collected_at = _parse_iso_datetime(snapshot.get("collected_at"))
+        try:
+            snapshot_id = int(snapshot.get("id") or 0)
+        except Exception:
+            snapshot_id = 0
+        if not collected_at:
+            return datetime.min.replace(tzinfo=timezone.utc), snapshot_id
+        return collected_at.astimezone(timezone.utc), snapshot_id
+
+    for snapshot in sorted(snapshots, key=_sort_key):
+        snapshot_id = snapshot.get("id")
+        if snapshot_id is None:
+            continue
+
+        collected_at = _parse_iso_datetime(snapshot.get("collected_at"))
+        if not collected_at:
+            keep_ids.add(snapshot_id)
+            skipped_ids.append(snapshot_id)
+            continue
+
+        age_minutes = (now_utc - collected_at).total_seconds() / 60
+        if age_minutes < min_age_minutes:
+            keep_ids.add(snapshot_id)
+            continue
+
+        local_dt = collected_at.astimezone(APP_TIMEZONE)
+        bucket_key = local_dt.strftime("%Y-%m-%dT%H")
+        keep_by_bucket[bucket_key] = snapshot
+
+    for snapshot in keep_by_bucket.values():
+        snapshot_id = snapshot.get("id")
+        if snapshot_id is not None:
+            keep_ids.add(snapshot_id)
+
+    delete_ids = [
+        snapshot.get("id")
+        for snapshot in sorted(snapshots, key=_sort_key)
+        if snapshot.get("id") is not None and snapshot.get("id") not in keep_ids
+    ]
+
+    return {
+        "keep_snapshot_ids": sorted(keep_ids),
+        "delete_snapshot_ids": delete_ids,
+        "retained_buckets": len(keep_by_bucket),
+        "skipped_snapshot_ids": skipped_ids,
+    }
+
+
 def _batch_delete(table_name: str, column_name: str, ids: list, batch_size: int = CLEANUP_BATCH_SIZE) -> int:
     """Delete rows in batches to avoid Supabase REST timeout."""
     if not db_client or not ids:
@@ -598,6 +660,11 @@ def _batch_delete(table_name: str, column_name: str, ids: list, batch_size: int 
         total_deleted += len(deleted)
     
     return total_deleted
+
+
+def _delete_usage_snapshots(ids: list, batch_size: int = CLEANUP_BATCH_SIZE) -> int:
+    """Delete snapshots only; related model_usage rows are removed by FK ON DELETE CASCADE."""
+    return _batch_delete("usage_snapshots", "id", ids, batch_size=batch_size)
 
 
 def _batch_select_and_update(table_name: str, column_name: str, ids: list, batch_size: int = CLEANUP_BATCH_SIZE) -> list:
@@ -711,10 +778,9 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
 
         if delete_ids:
             try:
-                result["model_usage"] = _batch_delete("model_usage", "snapshot_id", delete_ids)
-                result["snapshots"] = _batch_delete("usage_snapshots", "id", delete_ids)
+                result["snapshots"] = _delete_usage_snapshots(delete_ids)
             except Exception as e:
-                logger.error(f"Failed to delete old snapshots/model_usage: {e}", exc_info=True)
+                logger.error(f"Failed to delete old snapshots via cascade: {e}", exc_info=True)
                 result["model_usage"] = 0
                 result["snapshots"] = 0
 
@@ -770,6 +836,98 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
             RAW_DATA_RETENTION_DAYS,
             (
                 f", skipped {result['skipped_snapshots']} snapshot(s) with invalid timestamps"
+                if result["skipped_snapshots"] > 0
+                else ""
+            ),
+        )
+    _run_maintenance_vacuum()
+
+    return result
+
+
+def _cleanup_intraday_raw_data() -> Dict[str, int]:
+    if not db_client:
+        return {
+            "snapshots": 0,
+            "model_usage": 0,
+            "retained_buckets": 0,
+            "skipped_snapshots": 0,
+        }
+
+    today_start_utc, _ = _current_local_day_bounds_utc()
+    cutoff_utc = (_utcnow() - timedelta(minutes=INTRADAY_COMPACTION_MIN_AGE_MINUTES)).isoformat()
+
+    result = {
+        "snapshots": 0,
+        "model_usage": 0,
+        "retained_buckets": 0,
+        "skipped_snapshots": 0,
+    }
+
+    try:
+        intraday_snapshots = (
+            db_client.table("usage_snapshots")
+            .select("id, collected_at")
+            .gte("collected_at", today_start_utc)
+            .lt("collected_at", cutoff_utc)
+            .order("collected_at")
+            .limit(CLEANUP_SNAPSHOT_PAGE_SIZE)
+            .execute()
+            .data
+        ) or []
+
+        if not intraday_snapshots:
+            return result
+
+        compaction_plan = _plan_intraday_snapshot_compaction(
+            intraday_snapshots, min_age_minutes=INTRADAY_COMPACTION_MIN_AGE_MINUTES
+        )
+        delete_ids = compaction_plan["delete_snapshot_ids"]
+        keep_ids = compaction_plan["keep_snapshot_ids"]
+        skipped_ids = compaction_plan["skipped_snapshot_ids"]
+        result["retained_buckets"] = compaction_plan["retained_buckets"]
+        result["skipped_snapshots"] = len(skipped_ids)
+
+        if delete_ids:
+            try:
+                result["snapshots"] = _delete_usage_snapshots(delete_ids)
+            except Exception as e:
+                logger.error(f"Failed to delete intraday snapshots via cascade: {e}", exc_info=True)
+                result["model_usage"] = 0
+                result["snapshots"] = 0
+
+        retained_to_slim = [sid for sid in keep_ids if sid not in skipped_ids]
+        if retained_to_slim:
+            try:
+                retained_snapshots = _batch_select_and_update("usage_snapshots", "id", retained_to_slim)
+                for snap in retained_snapshots:
+                    snap_id = snap.get("id")
+                    raw_data = snap.get("raw_data")
+                    if snap_id and raw_data:
+                        slimmed = _slim_raw_data(raw_data)
+                        if slimmed is raw_data:
+                            continue
+                        try:
+                            db_client.table("usage_snapshots").update(
+                                {"raw_data": slimmed}
+                            ).eq("id", snap_id).execute()
+                        except Exception as e:
+                            logger.warning(f"Failed to slim intraday snapshot {snap_id}: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to slim retained intraday snapshots: {e}")
+
+    except Exception as e:
+        logger.error(f"Failed to cleanup intraday snapshots: {e}", exc_info=True)
+
+    total = result["snapshots"] + result["model_usage"]
+    if total > 0 or result["skipped_snapshots"] > 0:
+        logger.info(
+            "Intraday compaction: deleted %s snapshots (related model_usage removed via cascade), "
+            "retained %s hourly bucket(s), %s",
+            result["snapshots"],
+            result["retained_buckets"],
+            (
+                f"skipped {result['skipped_snapshots']} snapshot(s) with invalid timestamps"
                 if result["skipped_snapshots"] > 0
                 else ""
             ),
@@ -2446,6 +2604,15 @@ def main():
         timezone=APP_TIMEZONE,
     )
 
+    # Compact intraday snapshots hourly, keeping last per local-hour bucket
+    scheduler.add_job(
+        _cleanup_intraday_raw_data,
+        "interval",
+        minutes=INTRADAY_COMPACTION_INTERVAL_MINUTES,
+        id="intraday_compaction",
+        next_run_time=datetime.now() + timedelta(minutes=5),
+    )
+
     scheduler.start()
     logger.info(f"Background sync scheduled every {COLLECTOR_INTERVAL} seconds.")
     logger.info(
@@ -2457,6 +2624,10 @@ def main():
     logger.info(
         "Raw data compaction scheduled daily at 00:00 local time "
         f"(skill_runs retention={RAW_DATA_RETENTION_DAYS} day(s))."
+    )
+    logger.info(
+        f"Intraday compaction scheduled every {INTRADAY_COMPACTION_INTERVAL_MINUTES} minute(s) "
+        f"(min_age={INTRADAY_COMPACTION_MIN_AGE_MINUTES} minute(s))."
     )
 
     # Start the Flask app using Waitress

@@ -393,19 +393,19 @@ class RetentionTests(unittest.TestCase):
         class MockTable:
             def __init__(self, table_name):
                 self.table_name = table_name
+                self._is_delete = False
             
             def select(self, *args, **kwargs):
                 return self
             
             def delete(self, *args, **kwargs):
+                self._is_delete = True
                 return self
             
             def in_(self, column, ids):
-                if self.table_name == "usage_snapshots" and column == "id":
+                if self.table_name == "usage_snapshots" and column == "id" and not self._is_delete:
                     select_calls.append(("usage_snapshots", "id", len(ids)))
-                elif self.table_name == "model_usage" and column == "snapshot_id":
-                    delete_calls.append(("model_usage", "snapshot_id", len(ids)))
-                elif self.table_name == "usage_snapshots" and column == "id":
+                elif self.table_name == "usage_snapshots" and column == "id" and self._is_delete:
                     delete_calls.append(("usage_snapshots", "id", len(ids)))
                 return self
             
@@ -452,6 +452,7 @@ class RetentionTests(unittest.TestCase):
             
             for table, column, batch_size in delete_calls:
                 self.assertLessEqual(batch_size, 500, f"Batch size {batch_size} exceeds limit")
+                self.assertEqual(table, "usage_snapshots")
             
             self.assertIsInstance(result, dict)
             self.assertIn("model_usage", result)
@@ -459,7 +460,7 @@ class RetentionTests(unittest.TestCase):
         finally:
             self.module._plan_historical_snapshot_compaction = original_plan
 
-    def test_cleanup_stops_on_model_usage_delete_failure(self):
+    def test_cleanup_stops_when_snapshot_delete_fails(self):
         call_sequence = []
         
         class MockTable:
@@ -477,7 +478,7 @@ class RetentionTests(unittest.TestCase):
             def in_(self, column, ids):
                 action = "delete" if self._is_delete else "select"
                 call_sequence.append((self.table_name, column, action, len(ids)))
-                if self.table_name == "model_usage":
+                if self.table_name == "usage_snapshots" and action == "delete":
                     raise Exception("Simulated delete failure")
                 return self
             
@@ -520,11 +521,14 @@ class RetentionTests(unittest.TestCase):
         try:
             result = self.module._cleanup_old_raw_data()
             
-            model_usage_calls = [c for c in call_sequence if c[0] == "model_usage"]
             snapshot_delete_calls = [c for c in call_sequence if c[0] == "usage_snapshots" and c[2] == "delete"]
             
-            self.assertGreater(len(model_usage_calls), 0, "model_usage delete should be attempted")
-            self.assertEqual(len(snapshot_delete_calls), 0, "usage_snapshots delete should NOT be called after model_usage failure")
+            self.assertGreater(len(snapshot_delete_calls), 0, "usage_snapshots delete should be attempted")
+            self.assertEqual(
+                len([c for c in call_sequence if c[0] == "model_usage" and c[2] == "delete"]),
+                0,
+                "model_usage should not be deleted directly; cleanup must rely on snapshot cascade",
+            )
             
             self.assertEqual(result["model_usage"], 0)
             self.assertEqual(result["snapshots"], 0)
@@ -571,6 +575,90 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(call_count, 2)
         self.assertEqual(result["iterations"], 2)
         self.assertEqual(result["slimmed_snapshots"], 3)
+
+    def test_intraday_compaction_keeps_last_per_hour_bucket(self):
+        plan = self.module._plan_intraday_snapshot_compaction(
+            [
+                {"id": 1, "collected_at": "2026-04-13T00:10:00+07:00"},
+                {"id": 2, "collected_at": "2026-04-13T00:50:00+07:00"},
+                {"id": 3, "collected_at": "2026-04-13T01:10:00+07:00"},
+                {"id": 4, "collected_at": "2026-04-13T01:50:00+07:00"},
+                {"id": 5, "collected_at": "2026-04-13T02:30:00+07:00"},
+            ],
+            min_age_minutes=0,
+        )
+
+        self.assertEqual(plan["delete_snapshot_ids"], [1, 3])
+        self.assertEqual(plan["keep_snapshot_ids"], [2, 4, 5])
+        self.assertEqual(plan["retained_buckets"], 3)
+
+    def test_intraday_compaction_protects_recent_snapshots(self):
+        original_utcnow = self.module._utcnow
+        self.module._utcnow = lambda: self.module.datetime.fromisoformat(
+            "2026-04-13T01:00:00+00:00"
+        )
+        try:
+            plan = self.module._plan_intraday_snapshot_compaction(
+                [
+                    {"id": 10, "collected_at": "2026-04-13T00:00:00Z"},
+                    {"id": 11, "collected_at": "2026-04-13T00:20:00Z"},
+                    {"id": 12, "collected_at": "2026-04-13T00:40:00Z"},
+                ],
+                min_age_minutes=30,
+            )
+        finally:
+            self.module._utcnow = original_utcnow
+
+        self.assertIn(12, plan["keep_snapshot_ids"])
+        self.assertIn(10, plan["delete_snapshot_ids"])
+
+    def test_intraday_compaction_preserves_invalid_timestamp_rows(self):
+        plan = self.module._plan_intraday_snapshot_compaction(
+            [
+                {"id": 100, "collected_at": "invalid"},
+                {"id": 101, "collected_at": "2026-04-13T01:00:00+07:00"},
+                {"id": 102, "collected_at": "2026-04-13T01:30:00+07:00"},
+            ],
+            min_age_minutes=0,
+        )
+
+        self.assertEqual(plan["delete_snapshot_ids"], [101])
+        self.assertEqual(plan["keep_snapshot_ids"], [100, 102])
+        self.assertEqual(plan["skipped_snapshot_ids"], [100])
+
+    def test_main_schedules_intraday_compaction(self):
+        _original_run_startup_cleanup = self.module._run_startup_cleanup
+        cleanup_calls = []
+        serve_calls = []
+        fake_db = object()
+
+        self.module.init_db = lambda: fake_db
+        self.module.db_client = fake_db
+        self.module.flask_app = self.module.Flask(__name__)
+        self.module._cleanup_old_app_logs = lambda: 0
+        self.module._cleanup_old_raw_data = lambda: cleanup_calls.append("daily") or {}
+        self.module._cleanup_intraday_raw_data = lambda: cleanup_calls.append("intraday") or {}
+        self.module.run_full_sync_once = lambda: None
+        self.module.sync_credential_stats = lambda *args, **kwargs: None
+        self.module.serve = lambda *args, **kwargs: serve_calls.append((args, kwargs))
+
+        self.module.main()
+
+        self.assertEqual(cleanup_calls, ["daily"])
+        self.assertTrue(_RecordedScheduler.instances)
+
+        scheduler = _RecordedScheduler.instances[-1]
+        intraday_jobs = [
+            job
+            for job in scheduler.jobs
+            if job["kwargs"].get("id") == "intraday_compaction"
+        ]
+        self.assertEqual(len(intraday_jobs), 1)
+        intraday_job = intraday_jobs[0]
+        self.assertEqual(intraday_job["trigger"], "interval")
+        self.assertIn("minutes", intraday_job["kwargs"])
+        self.assertTrue(scheduler.started)
+        self.assertEqual(len(serve_calls), 1)
 
 
 if __name__ == "__main__":

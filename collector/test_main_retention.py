@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -183,6 +184,17 @@ class RetentionTests(unittest.TestCase):
     def test_app_log_retention_defaults_to_one_day(self):
         self.assertEqual(self.module.APP_LOG_RETENTION_DAYS, 1)
 
+    def test_is_html_gateway_error_requires_html_and_gateway_markers(self):
+        html_gateway_error = Exception(
+            "{'message': 'JSON could not be generated', 'code': 522, 'details': 'b\'<!DOCTYPE html><html>Cloudflare Error code 522 Connection timed out</html>\''}"
+        )
+        plain_html_error = Exception("<!DOCTYPE html><html>regular page</html>")
+        plain_gateway_error = Exception("502 bad gateway")
+
+        self.assertTrue(self.module._is_html_gateway_error(html_gateway_error))
+        self.assertFalse(self.module._is_html_gateway_error(plain_html_error))
+        self.assertFalse(self.module._is_html_gateway_error(plain_gateway_error))
+
     def test_compaction_keeps_last_snapshot_per_local_day(self):
         plan = self.module._plan_historical_snapshot_compaction(
             [
@@ -259,6 +271,51 @@ class RetentionTests(unittest.TestCase):
         result = self.module._cleanup_old_app_logs()
         self.assertIsInstance(result, int)
         self.assertEqual(vacuum_calls, ["called"])
+
+    def test_cleanup_old_app_logs_warns_without_traceback_for_html_gateway_error(self):
+        class FailingTable(_DummyTable):
+            def execute(self):
+                raise Exception(
+                    "{'message': 'JSON could not be generated', 'code': 502, 'details': 'b\'<!DOCTYPE html><html>Cloudflare Bad Gateway error code 502</html>\''}"
+                )
+
+        class FailingDB:
+            def table(self, *args, **kwargs):
+                return FailingTable()
+
+        self.module.db_client = FailingDB()
+        self.module.MAINTENANCE_DATABASE_URL = ""
+
+        with mock.patch.object(self.module.logger, "warning") as warning_mock, mock.patch.object(
+            self.module.logger, "error"
+        ) as error_mock:
+            result = self.module._cleanup_old_app_logs()
+
+        self.assertEqual(result, 0)
+        warning_mock.assert_called_once()
+        error_mock.assert_not_called()
+
+    def test_cleanup_old_app_logs_keeps_error_traceback_for_non_html_failure(self):
+        class FailingTable(_DummyTable):
+            def execute(self):
+                raise Exception("database permission denied")
+
+        class FailingDB:
+            def table(self, *args, **kwargs):
+                return FailingTable()
+
+        self.module.db_client = FailingDB()
+        self.module.MAINTENANCE_DATABASE_URL = ""
+
+        with mock.patch.object(self.module.logger, "warning") as warning_mock, mock.patch.object(
+            self.module.logger, "error"
+        ) as error_mock:
+            result = self.module._cleanup_old_app_logs()
+
+        self.assertEqual(result, 0)
+        warning_mock.assert_not_called()
+        error_mock.assert_called_once()
+        self.assertTrue(error_mock.call_args.kwargs.get("exc_info"))
 
     def test_cleanup_old_raw_data_always_calls_vacuum(self):
         vacuum_calls = []
@@ -575,6 +632,70 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(call_count, 2)
         self.assertEqual(result["iterations"], 2)
         self.assertEqual(result["slimmed_snapshots"], 3)
+
+    def test_startup_cleanup_warns_when_no_progress_is_caused_by_errors(self):
+        cleanup_results = [
+            {
+                "snapshots": 0,
+                "model_usage": 0,
+                "skill_runs": 0,
+                "retained_days": 1,
+                "skipped_snapshots": 0,
+                "slimmed_snapshots": 0,
+                "error": True,
+            }
+        ]
+
+        def mock_cleanup():
+            return cleanup_results.pop(0)
+
+        self.module.db_client = _DummyDB()
+        self.module.MAINTENANCE_DATABASE_URL = ""
+        self.module._run_maintenance_vacuum = lambda: None
+        self.module._cleanup_old_raw_data = mock_cleanup
+
+        with mock.patch.object(self.module.logger, "warning") as warning_mock, mock.patch.object(
+            self.module.logger, "info"
+        ) as info_mock:
+            result = self.module._run_startup_cleanup()
+
+        self.assertEqual(result["iterations"], 1)
+        warning_messages = [call.args[0] for call in warning_mock.call_args_list]
+        self.assertTrue(any("stopping without marking backlog drained" in message for message in warning_messages))
+        info_messages = [call.args[0] for call in info_mock.call_args_list]
+        self.assertFalse(any("backlog drained" in message for message in info_messages))
+
+    def test_startup_cleanup_keeps_backlog_drained_message_when_no_error(self):
+        cleanup_results = [
+            {
+                "snapshots": 0,
+                "model_usage": 0,
+                "skill_runs": 0,
+                "retained_days": 1,
+                "skipped_snapshots": 0,
+                "slimmed_snapshots": 0,
+                "error": False,
+            }
+        ]
+
+        def mock_cleanup():
+            return cleanup_results.pop(0)
+
+        self.module.db_client = _DummyDB()
+        self.module.MAINTENANCE_DATABASE_URL = ""
+        self.module._run_maintenance_vacuum = lambda: None
+        self.module._cleanup_old_raw_data = mock_cleanup
+
+        with mock.patch.object(self.module.logger, "warning") as warning_mock, mock.patch.object(
+            self.module.logger, "info"
+        ) as info_mock:
+            result = self.module._run_startup_cleanup()
+
+        self.assertEqual(result["iterations"], 1)
+        warning_messages = [call.args[0] for call in warning_mock.call_args_list]
+        self.assertFalse(any("stopping without marking backlog drained" in message for message in warning_messages))
+        info_messages = [call.args[0] for call in info_mock.call_args_list]
+        self.assertTrue(any("backlog drained" in message for message in info_messages))
 
     def test_intraday_compaction_keeps_last_per_hour_bucket(self):
         plan = self.module._plan_intraday_snapshot_compaction(

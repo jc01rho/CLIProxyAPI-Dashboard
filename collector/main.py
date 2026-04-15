@@ -713,6 +713,25 @@ def _run_maintenance_vacuum() -> None:
         logger.warning(f"Maintenance vacuum failed: {e}")
 
 
+def _is_html_gateway_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    html_markers = ("<!doctype html", "<html", "</html>")
+    gateway_markers = (
+        "cloudflare",
+        "bad gateway",
+        "connection timed out",
+        "error code 502",
+        "error code 522",
+        "'code': 502",
+        '"code": 502',
+        "'code': 522",
+        '"code": 522',
+    )
+    return any(marker in message for marker in html_markers) and any(
+        marker in message for marker in gateway_markers
+    )
+
+
 def _cleanup_old_app_logs() -> int:
     if not db_client:
         return 0
@@ -729,7 +748,13 @@ def _cleanup_old_app_logs() -> int:
         _run_maintenance_vacuum()
         return deleted_count
     except Exception as e:
-        logger.error(f"Failed to cleanup old app logs: {e}", exc_info=True)
+        if _is_html_gateway_error(e):
+            logger.warning(
+                "Cleanup old app logs skipped due to likely transient Supabase/PostgREST HTML gateway response: %s",
+                e,
+            )
+        else:
+            logger.error(f"Failed to cleanup old app logs: {e}", exc_info=True)
         return 0
 
 
@@ -756,6 +781,7 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
         "retained_days": 0,
         "skipped_snapshots": 0,
         "slimmed_snapshots": 0,
+        "error": False,
     }
 
     try:
@@ -780,7 +806,14 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
             try:
                 result["snapshots"] = _delete_usage_snapshots(delete_ids)
             except Exception as e:
-                logger.error(f"Failed to delete old snapshots via cascade: {e}", exc_info=True)
+                if _is_html_gateway_error(e):
+                    logger.warning(
+                        "Cleanup raw data snapshot delete skipped due to likely transient Supabase/PostgREST HTML gateway response: %s",
+                        e,
+                    )
+                else:
+                    logger.error(f"Failed to delete old snapshots via cascade: {e}", exc_info=True)
+                result["error"] = True
                 result["model_usage"] = 0
                 result["snapshots"] = 0
 
@@ -802,12 +835,34 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
                             ).eq("id", snap_id).execute()
                             result["slimmed_snapshots"] += 1
                         except Exception as e:
-                            logger.warning(f"Failed to slim snapshot {snap_id}: {e}")
+                            if _is_html_gateway_error(e):
+                                logger.warning(
+                                    "Cleanup raw data slim skipped for snapshot %s due to likely transient Supabase/PostgREST HTML gateway response: %s",
+                                    snap_id,
+                                    e,
+                                )
+                            else:
+                                logger.warning(f"Failed to slim snapshot {snap_id}: {e}")
+                            result["error"] = True
             except Exception as e:
-                logger.warning(f"Failed to slim retained snapshots: {e}")
+                if _is_html_gateway_error(e):
+                    logger.warning(
+                        "Cleanup raw data retained-snapshot fetch skipped due to likely transient Supabase/PostgREST HTML gateway response: %s",
+                        e,
+                    )
+                else:
+                    logger.warning(f"Failed to slim retained snapshots: {e}")
+                result["error"] = True
 
     except Exception as e:
-        logger.error(f"Failed to cleanup old snapshots: {e}", exc_info=True)
+        if _is_html_gateway_error(e):
+            logger.warning(
+                "Cleanup old snapshots skipped due to likely transient Supabase/PostgREST HTML gateway response: %s",
+                e,
+            )
+        else:
+            logger.error(f"Failed to cleanup old snapshots: {e}", exc_info=True)
+        result["error"] = True
 
     try:
         deleted_skill_runs = (
@@ -819,7 +874,14 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
         ) or []
         result["skill_runs"] = len(deleted_skill_runs)
     except Exception as e:
-        logger.error(f"Failed to cleanup old skill_runs: {e}", exc_info=True)
+        if _is_html_gateway_error(e):
+            logger.warning(
+                "Cleanup old skill_runs skipped due to likely transient Supabase/PostgREST HTML gateway response: %s",
+                e,
+            )
+        else:
+            logger.error(f"Failed to cleanup old skill_runs: {e}", exc_info=True)
+        result["error"] = True
 
     total = result["snapshots"] + result["model_usage"] + result["skill_runs"]
     if total > 0 or result["skipped_snapshots"] > 0 or result["slimmed_snapshots"] > 0:
@@ -984,10 +1046,16 @@ def _run_startup_cleanup() -> Dict[str, int]:
             aggregate["retained_days"] = result["retained_days"]
 
         if progress == 0:
-            logger.info(
-                "Startup cleanup: no progress on iteration %d; backlog drained.",
-                iteration,
-            )
+            if result.get("error", False):
+                logger.warning(
+                    "Startup cleanup: no progress on iteration %d due to cleanup errors; stopping without marking backlog drained.",
+                    iteration,
+                )
+            else:
+                logger.info(
+                    "Startup cleanup: no progress on iteration %d; backlog drained.",
+                    iteration,
+                )
             break
 
         logger.info(

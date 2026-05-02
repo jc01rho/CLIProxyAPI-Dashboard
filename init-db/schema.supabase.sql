@@ -199,6 +199,43 @@ CREATE INDEX IF NOT EXISTS idx_app_logs_source_logged_at ON app_logs(source, log
 CREATE UNIQUE INDEX IF NOT EXISTS uq_app_logs_event_uid ON app_logs(event_uid);
 
 -- =====================
+-- Request Events Table
+-- =====================
+
+CREATE TABLE IF NOT EXISTS request_events (
+    id BIGSERIAL PRIMARY KEY,
+    event_uid TEXT NOT NULL UNIQUE,
+    snapshot_id BIGINT REFERENCES usage_snapshots(id) ON DELETE SET NULL,
+    request_id TEXT,
+    occurred_at TIMESTAMPTZ NOT NULL,
+    api_endpoint TEXT NOT NULL DEFAULT '',
+    endpoint_method TEXT NOT NULL DEFAULT '',
+    endpoint_path TEXT NOT NULL DEFAULT '',
+    model_name TEXT NOT NULL DEFAULT '',
+    source_id TEXT NOT NULL DEFAULT '',
+    auth_index TEXT NOT NULL DEFAULT '',
+    latency_ms BIGINT NOT NULL DEFAULT 0,
+    failed BOOLEAN NOT NULL DEFAULT FALSE,
+    input_tokens BIGINT NOT NULL DEFAULT 0,
+    output_tokens BIGINT NOT NULL DEFAULT 0,
+    reasoning_tokens BIGINT NOT NULL DEFAULT 0,
+    cached_tokens BIGINT NOT NULL DEFAULT 0,
+    total_tokens BIGINT NOT NULL DEFAULT 0,
+    raw_detail JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_request_events_occurred_at ON request_events(occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_request_events_model_occurred ON request_events(model_name, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_request_events_endpoint_occurred ON request_events(api_endpoint, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_request_events_source_occurred ON request_events(source_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_request_events_auth_occurred ON request_events(auth_index, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_request_events_failed_occurred ON request_events(failed, occurred_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_request_events_request_id ON request_events(request_id) WHERE request_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_request_events_provider_occurred ON request_events((raw_detail->>'provider'), occurred_at DESC)
+    WHERE raw_detail->>'provider' IS NOT NULL;
+
+-- =====================
 -- Seed Data
 -- =====================
 
@@ -224,6 +261,7 @@ ALTER TABLE admin_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE skill_runs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE skill_daily_stats ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE request_events ENABLE ROW LEVEL SECURITY;
 
 -- Read-only policies for anon (frontend with publishable key)
 CREATE POLICY "anon_read_usage_snapshots" ON usage_snapshots FOR SELECT TO anon USING (true);
@@ -236,6 +274,7 @@ CREATE POLICY "anon_read_admin_sessions" ON admin_sessions FOR SELECT TO anon US
 CREATE POLICY "anon_read_skill_runs" ON skill_runs FOR SELECT TO anon USING (true);
 CREATE POLICY "anon_read_skill_daily_stats" ON skill_daily_stats FOR SELECT TO anon USING (true);
 CREATE POLICY "anon_read_app_logs" ON app_logs FOR SELECT TO anon USING (true);
+CREATE POLICY "anon_read_request_events" ON request_events FOR SELECT TO anon USING (true);
 
 -- Read-only policies for authenticated users
 CREATE POLICY "auth_read_usage_snapshots" ON usage_snapshots FOR SELECT TO authenticated USING (true);
@@ -248,3 +287,4 @@ CREATE POLICY "auth_read_admin_sessions" ON admin_sessions FOR SELECT TO authent
 CREATE POLICY "auth_read_skill_runs" ON skill_runs FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read_skill_daily_stats" ON skill_daily_stats FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read_app_logs" ON app_logs FOR SELECT TO authenticated USING (true);
+CREATE POLICY "auth_read_request_events" ON request_events FOR SELECT TO authenticated USING (true);

@@ -13,7 +13,8 @@ import secrets
 import threading
 from uuid import uuid4
 from datetime import datetime, date, timezone, timedelta
-from typing import Optional, Dict, Any, Tuple
+import json
+from typing import Optional, Dict, Any, Tuple, List
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -26,6 +27,7 @@ from credential_stats_sync import sync_credential_stats
 from waitress import serve
 from apscheduler.schedulers.background import BackgroundScheduler
 from supabase import create_client
+from redis_queue_client import RESPClient, RESPError
 
 # Configurable timezone via environment variable (default: UTC+7 for Vietnam)
 TIMEZONE_OFFSET_HOURS = int(os.environ.get("TIMEZONE_OFFSET_HOURS", "7"))
@@ -112,6 +114,17 @@ CLEANUP_BATCH_SIZE = 500
 # Page size for historical snapshot query per cleanup iteration (smaller for startup safety)
 CLEANUP_SNAPSHOT_PAGE_SIZE = _env_int("CLEANUP_SNAPSHOT_PAGE_SIZE", 100)
 
+# --- Request Event Queue Sync Configuration ---
+USAGE_SYNC_MODE = str(os.getenv("USAGE_SYNC_MODE", "auto")).strip().lower()
+if USAGE_SYNC_MODE not in ("auto", "management", "queue", "redis"):
+    USAGE_SYNC_MODE = "auto"
+USAGE_QUEUE_BATCH_SIZE = _env_int("USAGE_QUEUE_BATCH_SIZE", 50)
+USAGE_QUEUE_SYNC_INTERVAL = _env_int("USAGE_QUEUE_SYNC_INTERVAL_SECONDS", 10)
+REDIS_QUEUE_ADDR = str(os.getenv("REDIS_QUEUE_ADDR", "")).strip()
+REDIS_QUEUE_KEY = str(os.getenv("REDIS_QUEUE_KEY", "cliproxy:usage_events")).strip()
+REDIS_QUEUE_BATCH_SIZE = _env_int("REDIS_QUEUE_BATCH_SIZE", 50)
+REDIS_QUEUE_SOCKET_TIMEOUT = float(os.getenv("REDIS_QUEUE_SOCKET_TIMEOUT", "5"))
+REDIS_QUEUE_SYNC_INTERVAL = _env_int("REDIS_QUEUE_SYNC_INTERVAL_SECONDS", 10)
 
 # Default pricing (USD per 1M tokens) - Updated Dec 2024
 DEFAULT_PRICING = {
@@ -156,6 +169,7 @@ LLM_PRICES_URL = "https://www.llm-prices.com/current-v1.json"
 db_client: Optional[Any] = None
 remote_pricing_cache: Dict[str, Dict[str, float]] = {}
 remote_pricing_last_fetch: float = 0
+_request_events_table_warned: bool = False
 
 # --- Flask App Setup ---
 flask_app = Flask(__name__)
@@ -1581,10 +1595,43 @@ def run_full_sync_once():
         severity="info",
         title="Sync started",
         message="Collector full sync started.",
-        details={"cliproxy_url": CLIPROXY_URL, "verbosity": LOG_VERBOSITY},
+        details={
+            "cliproxy_url": CLIPROXY_URL,
+            "verbosity": LOG_VERBOSITY,
+            "sync_mode": USAGE_SYNC_MODE,
+        },
     )
 
-    logger.info("Fetching usage data...")
+    if _should_use_management_polling():
+        _run_management_sync(run_id)
+
+    if _should_use_redis_queue():
+        redis_summary = _redis_queue_sync_once()
+        if redis_summary.get("persisted", 0) > 0:
+            _log_sync_event(
+                run_id=run_id,
+                source="collector",
+                category="db",
+                severity="info",
+                title="Redis queue sync ok",
+                message="Redis queue events persisted.",
+                details=redis_summary,
+            )
+
+    duration_ms = int((time.time() - sync_started_at) * 1000)
+    _log_sync_event(
+        run_id=run_id,
+        source="collector",
+        category="sync",
+        severity="info",
+        title="Sync completed",
+        message="Collector full sync completed.",
+        details={"duration_ms": duration_ms},
+    )
+
+
+def _run_management_sync(run_id: str) -> None:
+    logger.info("Fetching usage data from management API...")
     _log_sync_event(
         run_id=run_id,
         source="collector",
@@ -1647,20 +1694,6 @@ def run_full_sync_once():
             message="No usage data received from CLIProxy API.",
             details=fetch_meta or {"cliproxy_url": CLIPROXY_URL},
         )
-
-    duration_ms = int((time.time() - sync_started_at) * 1000)
-    _log_sync_event(
-        run_id=run_id,
-        source="collector",
-        category="sync",
-        severity="info",
-        title="Sync completed",
-        message="Collector full sync completed.",
-        details={
-            "duration_ms": duration_ms,
-            "result": "success" if data else "partial",
-        },
-    )
 
 
 # --- Core Logic Functions (fetch_remote_pricing, init_db, etc.) ---
@@ -1748,6 +1781,38 @@ def fetch_usage_data() -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
         }
 
 
+def fetch_usage_queue_items(count: int) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Drain request-level usage events from CLIProxyAPIPlus management queue."""
+    url = f"{CLIPROXY_URL}/v0/management/usage-queue"
+    headers = (
+        {"Authorization": f"Bearer {CLIPROXY_MANAGEMENT_KEY}"}
+        if CLIPROXY_MANAGEMENT_KEY
+        else {}
+    )
+    started = time.time()
+    try:
+        response = requests.get(url, headers=headers, params={"count": count}, timeout=30)
+        response.raise_for_status()
+        payload = response.json()
+        items = payload.get("items") if isinstance(payload, dict) else []
+        if not isinstance(items, list):
+            items = []
+        return [item for item in items if isinstance(item, dict)], {
+            "cliproxy_url": CLIPROXY_URL,
+            "http_status": response.status_code,
+            "latency_ms": int((time.time() - started) * 1000),
+            "count": len(items),
+        }
+    except requests.exceptions.RequestException as e:
+        meta = {
+            "cliproxy_url": CLIPROXY_URL,
+            "latency_ms": int((time.time() - started) * 1000),
+            "error": str(e),
+        }
+        logger.warning("Failed to fetch usage queue events: %s", e)
+        return [], meta
+
+
 def get_model_pricing() -> Dict[str, Dict[str, float]]:
     # (Implementation from before)
     remote_pricing = fetch_remote_pricing()
@@ -1778,6 +1843,419 @@ def calculate_cost(
     )
 
 
+# --- Request Event Helpers ---
+
+_SOURCE_SECRET_KEY_FRAGMENTS = (
+    "bearer", "token", "api_key", "apikey",
+    "secret", "password", "credential",
+)
+
+
+def _redact_source_id(source: Any) -> str:
+    """Redact source/credential identifier, keeping short prefix and suffix."""
+    raw = str(source or "").strip()
+    if not raw:
+        return ""
+    if len(raw) <= 8:
+        return raw[:2] + "***"
+    return raw[:4] + "***" + raw[-4:]
+
+
+def _extract_detail_tokens(detail: Dict[str, Any]) -> Dict[str, int]:
+    """Extract token counts from a detail dict."""
+    tokens = detail.get("tokens") or {}
+    return {
+        "input_tokens": _safe_int(tokens.get("input_tokens"), 0),
+        "output_tokens": _safe_int(tokens.get("output_tokens"), 0),
+        "reasoning_tokens": _safe_int(tokens.get("reasoning_tokens"), 0),
+        "cached_tokens": _safe_int(tokens.get("cached_tokens"), 0),
+    }
+
+
+def _parse_detail_occurred_at(
+    detail: Dict[str, Any], fallback: datetime
+) -> datetime:
+    """Parse occurred_at from detail timestamp, falling back to *fallback*."""
+    for field in ("timestamp", "occurred_at", "created_at"):
+        ts = detail.get(field)
+        if ts:
+            parsed = _parse_iso_datetime(ts)
+            if parsed:
+                return parsed
+    return fallback
+
+
+def _generate_request_event_uid(
+    api_endpoint: str,
+    model_name: str,
+    source_raw: str,
+    occurred_at: datetime,
+    auth_index: Any,
+) -> str:
+    """Deterministic sha256 event_uid from stable fields."""
+    key = (
+        f"{api_endpoint}|{model_name}|{source_raw}|"
+        f"{occurred_at.isoformat()}|{auth_index}"
+    )
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _sanitize_raw_detail(detail: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of detail with source/secret values redacted."""
+    sanitized: Dict[str, Any] = {}
+    for k, v in detail.items():
+        kl = k.lower()
+        if kl == "source":
+            sanitized["source_redacted"] = _redact_source_id(v)
+        elif kl == "tokens":
+            sanitized[k] = v
+        elif isinstance(v, str) and len(v) > 16 and any(
+            frag in kl for frag in _SOURCE_SECRET_KEY_FRAGMENTS
+        ):
+            sanitized[k] = _redact_source_id(v)
+        else:
+            sanitized[k] = v
+    return sanitized
+
+
+def _generate_redis_event_uid(payload: Dict[str, Any]) -> str:
+    """Deterministic uid for Redis queue events. Uses request_id if present, else stable hash."""
+    request_id = str(payload.get("request_id") or "").strip()
+    if request_id:
+        return f"rq:{hashlib.sha256(request_id.encode('utf-8')).hexdigest()}"
+    occurred_at = _parse_detail_occurred_at(payload, _utcnow())
+    key = (
+        f"{payload.get('endpoint', '')}|{payload.get('model', '')}|"
+        f"{payload.get('source', '')}|{occurred_at.isoformat()}|"
+        f"{payload.get('auth_index', '')}|{payload.get('latency_ms', 0)}"
+    )
+    return f"rq:{hashlib.sha256(key.encode('utf-8')).hexdigest()}"
+
+
+def _redact_queue_api_key(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return payload copy with api_key redacted, preserving other fields for raw_detail."""
+    redacted: Dict[str, Any] = {}
+    for k, v in payload.items():
+        if k == "api_key":
+            redacted["api_key"] = _redact_source_id(v)
+        elif k == "source":
+            redacted["source_redacted"] = _redact_source_id(v)
+            redacted["source"] = ""
+        else:
+            redacted[k] = v
+    return redacted
+
+
+def _transform_queue_event(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Transform a single Redis queue JSON payload into a request_events row dict."""
+    if not isinstance(payload, dict):
+        return None
+    occurred_at = _parse_detail_occurred_at(payload, _utcnow())
+    tokens = payload.get("tokens") or {}
+    input_tokens = _safe_int(tokens.get("input_tokens"), 0)
+    output_tokens = _safe_int(tokens.get("output_tokens"), 0)
+    reasoning_tokens = _safe_int(tokens.get("reasoning_tokens"), 0)
+    cached_tokens = _safe_int(tokens.get("cached_tokens"), 0)
+    total_tokens = _safe_int(tokens.get("total_tokens"), 0)
+    if total_tokens == 0:
+        total_tokens = input_tokens + output_tokens + reasoning_tokens
+
+    event_uid = _generate_redis_event_uid(payload)
+    request_id = str(payload.get("request_id") or "").strip() or None
+    source_raw = str(payload.get("source") or "").strip()
+    raw_detail = _redact_queue_api_key(payload)
+
+    return {
+        "event_uid": event_uid,
+        "snapshot_id": None,
+        "request_id": request_id,
+        "occurred_at": occurred_at.isoformat(),
+        "api_endpoint": str(payload.get("endpoint", ""))[:255],
+        "endpoint_method": "",
+        "endpoint_path": "",
+        "model_name": str(payload.get("model", ""))[:255],
+        "source_id": _redact_source_id(source_raw)[:255],
+        "auth_index": str(payload.get("auth_index", "")),
+        "latency_ms": _safe_int(payload.get("latency_ms"), 0),
+        "failed": bool(payload.get("failed", False)),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "cached_tokens": cached_tokens,
+        "total_tokens": total_tokens,
+        "raw_detail": raw_detail,
+        "ingested_at": _utcnow().isoformat(),
+    }
+
+
+def _redis_queue_sync_once() -> Dict[str, Any]:
+    """Pop events from the Redis queue and persist them to request_events."""
+    global _request_events_table_warned
+    summary: Dict[str, Any] = {
+        "popped": 0,
+        "parsed": 0,
+        "persisted": 0,
+        "duration_ms": 0,
+    }
+    if not db_client or not REDIS_QUEUE_ADDR:
+        return summary
+
+    t0 = time.time()
+    client: Optional[RESPClient] = None
+    try:
+        client = RESPClient(REDIS_QUEUE_ADDR, socket_timeout=REDIS_QUEUE_SOCKET_TIMEOUT)
+        raw_items = client.lpop_batch(REDIS_QUEUE_KEY, REDIS_QUEUE_BATCH_SIZE)
+        summary["popped"] = len(raw_items)
+    except (RESPError, ConnectionError, OSError) as e:
+        logger.warning("Redis queue pop failed: %s", e)
+        if client:
+            try:
+                client.close()
+            except OSError:
+                pass
+        return summary
+
+    try:
+        events: List[Dict[str, Any]] = []
+        for raw in raw_items:
+            try:
+                payload = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            row = _transform_queue_event(payload)
+            if row is not None:
+                events.append(row)
+        summary["parsed"] = len(events)
+
+        if events:
+            batch_size = 100
+            for i in range(0, len(events), batch_size):
+                batch = events[i: i + batch_size]
+                db_client.table("request_events").upsert(
+                    batch, on_conflict="event_uid"
+                ).execute()
+                summary["persisted"] += len(batch)
+            _request_events_table_warned = False
+    except Exception as e:
+        err_msg = str(e).lower()
+        is_missing_table = any(
+            marker in err_msg
+            for marker in ("does not exist", "not found", "relation")
+        )
+        if is_missing_table:
+            if not _request_events_table_warned:
+                _request_events_table_warned = True
+                logger.warning(
+                    "request_events table not found — skipping Redis queue persistence. "
+                    "Run migrations to create it."
+                )
+        else:
+            logger.error("Failed to upsert Redis queue events: %s", e, exc_info=True)
+    finally:
+        try:
+            client.close()
+        except OSError:
+            pass
+
+    summary["duration_ms"] = int((time.time() - t0) * 1000)
+    if summary["popped"] > 0:
+        logger.info(
+            "Redis queue sync: popped=%d, parsed=%d, persisted=%d, duration_ms=%d",
+            summary["popped"], summary["parsed"], summary["persisted"],
+            summary["duration_ms"],
+        )
+    return summary
+
+
+def _persist_queue_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Persist already decoded usage queue payloads into request_events."""
+    global _request_events_table_warned
+    summary: Dict[str, Any] = {"popped": len(payloads), "parsed": 0, "persisted": 0, "duration_ms": 0}
+    if not db_client or not payloads:
+        return summary
+
+    t0 = time.time()
+    try:
+        events: List[Dict[str, Any]] = []
+        for payload in payloads:
+            row = _transform_queue_event(payload)
+            if row is not None:
+                events.append(row)
+        summary["parsed"] = len(events)
+        if events:
+            for i in range(0, len(events), 100):
+                batch = events[i: i + 100]
+                db_client.table("request_events").upsert(batch, on_conflict="event_uid").execute()
+                summary["persisted"] += len(batch)
+            _request_events_table_warned = False
+    except Exception as e:
+        err_msg = str(e).lower()
+        is_missing_table = any(marker in err_msg for marker in ("does not exist", "not found", "relation"))
+        if is_missing_table:
+            if not _request_events_table_warned:
+                _request_events_table_warned = True
+                logger.warning("request_events table not found — skipping usage queue persistence. Run migrations to create it.")
+        else:
+            logger.error("Failed to upsert usage queue events: %s", e, exc_info=True)
+    summary["duration_ms"] = int((time.time() - t0) * 1000)
+    return summary
+
+
+def _usage_queue_sync_once() -> Dict[str, Any]:
+    """Drain CLIProxyAPIPlus in-memory usage queue over the management API."""
+    payloads, meta = fetch_usage_queue_items(USAGE_QUEUE_BATCH_SIZE)
+    summary = _persist_queue_payloads(payloads)
+    summary["meta"] = meta
+    if summary["popped"] > 0:
+        logger.info(
+            "Usage queue sync: popped=%d, parsed=%d, persisted=%d, duration_ms=%d",
+            summary["popped"], summary["parsed"], summary["persisted"], summary["duration_ms"],
+        )
+    return summary
+
+
+def _should_use_usage_queue() -> bool:
+    return USAGE_SYNC_MODE in ("auto", "queue")
+
+
+def _should_use_redis_queue() -> bool:
+    if USAGE_SYNC_MODE == "redis":
+        return bool(REDIS_QUEUE_ADDR)
+    if USAGE_SYNC_MODE == "auto":
+        return bool(REDIS_QUEUE_ADDR)
+    return False
+
+
+def _should_use_management_polling() -> bool:
+    if USAGE_SYNC_MODE == "management":
+        return True
+    if USAGE_SYNC_MODE == "auto":
+        return True
+    return False
+
+
+def _flatten_and_persist_request_events(
+    *,
+    usage: Dict[str, Any],
+    snapshot_id: int,
+    collected_at: datetime,
+    run_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Flatten usage.apis[*].models[*].details[] and upsert into request_events.
+
+    Returns a summary dict with counts and timing.  Gracefully handles a
+    missing ``request_events`` table (migration may not have run yet).
+    """
+    global _request_events_table_warned
+    summary: Dict[str, Any] = {
+        "events_flattened": 0,
+        "events_persisted": 0,
+        "duration_ms": 0,
+    }
+    if not db_client:
+        return summary
+
+    events: list = []
+    apis = usage.get("apis")
+    if not isinstance(apis, dict):
+        return summary
+
+    for api_endpoint, api_data in apis.items():
+        if not isinstance(api_data, dict):
+            continue
+        models = api_data.get("models")
+        if not isinstance(models, dict):
+            continue
+        for model_name, model_data in models.items():
+            if not isinstance(model_data, dict):
+                continue
+            details = model_data.get("details")
+            if not isinstance(details, list):
+                continue
+            for detail in details:
+                if not isinstance(detail, dict):
+                    continue
+
+                source_raw = str(detail.get("source") or "").strip()
+                source_id = _redact_source_id(source_raw)
+                auth_index_raw = detail.get("auth_index", "")
+                auth_index_str = str(auth_index_raw if auth_index_raw is not None else "")
+                occurred_at = _parse_detail_occurred_at(detail, collected_at)
+                tok = _extract_detail_tokens(detail)
+                total_tokens = (
+                    tok["input_tokens"]
+                    + tok["output_tokens"]
+                    + tok["reasoning_tokens"]
+                    + tok["cached_tokens"]
+                )
+
+                event_uid = _generate_request_event_uid(
+                    api_endpoint=api_endpoint,
+                    model_name=model_name,
+                    source_raw=source_raw,
+                    occurred_at=occurred_at,
+                    auth_index=auth_index_raw,
+                )
+
+                raw_detail = _sanitize_raw_detail(detail)
+                latency = _safe_int(detail.get("latency_ms"), 0)
+
+                events.append({
+                    "event_uid": event_uid,
+                    "snapshot_id": snapshot_id,
+                    "api_endpoint": str(api_endpoint)[:255],
+                    "endpoint_method": "",
+                    "endpoint_path": "",
+                    "model_name": str(model_name)[:255],
+                    "occurred_at": occurred_at.isoformat(),
+                    "source_id": str(source_id)[:255],
+                    "auth_index": auth_index_str,
+                    "latency_ms": latency,
+                    "failed": bool(detail.get("failed", False)),
+                    "input_tokens": tok["input_tokens"],
+                    "output_tokens": tok["output_tokens"],
+                    "reasoning_tokens": tok["reasoning_tokens"],
+                    "cached_tokens": tok["cached_tokens"],
+                    "total_tokens": total_tokens,
+                    "raw_detail": raw_detail,
+                    "ingested_at": collected_at.isoformat(),
+                })
+
+    summary["events_flattened"] = len(events)
+    if not events:
+        return summary
+
+    t0 = time.time()
+    try:
+        batch_size = 100
+        for i in range(0, len(events), batch_size):
+            batch = events[i : i + batch_size]
+            db_client.table("request_events").upsert(
+                batch, on_conflict="event_uid"
+            ).execute()
+            summary["events_persisted"] += len(batch)
+        _request_events_table_warned = False
+    except Exception as e:
+        err_msg = str(e).lower()
+        is_missing_table = any(
+            marker in err_msg
+            for marker in ("does not exist", "not found", "relation")
+        )
+        if is_missing_table:
+            if not _request_events_table_warned:
+                _request_events_table_warned = True
+                logger.warning(
+                    "request_events table not found \u2014 skipping "
+                    "request-level persistence. Run migrations to create it."
+                )
+        else:
+            logger.error(
+                "Failed to upsert request_events: %s", e, exc_info=True
+            )
+    summary["duration_ms"] = int((time.time() - t0) * 1000)
+    return summary
+
+
 def store_usage_data(
     data: Dict[str, Any], run_id: Optional[str] = None
 ) -> Tuple[bool, Dict[str, Any]]:
@@ -1798,6 +2276,7 @@ def store_usage_data(
         db_timings_ms = {
             "snapshot_insert": 0,
             "model_usage_insert": 0,
+            "request_events_upsert": 0,
             "snapshot_cost_update": 0,
             "daily_stats_upsert": 0,
         }
@@ -1883,6 +2362,18 @@ def store_usage_data(
             t0 = time.time()
             db_client.table("model_usage").insert(model_records).execute()
             db_timings_ms["model_usage_insert"] = int((time.time() - t0) * 1000)
+
+        # Persist request-level events from details (graceful if table missing)
+        _re_summary = _flatten_and_persist_request_events(
+            usage=usage,
+            snapshot_id=snapshot_id,
+            collected_at=_utcnow(),
+            run_id=run_id,
+        )
+        if _re_summary.get("events_persisted", 0) > 0:
+            db_timings_ms["request_events_upsert"] = _re_summary.get(
+                "duration_ms", 0
+            )
 
         # Update snapshot cumulative cost
         cumulative_cost = last_cost_total + total_cost
@@ -2681,8 +3172,42 @@ def main():
         next_run_time=datetime.now() + timedelta(minutes=5),
     )
 
+    if _should_use_redis_queue():
+        scheduler.add_job(
+            _redis_queue_sync_once,
+            "interval",
+            seconds=REDIS_QUEUE_SYNC_INTERVAL,
+            id="redis_queue_sync",
+            next_run_time=datetime.now() + timedelta(seconds=5),
+        )
+
+    if _should_use_usage_queue():
+        scheduler.add_job(
+            _usage_queue_sync_once,
+            "interval",
+            seconds=USAGE_QUEUE_SYNC_INTERVAL,
+            id="usage_queue_sync",
+            next_run_time=datetime.now() + timedelta(seconds=5),
+        )
+
     scheduler.start()
     logger.info(f"Background sync scheduled every {COLLECTOR_INTERVAL} seconds.")
+    logger.info(
+        f"Usage sync mode: {USAGE_SYNC_MODE}"
+        f" (management={'on' if _should_use_management_polling() else 'off'},"
+        f" queue={'on' if _should_use_usage_queue() else 'off'},"
+        f" redis={'on' if _should_use_redis_queue() else 'off'})"
+    )
+    if _should_use_usage_queue():
+        logger.info(
+            f"Usage queue sync scheduled every {USAGE_QUEUE_SYNC_INTERVAL}s"
+            f" (endpoint=/v0/management/usage-queue, batch={USAGE_QUEUE_BATCH_SIZE})"
+        )
+    if _should_use_redis_queue():
+        logger.info(
+            f"Redis queue sync scheduled every {REDIS_QUEUE_SYNC_INTERVAL}s"
+            f" (addr={REDIS_QUEUE_ADDR[:30]}..., key={REDIS_QUEUE_KEY}, batch={REDIS_QUEUE_BATCH_SIZE})"
+        )
     logger.info(
         f"Credential stats sync scheduled every {CREDENTIAL_SYNC_INTERVAL} seconds."
     )

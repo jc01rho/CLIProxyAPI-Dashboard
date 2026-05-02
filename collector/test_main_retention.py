@@ -165,6 +165,25 @@ def _install_dependency_stubs() -> None:
     psycopg2.connect = lambda url: MockConn()
     sys.modules.setdefault("psycopg2", psycopg2)
 
+    redis_queue_client = types.ModuleType("redis_queue_client")
+
+    class RESPError(Exception):
+        pass
+
+    class RESPClient:
+        def __init__(self, addr, socket_timeout=5.0):
+            pass
+        def lpop_batch(self, key, count):
+            return []
+        def close(self):
+            pass
+        def ping(self):
+            return True
+
+    redis_queue_client.RESPClient = RESPClient
+    redis_queue_client.RESPError = RESPError
+    sys.modules.setdefault("redis_queue_client", redis_queue_client)
+
 
 def _load_module():
     _RecordedScheduler.instances = []

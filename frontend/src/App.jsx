@@ -264,6 +264,7 @@ function App() {
         setSkillRuns([])
         setSkillDailyStats([])
         setAppLogs([])
+        setRequestEvents([])
         setLastUpdated(null)
         setCredentialData(null)
         setCredentialTimeSeries({ byDay: [], byHour: [], meta: {} })
@@ -291,6 +292,7 @@ function App() {
     const [skillRuns, setSkillRuns] = useState([])
     const [skillDailyStats, setSkillDailyStats] = useState([])
     const [appLogs, setAppLogs] = useState([])
+    const [requestEvents, setRequestEvents] = useState([])
     const [loading, setLoading] = useState(true)
     const [isRefreshing, setIsRefreshing] = useState(false)
     const [hasInitialDataLoaded, setHasInitialDataLoaded] = useState(false)
@@ -1188,7 +1190,7 @@ function App() {
                 }
             }
 
-            const [skillRunsData, skillDailyData, appLogsData] = await Promise.all([
+            const [skillRunsData, skillDailyData, appLogsData, requestEventsData] = await Promise.all([
                 selectRows('skill_runs', {
                     select: 'event_uid,tool_use_id,skill_name,session_id,machine_id,source,triggered_at,status,error_type,error_message,attempt_no,tokens_used,output_tokens,duration_ms,model,tool_calls,estimated_cost_usd,is_skeleton,project_dir',
                     filters: [
@@ -1216,6 +1218,15 @@ function App() {
                     order: { column: 'logged_at', ascending: false },
                     limit: APP_LOGS_PAGE_SIZE,
                 }),
+                selectRows('request_events', {
+                    select: 'id,event_uid,occurred_at,api_endpoint,model_name,source_id,auth_index,latency_ms,failed,input_tokens,output_tokens,reasoning_tokens,cached_tokens,total_tokens',
+                    filters: [
+                        ...(startTime ? [{ column: 'occurred_at', operator: 'gte', value: startTime }] : []),
+                        ...(endTime ? [{ column: 'occurred_at', operator: 'lt', value: endTime }] : []),
+                    ],
+                    order: { column: 'occurred_at', ascending: false },
+                    limit: 2000,
+                }),
             ])
 
             const appRows = appLogsData || []
@@ -1223,8 +1234,8 @@ function App() {
             setSkillRuns(skillRunsData || [])
             setSkillDailyStats(skillDailyData || [])
             setAppLogs(appRows)
+            setRequestEvents(requestEventsData || [])
             setHasInitialDataLoaded(true)
-
             setLoading(false)
             setIsRefreshing(false)
         } catch (error) {
@@ -1484,6 +1495,7 @@ function App() {
                 skillRuns={mockSkillData.skillRuns}
                 skillDailyStats={mockSkillData.skillDailyStats}
                 appLogs={appLogs}
+                requestEvents={requestEvents}
                 onClearAllLogs={clearAllAppLogs}
                 onLogout={handleLogout}
             />

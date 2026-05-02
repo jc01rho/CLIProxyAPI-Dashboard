@@ -13,6 +13,7 @@ import DrilldownPanel from './DrilldownPanel'
 import SkillsPanel from './SkillsPanel'
 import LogViewerPanel from './LogViewerPanel'
 import SetupGuide from './SkillWebhookHelp'
+import RequestEventsPanel from './RequestEventsPanel'
 import { getModelColor, CHART_TYPOGRAPHY } from '../lib/brandColors'
 import 'react-date-range/dist/styles.css'
 import 'react-date-range/dist/theme/default.css'
@@ -218,7 +219,7 @@ const TREND_CONFIG = {
     cost: { stroke: '#f59e0b', name: 'Cost' },
 }
 
-function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefreshing, lastUpdated, dateRange, onDateRangeChange, customRange, rangeBoundaries, onCustomRangeApply, endpointUsage: rawEndpointUsage, credentialData, credentialTimeSeries, credentialLoading, credentialSetupRequired, isAuthenticated, skillRuns, skillDailyStats, appLogs, onClearAllLogs, onLogout }) {
+function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefreshing, lastUpdated, dateRange, onDateRangeChange, customRange, rangeBoundaries, onCustomRangeApply, endpointUsage: rawEndpointUsage, credentialData, credentialTimeSeries, credentialLoading, credentialSetupRequired, isAuthenticated, skillRuns, skillDailyStats, appLogs, requestEvents, onClearAllLogs, onLogout }) {
     // Auto-select time range based on dateRange: hour for today/yesterday, day for longer ranges
     const defaultTimeRange = (dateRange === 'today' || dateRange === 'yesterday') ? 'hour' : 'day'
 
@@ -820,6 +821,22 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                             </svg>
                         </span>
                         <span className="drawer-nav-label">Claude Skills</span>
+                    </button>
+                    <button
+                        className={activeTab === 'events' ? 'active' : ''}
+                        onClick={() => { handleNavigate('events'); setMenuOpen(false) }}
+                        role="menuitem"
+                        aria-current={activeTab === 'events' ? 'page' : undefined}
+                        title="Request Events"
+                    >
+                        <span className="drawer-nav-icon">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                                <line x1="3" y1="9" x2="21" y2="9"></line>
+                                <line x1="9" y1="21" x2="9" y2="9"></line>
+                            </svg>
+                        </span>
+                        <span className="drawer-nav-label">Request Events</span>
                     </button>
                     <button
                         className={activeTab === 'logs' ? 'active' : ''}
@@ -1694,6 +1711,10 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
                             customRange={customRange}
                             rangeBoundaries={rangeBoundaries}
                             isDarkMode={isDarkMode}
+                        />
+                    ) : activeTab === 'events' ? (
+                        <RequestEventsPanel
+                            requestEvents={requestEvents}
                         />
                     ) : activeTab === 'logs' ? (
                         <LogViewerPanel

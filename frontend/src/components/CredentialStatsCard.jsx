@@ -487,7 +487,7 @@ function CredentialDetailPanel({ cred, onClose }) {
    Main Exported Component
    ================================================================ */
 export default function CredentialStatsCard({ onRowClick, data, timeSeries, dateRange, isLoading, isSeriesLoading, setupRequired, onViewStateChange }) {
-  const [activeView, setActiveView] = useState('credentials')
+  const [activeView, setActiveView] = useState('api_keys')
   const [apiKeysSubView, setApiKeysSubView] = useState('overview')
   const [selectedCred, setSelectedCred] = useState(null)
   const [dialogCred, setDialogCred] = useState(null)
@@ -1028,6 +1028,7 @@ function ApiKeysTable({ items, onSort, SortIcon, expandedRow, setExpandedRow, on
             <th onClick={() => onSort('success_rate')} className="sortable">Success Rate <SortIcon column="success_rate" /></th>
             <th onClick={() => onSort('failure_count')} className="sortable">Failed <SortIcon column="failure_count" /></th>
             <th onClick={() => onSort('total_tokens')} className="sortable">Tokens <SortIcon column="total_tokens" /></th>
+            <th onClick={() => onSort('estimated_cost_usd')} className="sortable">Cost <SortIcon column="estimated_cost_usd" /></th>
             <th>Credentials Used</th>
           </tr>
         </thead>
@@ -1051,6 +1052,7 @@ function ApiKeysTable({ items, onSort, SortIcon, expandedRow, setExpandedRow, on
                 </td>
                 <td className="cred-mono" style={{ color: ak.failure_count > 0 ? '#ef4444' : undefined }}>{ak.failure_count || 0}</td>
                 <td className="cred-mono">{formatNumber(ak.total_tokens)}</td>
+                <td className="cred-mono">{formatCost(ak.estimated_cost_usd || 0)}</td>
                 <td className="cred-mono cred-center">{ak.credentials_used?.length || 0}</td>
               </tr>
             )

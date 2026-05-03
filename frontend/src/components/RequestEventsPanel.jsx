@@ -329,6 +329,7 @@ function RequestEventsPanel({ requestEvents = [] }) {
                     <div className="stat-header"><span className="stat-label">TOTAL COST</span></div>
                     <div className="stat-value">{formatCurrency(summary.totalCost)}</div>
                     <div className="stat-meta">Health Score: {Math.round(summary.healthScore)}%</div>
+                    <div className="stat-meta" style={{ fontSize: '10px', opacity: 0.7, marginTop: '4px' }}>Pricing based on internal collector settings</div>
                 </div>
             </div>
 

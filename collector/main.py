@@ -164,7 +164,7 @@ DEFAULT_PRICING = {
     "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
     "_default": {"input": 0.15, "output": 0.60},
 }
-LLM_PRICES_URL = "https://www.llm-prices.com/current-v1.json"
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 
 # --- Globals ---
 db_client: Optional[Any] = None
@@ -2015,26 +2015,30 @@ def _run_management_sync(run_id: str) -> None:
 # --- Core Logic Functions (fetch_remote_pricing, init_db, etc.) ---
 # These functions remain largely the same as before.
 def fetch_remote_pricing() -> Dict[str, Dict[str, float]]:
-    # (Implementation from before)
     global remote_pricing_cache, remote_pricing_last_fetch
     if remote_pricing_cache and (time.time() - remote_pricing_last_fetch) < 3600:
         return remote_pricing_cache
     try:
-        logger.info("Fetching latest pricing from llm-prices.com...")
-        response = requests.get(LLM_PRICES_URL, timeout=30)
+        logger.info("Fetching latest pricing from OpenRouter...")
+        response = requests.get(OPENROUTER_MODELS_URL, timeout=30)
         response.raise_for_status()
         data = response.json()
-        pricing = {
-            item["id"].lower(): {
-                "input": float(item["input"]),
-                "output": float(item["output"]),
-                "vendor": item.get("vendor", "unknown"),
-            }
-            for item in data.get("prices", [])
-            if item.get("id")
-            and item.get("input") is not None
-            and item.get("output") is not None
-        }
+        pricing: Dict[str, Dict[str, float]] = {}
+        for item in data.get("data", []):
+            model_id = str(item.get("id") or "").strip().lower()
+            item_pricing = item.get("pricing") or {}
+            prompt_price = item_pricing.get("prompt")
+            completion_price = item_pricing.get("completion")
+            if not model_id or prompt_price is None or completion_price is None:
+                continue
+            try:
+                pricing[model_id] = {
+                    "input": float(prompt_price) * 1_000_000,
+                    "output": float(completion_price) * 1_000_000,
+                    "vendor": str(item.get("owned_by") or item.get("provider") or "openrouter"),
+                }
+            except (TypeError, ValueError):
+                continue
         if pricing:
             remote_pricing_cache = pricing
             remote_pricing_last_fetch = time.time()

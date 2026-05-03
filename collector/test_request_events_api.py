@@ -471,6 +471,50 @@ class PriceSettingsTests(unittest.TestCase):
         self.assertIn("input", fallback)
         self.assertIn("output", fallback)
 
+    def test_fetch_remote_pricing_uses_openrouter_model_prices(self):
+        class _Response:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {
+                    "data": [
+                        {
+                            "id": "openai/gpt-4o-mini",
+                            "owned_by": "openai",
+                            "pricing": {
+                                "prompt": "0.00000015",
+                                "completion": "0.0000006",
+                            },
+                        },
+                        {
+                            "id": "broken",
+                            "pricing": {"prompt": "not-a-number", "completion": "0"},
+                        },
+                    ]
+                }
+
+        self.module.remote_pricing_cache = {}
+        self.module.remote_pricing_last_fetch = 0
+        original_get = self.module.requests.get
+        try:
+            calls = []
+
+            def fake_get(url, **kwargs):
+                calls.append((url, kwargs))
+                return _Response()
+
+            self.module.requests.get = fake_get
+            pricing = self.module.fetch_remote_pricing()
+        finally:
+            self.module.requests.get = original_get
+
+        self.assertEqual(calls[0][0], "https://openrouter.ai/api/v1/models")
+        self.assertEqual(pricing["openai/gpt-4o-mini"]["input"], 0.15)
+        self.assertEqual(pricing["openai/gpt-4o-mini"]["output"], 0.6)
+        self.assertEqual(pricing["openai/gpt-4o-mini"]["vendor"], "openai")
+        self.assertNotIn("broken", pricing)
+
 
 class ValidGranularityTests(unittest.TestCase):
     @classmethod

@@ -221,11 +221,11 @@ For single-day ranges:
 
 | Area | Current behavior |
 |------|------------------|
-| Backend ingestion | Each snapshot is written to `usage_snapshots` + `model_usage`, cost computed from pricing (default + llm-prices). The collector calculates increments vs the previous snapshot, handles restarts (global and per model+endpoint), filters false starts, and upserts `daily_stats` with a JSON breakdown (models + endpoints). |
+| Backend ingestion | Each snapshot is written to `usage_snapshots` + `model_usage`, cost computed from pricing (default + OpenRouter). The collector calculates increments vs the previous snapshot, handles restarts (global and per model+endpoint), filters false starts, and upserts `daily_stats` with a JSON breakdown (models + endpoints). |
 | Frontend range calc | Aggregates `daily_stats` rows (and their breakdowns) for the selected range. If breakdowns are absent (legacy data), it falls back to snapshot-based restart-aware deltas using baseline/critical points. |
 | Hourly view | Derived client-side from snapshot deltas (restart-aware) because `daily_stats` is day-granular. |
 | Key strategy | Composite key `model_name|||api_endpoint` (endpoint defaults to `unknown`). |
-| Pricing | Default pricing in collector with hourly remote override from llm-prices.com; cost is stored per model_usage row and rolled into snapshot cumulative + daily stats. |
+| Pricing | Default pricing in collector with hourly remote override from OpenRouter `/api/v1/models`; cost is stored per model_usage row and rolled into snapshot cumulative + daily stats. |
 
 ## Code Locations
 

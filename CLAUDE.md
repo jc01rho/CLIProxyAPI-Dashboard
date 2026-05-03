@@ -192,9 +192,9 @@ Images are published to GHCR (`ghcr.io/leolionart/cliproxy-*`) via GitHub Action
 
 - Model name matched against `model_pattern` in `model_pricing` (wildcard)
 - Cost = (input_tokens / 1M) × input_price + (output_tokens / 1M) × output_price
-- `MODEL_PRICING_DEFAULTS` in `collector/main.py` seeded on first run
+- `DEFAULT_PRICING` in `collector/main.py` provides fallback prices; OpenRouter `/api/v1/models` refreshes remote prices hourly
 
-**To update pricing:** Edit `model_pricing` table directly via psql or update `MODEL_PRICING_DEFAULTS` and restart collector.
+**To update pricing:** Edit `model_pricing` table directly via psql, or update `DEFAULT_PRICING` and restart collector.
 
 ## Troubleshooting Notes
 

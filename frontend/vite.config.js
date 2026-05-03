@@ -17,6 +17,11 @@ const authBypassPaths = new Set([
 
 export default defineConfig({
     plugins: [react()],
+    resolve: {
+        alias: {
+            '@supabase/supabase-js': '@supabase/supabase-js/dist/module/index.js',
+        },
+    },
     define: {
         'import.meta.env.VITE_APP_VERSION': JSON.stringify(pkg.version),
     },

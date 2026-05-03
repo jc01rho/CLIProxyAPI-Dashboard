@@ -119,6 +119,7 @@ USAGE_SYNC_MODE = str(os.getenv("USAGE_SYNC_MODE", "auto")).strip().lower()
 if USAGE_SYNC_MODE not in ("auto", "management", "queue", "redis"):
     USAGE_SYNC_MODE = "auto"
 USAGE_QUEUE_BATCH_SIZE = _env_int("USAGE_QUEUE_BATCH_SIZE", 50)
+USAGE_QUEUE_MAX_DRAIN_ITERATIONS = _env_int("USAGE_QUEUE_MAX_DRAIN_ITERATIONS", 20)
 USAGE_QUEUE_SYNC_INTERVAL = _env_int("USAGE_QUEUE_SYNC_INTERVAL_SECONDS", 10)
 REDIS_QUEUE_ADDR = str(os.getenv("REDIS_QUEUE_ADDR", "")).strip()
 REDIS_QUEUE_KEY = str(os.getenv("REDIS_QUEUE_KEY", "cliproxy:usage_events")).strip()
@@ -1265,6 +1266,308 @@ def auth_verify():
     return jsonify({"authenticated": True})
 
 
+_VALID_RE_GRANULARITIES: frozenset = frozenset({"hour", "day", "week"})
+_RE_FILTER_COLUMNS = ("model_name", "provider", "api_endpoint", "auth_index")
+
+
+def _query_distinct_re_column(col: str, limit: int = 500) -> List[str]:
+    if not db_client:
+        return []
+    try:
+        if hasattr(db_client, "_pool"):
+            import psycopg2.extras
+            conn = db_client._pool.getconn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f'SELECT DISTINCT "{col}" FROM request_events '
+                        f'WHERE "{col}" != \'\' ORDER BY 1 LIMIT %s',
+                        (limit,),
+                    )
+                    return [row[0] for row in cur.fetchall() if row[0]]
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                db_client._pool.putconn(conn)
+        else:
+            rows = (
+                db_client.table("request_events")
+                .select(col)
+                .limit(limit)
+                .execute()
+                .data
+            ) or []
+            seen: set = set()
+            result: List[str] = []
+            for row in rows:
+                val = str(row.get(col) or "").strip()
+                if val and val not in seen:
+                    seen.add(val)
+                    result.append(val)
+            return sorted(result)
+    except Exception as exc:
+        err = str(exc).lower()
+        if not any(m in err for m in ("does not exist", "not found", "relation")):
+            logger.warning("filter_options column %r failed: %s", col, exc)
+        return []
+
+
+def _aggregate_request_events_local(
+    from_dt: datetime,
+    to_dt: datetime,
+    granularity: str,
+    filters: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    import psycopg2.extras
+    where_parts = ["occurred_at >= %s", "occurred_at < %s"]
+    params: List[Any] = [from_dt, to_dt]
+    for col, val in filters.items():
+        where_parts.append(f'"{col}" = %s')
+        params.append(val)
+    where_sql = " AND ".join(where_parts)
+    sql = (
+        f"SELECT date_trunc('{granularity}', occurred_at) AS bucket,"
+        " COUNT(*) AS request_count,"
+        " SUM(CASE WHEN failed THEN 1 ELSE 0 END) AS failed_count,"
+        " SUM(input_tokens) AS input_tokens,"
+        " SUM(output_tokens) AS output_tokens,"
+        " SUM(reasoning_tokens) AS reasoning_tokens,"
+        " SUM(cached_tokens) AS cached_tokens,"
+        " SUM(total_tokens) AS total_tokens,"
+        " SUM(estimated_cost_usd) AS estimated_cost_usd,"
+        " ROUND(AVG(latency_ms)::numeric, 2) AS avg_latency_ms"
+        f" FROM request_events WHERE {where_sql}"
+        " GROUP BY 1 ORDER BY 1 LIMIT 8784"
+    )
+    conn = db_client._pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        db_client._pool.putconn(conn)
+
+
+def _aggregate_request_events_python(
+    from_dt: datetime,
+    to_dt: datetime,
+    granularity: str,
+    filters: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    from collections import defaultdict
+    query = (
+        db_client.table("request_events")
+        .select(
+            "occurred_at,failed,input_tokens,output_tokens,reasoning_tokens,"
+            "cached_tokens,total_tokens,estimated_cost_usd,latency_ms,model_name,provider,api_endpoint"
+        )
+        .gte("occurred_at", from_dt.isoformat())
+        .lt("occurred_at", to_dt.isoformat())
+        .limit(10000)
+    )
+    for col, val in filters.items():
+        if col != "failed":
+            query = query.eq(col, val)
+    rows = query.execute().data or []
+    if "failed" in filters:
+        rows = [r for r in rows if bool(r.get("failed")) == filters["failed"]]
+
+    buckets: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+        "request_count": 0, "failed_count": 0,
+        "input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0,
+        "cached_tokens": 0, "total_tokens": 0, "estimated_cost_usd": 0.0,
+        "_latency_sum": 0, "_latency_count": 0,
+    })
+
+    for row in rows:
+        occurred_at = _parse_iso_datetime(row.get("occurred_at"))
+        if not occurred_at:
+            continue
+        if granularity == "hour":
+            bucket_key = occurred_at.strftime("%Y-%m-%dT%H:00:00+00:00")
+        elif granularity == "week":
+            week_start = occurred_at - timedelta(days=occurred_at.weekday())
+            bucket_key = week_start.strftime("%Y-%m-%dT00:00:00+00:00")
+        else:
+            bucket_key = occurred_at.strftime("%Y-%m-%dT00:00:00+00:00")
+
+        b = buckets[bucket_key]
+        b["request_count"] += 1
+        if row.get("failed"):
+            b["failed_count"] += 1
+        b["input_tokens"] += int(row.get("input_tokens") or 0)
+        b["output_tokens"] += int(row.get("output_tokens") or 0)
+        b["reasoning_tokens"] += int(row.get("reasoning_tokens") or 0)
+        b["cached_tokens"] += int(row.get("cached_tokens") or 0)
+        b["total_tokens"] += int(row.get("total_tokens") or 0)
+        b["estimated_cost_usd"] += float(row.get("estimated_cost_usd") or 0)
+        latency = int(row.get("latency_ms") or 0)
+        if latency > 0:
+            b["_latency_sum"] += latency
+            b["_latency_count"] += 1
+
+    result = []
+    for bucket_key in sorted(buckets.keys()):
+        b = buckets[bucket_key]
+        avg_latency = (
+            round(b["_latency_sum"] / b["_latency_count"], 2)
+            if b["_latency_count"] > 0 else 0.0
+        )
+        result.append({
+            "bucket": bucket_key,
+            "request_count": b["request_count"],
+            "failed_count": b["failed_count"],
+            "input_tokens": b["input_tokens"],
+            "output_tokens": b["output_tokens"],
+            "reasoning_tokens": b["reasoning_tokens"],
+            "cached_tokens": b["cached_tokens"],
+            "total_tokens": b["total_tokens"],
+            "estimated_cost_usd": round(b["estimated_cost_usd"], 6),
+            "avg_latency_ms": avg_latency,
+        })
+    return result
+
+
+@api_bp.route("/request_events/filter_options", methods=["GET"])
+def request_events_filter_options():
+    if not db_client:
+        return jsonify({"error": "database not initialized"}), 500
+
+    result: Dict[str, Any] = {
+        "models": [],
+        "providers": [],
+        "api_endpoints": [],
+        "auth_indexes": [],
+    }
+    col_map = (
+        ("model_name", "models"),
+        ("provider", "providers"),
+        ("api_endpoint", "api_endpoints"),
+        ("auth_index", "auth_indexes"),
+    )
+    for col, key in col_map:
+        result[key] = _query_distinct_re_column(col)
+
+    return jsonify(result)
+
+
+@api_bp.route("/request_events/aggregate", methods=["GET"])
+def request_events_aggregate():
+    if not db_client:
+        return jsonify({"error": "database not initialized"}), 500
+
+    from_str = (request.args.get("from") or "").strip()
+    if not from_str:
+        return jsonify({"error": "from parameter is required"}), 400
+    from_dt = _parse_iso_datetime(from_str)
+    if not from_dt:
+        return jsonify({"error": "invalid from datetime"}), 400
+
+    to_str = (request.args.get("to") or "").strip()
+    to_dt = _parse_iso_datetime(to_str) if to_str else _utcnow()
+    if not to_dt:
+        return jsonify({"error": "invalid to datetime"}), 400
+
+    if from_dt >= to_dt:
+        return jsonify({"error": "from must be before to"}), 400
+
+    if (to_dt - from_dt).days > 90:
+        return jsonify({"error": "date range cannot exceed 90 days"}), 400
+
+    granularity = (request.args.get("granularity") or "day").strip().lower()
+    if granularity not in _VALID_RE_GRANULARITIES:
+        valid = ", ".join(sorted(_VALID_RE_GRANULARITIES))
+        return jsonify({"error": f"granularity must be one of: {valid}"}), 400
+
+    filters: Dict[str, Any] = {}
+    for param in ("model_name", "provider", "api_endpoint"):
+        val = (request.args.get(param) or "").strip()
+        if val:
+            filters[param] = val
+
+    failed_str = (request.args.get("failed") or "").strip().lower()
+    if failed_str in ("true", "1", "yes"):
+        filters["failed"] = True
+    elif failed_str in ("false", "0", "no"):
+        filters["failed"] = False
+
+    try:
+        if hasattr(db_client, "_pool"):
+            buckets = _aggregate_request_events_local(from_dt, to_dt, granularity, filters)
+            for b in buckets:
+                for k in ("bucket", "request_count", "failed_count", "input_tokens",
+                          "output_tokens", "reasoning_tokens", "cached_tokens",
+                          "total_tokens", "estimated_cost_usd", "avg_latency_ms"):
+                    if k not in b:
+                        b[k] = 0
+                if hasattr(b.get("bucket"), "isoformat"):
+                    b["bucket"] = b["bucket"].isoformat()
+                b["estimated_cost_usd"] = round(float(b["estimated_cost_usd"] or 0), 6)
+                b["avg_latency_ms"] = float(b.get("avg_latency_ms") or 0)
+        else:
+            buckets = _aggregate_request_events_python(from_dt, to_dt, granularity, filters)
+    except Exception as exc:
+        err = str(exc).lower()
+        if any(m in err for m in ("does not exist", "not found", "relation")):
+            return jsonify({"granularity": granularity, "buckets": [], "summary": {}})
+        logger.error("request_events aggregate failed: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
+
+    total_requests = sum(b.get("request_count", 0) for b in buckets)
+    total_cost = round(sum(float(b.get("estimated_cost_usd", 0)) for b in buckets), 6)
+    total_tokens = sum(b.get("total_tokens", 0) for b in buckets)
+    failed_count = sum(b.get("failed_count", 0) for b in buckets)
+
+    return jsonify({
+        "granularity": granularity,
+        "buckets": buckets,
+        "summary": {
+            "total_requests": total_requests,
+            "failed_count": failed_count,
+            "total_tokens": total_tokens,
+            "estimated_cost_usd": total_cost,
+        },
+    })
+
+
+@api_bp.route("/request_events/price_settings", methods=["GET"])
+def request_events_price_settings():
+    db_pricing: List[Dict[str, Any]] = []
+    if db_client:
+        try:
+            db_pricing = (
+                db_client.table("model_pricing")
+                .select("*")
+                .order("model_pattern")
+                .execute()
+                .data
+            ) or []
+        except Exception as exc:
+            logger.warning("Failed to fetch model_pricing: %s", exc)
+
+    defaults = [
+        {
+            "model_pattern": k,
+            "input_price_per_million": v["input"],
+            "output_price_per_million": v["output"],
+            "provider": v.get("vendor", ""),
+            "source": "default",
+        }
+        for k, v in DEFAULT_PRICING.items()
+        if k != "_default"
+    ]
+
+    return jsonify({
+        "db_pricing": db_pricing,
+        "default_pricing": defaults,
+        "default_fallback": DEFAULT_PRICING.get("_default", {}),
+    })
+
+
 @api_bp.route("/trigger", methods=["POST"])
 def trigger_sync_endpoint():
     """Endpoint to manually trigger the full data collection and sync process."""
@@ -1605,6 +1908,19 @@ def run_full_sync_once():
     if _should_use_management_polling():
         _run_management_sync(run_id)
 
+    if _should_use_usage_queue():
+        queue_summary = _usage_queue_sync_once()
+        if queue_summary.get("persisted", 0) > 0:
+            _log_sync_event(
+                run_id=run_id,
+                source="collector",
+                category="db",
+                severity="info",
+                title="Usage queue sync ok",
+                message="HTTP usage queue events persisted.",
+                details=queue_summary,
+            )
+
     if _should_use_redis_queue():
         redis_summary = _redis_queue_sync_once()
         if redis_summary.get("persisted", 0) > 0:
@@ -1919,17 +2235,16 @@ def _sanitize_raw_detail(detail: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _generate_redis_event_uid(payload: Dict[str, Any]) -> str:
-    """Deterministic uid for Redis queue events. Uses request_id if present, else stable hash."""
     request_id = str(payload.get("request_id") or "").strip()
     if request_id:
-        return f"rq:{hashlib.sha256(request_id.encode('utf-8')).hexdigest()}"
+        return hashlib.sha256(request_id.encode("utf-8")).hexdigest()
     occurred_at = _parse_detail_occurred_at(payload, _utcnow())
     key = (
         f"{payload.get('endpoint', '')}|{payload.get('model', '')}|"
         f"{payload.get('source', '')}|{occurred_at.isoformat()}|"
-        f"{payload.get('auth_index', '')}|{payload.get('latency_ms', 0)}"
+        f"{payload.get('auth_index', '')}"
     )
-    return f"rq:{hashlib.sha256(key.encode('utf-8')).hexdigest()}"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
 def _redact_queue_api_key(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1947,7 +2262,6 @@ def _redact_queue_api_key(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _transform_queue_event(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Transform a single Redis queue JSON payload into a request_events row dict."""
     if not isinstance(payload, dict):
         return None
     occurred_at = _parse_detail_occurred_at(payload, _utcnow())
@@ -1964,6 +2278,15 @@ def _transform_queue_event(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     request_id = str(payload.get("request_id") or "").strip() or None
     source_raw = str(payload.get("source") or "").strip()
     raw_detail = _redact_queue_api_key(payload)
+    provider = str(payload.get("provider") or "")[:100]
+    model_name_str = str(payload.get("model") or "")[:255]
+
+    try:
+        pricing = get_model_pricing()
+        model_price, _ = find_pricing_for_model(model_name_str, pricing)
+        cost = round(calculate_cost(input_tokens, output_tokens, model_price), 6)
+    except Exception:
+        cost = 0.0
 
     return {
         "event_uid": event_uid,
@@ -1973,7 +2296,7 @@ def _transform_queue_event(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "api_endpoint": str(payload.get("endpoint", ""))[:255],
         "endpoint_method": "",
         "endpoint_path": "",
-        "model_name": str(payload.get("model", ""))[:255],
+        "model_name": model_name_str,
         "source_id": _redact_source_id(source_raw)[:255],
         "auth_index": str(payload.get("auth_index", "")),
         "latency_ms": _safe_int(payload.get("latency_ms"), 0),
@@ -1983,6 +2306,8 @@ def _transform_queue_event(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "reasoning_tokens": reasoning_tokens,
         "cached_tokens": cached_tokens,
         "total_tokens": total_tokens,
+        "provider": provider,
+        "estimated_cost_usd": cost,
         "raw_detail": raw_detail,
         "ingested_at": _utcnow().isoformat(),
     }
@@ -2102,16 +2427,27 @@ def _persist_queue_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _usage_queue_sync_once() -> Dict[str, Any]:
-    """Drain CLIProxyAPIPlus in-memory usage queue over the management API."""
-    payloads, meta = fetch_usage_queue_items(USAGE_QUEUE_BATCH_SIZE)
-    summary = _persist_queue_payloads(payloads)
-    summary["meta"] = meta
-    if summary["popped"] > 0:
+    total: Dict[str, Any] = {"popped": 0, "parsed": 0, "persisted": 0, "duration_ms": 0, "meta": {}}
+    iteration = 0
+    while iteration < USAGE_QUEUE_MAX_DRAIN_ITERATIONS:
+        payloads, meta = fetch_usage_queue_items(USAGE_QUEUE_BATCH_SIZE)
+        total["meta"] = meta
+        if not payloads:
+            break
+        summary = _persist_queue_payloads(payloads)
+        total["popped"] += summary["popped"]
+        total["parsed"] += summary["parsed"]
+        total["persisted"] += summary["persisted"]
+        total["duration_ms"] += summary["duration_ms"]
+        iteration += 1
+        if len(payloads) < USAGE_QUEUE_BATCH_SIZE:
+            break
+    if total["popped"] > 0:
         logger.info(
-            "Usage queue sync: popped=%d, parsed=%d, persisted=%d, duration_ms=%d",
-            summary["popped"], summary["parsed"], summary["persisted"], summary["duration_ms"],
+            "Usage queue sync: iterations=%d, popped=%d, parsed=%d, persisted=%d, duration_ms=%d",
+            iteration, total["popped"], total["parsed"], total["persisted"], total["duration_ms"],
         )
-    return summary
+    return total
 
 
 def _should_use_usage_queue() -> bool:
@@ -2160,6 +2496,11 @@ def _flatten_and_persist_request_events(
     if not isinstance(apis, dict):
         return summary
 
+    try:
+        _pricing = get_model_pricing()
+    except Exception:
+        _pricing = DEFAULT_PRICING
+
     for api_endpoint, api_data in apis.items():
         if not isinstance(api_data, dict):
             continue
@@ -2199,6 +2540,13 @@ def _flatten_and_persist_request_events(
 
                 raw_detail = _sanitize_raw_detail(detail)
                 latency = _safe_int(detail.get("latency_ms"), 0)
+                provider = str(detail.get("provider") or "")[:100]
+
+                try:
+                    model_price, _ = find_pricing_for_model(str(model_name), _pricing)
+                    cost = round(calculate_cost(tok["input_tokens"], tok["output_tokens"], model_price), 6)
+                except Exception:
+                    cost = 0.0
 
                 events.append({
                     "event_uid": event_uid,
@@ -2217,6 +2565,8 @@ def _flatten_and_persist_request_events(
                     "reasoning_tokens": tok["reasoning_tokens"],
                     "cached_tokens": tok["cached_tokens"],
                     "total_tokens": total_tokens,
+                    "provider": provider,
+                    "estimated_cost_usd": cost,
                     "raw_detail": raw_detail,
                     "ingested_at": collected_at.isoformat(),
                 })

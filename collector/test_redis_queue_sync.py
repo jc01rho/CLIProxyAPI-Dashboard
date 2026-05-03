@@ -43,7 +43,7 @@ def _install_dependency_stubs():
 
     flask.Flask = Flask
     flask.Blueprint = Blueprint
-    flask.jsonify = lambda *a, **kw: {}
+    flask.jsonify = lambda x=None, *a, **kw: x if x is not None else {}
     flask.make_response = lambda x: x
     flask.request = types.SimpleNamespace(
         headers={}, path="/", method="GET", host_url="http://localhost/", cookies={}
@@ -222,7 +222,8 @@ class RedisQueueTransformTests(unittest.TestCase):
         uid1 = self.module._generate_redis_event_uid(payload)
         uid2 = self.module._generate_redis_event_uid(payload)
         self.assertEqual(uid1, uid2)
-        self.assertTrue(uid1.startswith("rq:"))
+        self.assertFalse(uid1.startswith("rq:"), "uid must not have rq: prefix")
+        self.assertEqual(len(uid1), 64, "uid must be a sha256 hex digest")
 
     def test_event_uid_stable_without_request_id(self):
         payload = {
@@ -236,6 +237,29 @@ class RedisQueueTransformTests(unittest.TestCase):
         uid1 = self.module._generate_redis_event_uid(payload)
         uid2 = self.module._generate_redis_event_uid(payload)
         self.assertEqual(uid1, uid2)
+        self.assertFalse(uid1.startswith("rq:"), "uid must not have rq: prefix")
+
+    def test_event_uid_no_prefix_matches_management_uid_formula(self):
+        import hashlib
+        endpoint = "/v1/chat/completions"
+        model = "gpt-4o"
+        source = "sk-test"
+        auth_index = "0"
+        occurred_at_str = "2026-04-15T10:30:00+00:00"
+        from datetime import datetime, timezone
+        occurred_at = datetime(2026, 4, 15, 10, 30, 0, tzinfo=timezone.utc)
+        management_key = f"{endpoint}|{model}|{source}|{occurred_at.isoformat()}|{auth_index}"
+        expected_uid = hashlib.sha256(management_key.encode("utf-8")).hexdigest()
+
+        queue_payload = {
+            "timestamp": occurred_at_str,
+            "endpoint": endpoint,
+            "model": model,
+            "source": source,
+            "auth_index": auth_index,
+        }
+        got_uid = self.module._generate_redis_event_uid(queue_payload)
+        self.assertEqual(got_uid, expected_uid)
 
     def test_event_uid_different_for_different_request_ids(self):
         p1 = {"timestamp": "2026-04-15T10:30:00Z", "request_id": "req-a"}
@@ -382,6 +406,83 @@ class RedisQueueTransformTests(unittest.TestCase):
             self.assertEqual(events[0]["request_id"], "req-http-sync")
         finally:
             self.module.fetch_usage_queue_items = original_fetch
+
+    def test_usage_queue_drain_loop_runs_until_empty(self):
+        events = []
+        call_count = [0]
+        batch_size = 2
+        all_batches = [
+            [{"timestamp": "2026-04-15T10:30:00Z", "request_id": f"req-{i}", "model": "gpt-4o"}
+             for i in range(batch_size)],
+            [{"timestamp": "2026-04-15T10:30:01Z", "request_id": f"req-{batch_size + j}", "model": "gpt-4o"}
+             for j in range(batch_size)],
+            [],
+        ]
+
+        class _RecordingTable(_DummyTable):
+            def upsert(self, data, on_conflict=None):
+                events.extend(data if isinstance(data, list) else [data])
+                return self
+
+        class _RecordingDB:
+            def table(self, *a, **kw):
+                return _RecordingTable()
+
+        def fake_fetch(count):
+            idx = call_count[0]
+            call_count[0] += 1
+            batch = all_batches[min(idx, len(all_batches) - 1)]
+            return batch, {"count": len(batch)}
+
+        original_fetch = self.module.fetch_usage_queue_items
+        original_batch_size = self.module.USAGE_QUEUE_BATCH_SIZE
+        self.module.db_client = _RecordingDB()
+        self.module.fetch_usage_queue_items = fake_fetch
+        self.module.USAGE_QUEUE_BATCH_SIZE = batch_size
+        try:
+            result = self.module._usage_queue_sync_once()
+            self.assertEqual(result["popped"], batch_size * 2)
+            self.assertEqual(len(events), batch_size * 2)
+        finally:
+            self.module.fetch_usage_queue_items = original_fetch
+            self.module.USAGE_QUEUE_BATCH_SIZE = original_batch_size
+
+    def test_run_full_sync_includes_usage_queue_sync(self):
+        called = {"usage_queue": False, "management": False, "redis": False}
+        original_usage_queue = self.module._usage_queue_sync_once
+        original_management = self.module._run_management_sync
+        original_redis = self.module._redis_queue_sync_once
+        original_mode = self.module.USAGE_SYNC_MODE
+        original_redis_addr = self.module.REDIS_QUEUE_ADDR
+        self.module.USAGE_SYNC_MODE = "queue"
+        self.module.REDIS_QUEUE_ADDR = ""
+        self.module.db_client = _DummyDB()
+
+        def fake_usage_queue():
+            called["usage_queue"] = True
+            return {"popped": 0, "parsed": 0, "persisted": 0, "duration_ms": 0, "meta": {}}
+
+        def fake_management(run_id):
+            called["management"] = True
+
+        def fake_redis():
+            called["redis"] = True
+            return {"popped": 0, "parsed": 0, "persisted": 0, "duration_ms": 0}
+
+        self.module._usage_queue_sync_once = fake_usage_queue
+        self.module._run_management_sync = fake_management
+        self.module._redis_queue_sync_once = fake_redis
+        try:
+            self.module.run_full_sync_once()
+            self.assertTrue(called["usage_queue"], "_usage_queue_sync_once must be called in run_full_sync_once")
+            self.assertFalse(called["management"])
+            self.assertFalse(called["redis"])
+        finally:
+            self.module._usage_queue_sync_once = original_usage_queue
+            self.module._run_management_sync = original_management
+            self.module._redis_queue_sync_once = original_redis
+            self.module.USAGE_SYNC_MODE = original_mode
+            self.module.REDIS_QUEUE_ADDR = original_redis_addr
 
     def test_redis_queue_sync_pops_and_persists(self):
         events = []

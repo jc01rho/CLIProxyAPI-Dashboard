@@ -221,6 +221,8 @@ CREATE TABLE IF NOT EXISTS request_events (
     reasoning_tokens BIGINT NOT NULL DEFAULT 0,
     cached_tokens BIGINT NOT NULL DEFAULT 0,
     total_tokens BIGINT NOT NULL DEFAULT 0,
+    provider TEXT NOT NULL DEFAULT '',
+    estimated_cost_usd NUMERIC(20, 6) NOT NULL DEFAULT 0,
     raw_detail JSONB NOT NULL DEFAULT '{}'::jsonb,
     ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

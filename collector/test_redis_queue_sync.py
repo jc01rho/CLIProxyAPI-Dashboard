@@ -331,13 +331,13 @@ class RedisQueueTransformTests(unittest.TestCase):
 
         self.module.USAGE_SYNC_MODE = "auto"
         self.assertTrue(self.module._should_use_redis_queue())
-        self.assertTrue(self.module._should_use_management_polling())
+        self.assertFalse(self.module._should_use_management_polling())
         self.assertTrue(self.module._should_use_usage_queue())
 
         self.module.USAGE_SYNC_MODE = "auto"
         self.module.REDIS_QUEUE_ADDR = ""
         self.assertFalse(self.module._should_use_redis_queue())
-        self.assertTrue(self.module._should_use_management_polling())
+        self.assertFalse(self.module._should_use_management_polling())
 
         self.module.REDIS_QUEUE_ADDR = "redis://localhost:6379"
 

@@ -296,14 +296,22 @@ class CredentialStatsSync:
         self.management_key = management_key
         self.supabase = supabase_client
         self.app_timezone = app_timezone or timezone(timedelta(hours=7))
+        self.legacy_usage_unavailable = False
 
     def fetch_usage(self) -> Optional[Dict]:
-        """Fetch usage data from CLIProxy."""
+        """Fetch legacy aggregate usage data from CLIProxy."""
         try:
             headers = {"Authorization": f"Bearer {self.management_key}"}
             resp = requests.get(
                 f"{self.cliproxy_url}/v0/management/usage", headers=headers, timeout=30
             )
+            if resp.status_code == 404:
+                self.legacy_usage_unavailable = True
+                logger.info(
+                    "Legacy usage API unavailable (404); skipping credential stats sync. "
+                    "Use request_events/usage-queue statistics with current CLIProxyAPIPlus."
+                )
+                return None
             if resp.status_code != 200:
                 logger.error(f"Usage API returned {resp.status_code}")
                 return None
@@ -699,11 +707,14 @@ class CredentialStatsSync:
         Main sync: fetch, aggregate, calculate deltas, store daily + summary.
         Returns stats dict.
         """
-        stats = {"credentials": 0, "api_keys": 0, "error": False}
+        stats = {"credentials": 0, "api_keys": 0, "error": False, "skipped": False}
 
         try:
             usage_data = self.fetch_usage()
             if not usage_data:
+                if self.legacy_usage_unavailable:
+                    stats["skipped"] = True
+                    return stats
                 stats["error"] = True
                 return stats
 

@@ -2467,11 +2467,7 @@ def _should_use_redis_queue() -> bool:
 
 
 def _should_use_management_polling() -> bool:
-    if USAGE_SYNC_MODE == "management":
-        return True
-    if USAGE_SYNC_MODE == "auto":
-        return True
-    return False
+    return USAGE_SYNC_MODE == "management"
 
 
 def _flatten_and_persist_request_events(
@@ -3487,16 +3483,18 @@ def main():
     # Schedule usage data collection (every COLLECTOR_INTERVAL seconds)
     scheduler.add_job(run_full_sync_once, "interval", seconds=COLLECTOR_INTERVAL)
 
-    # Schedule credential usage stats sync
-    scheduler.add_job(
-        lambda: sync_credential_stats(
-            CLIPROXY_URL, CLIPROXY_MANAGEMENT_KEY, db_client, app_timezone=APP_TIMEZONE
-        ),
-        "interval",
-        seconds=CREDENTIAL_SYNC_INTERVAL,
-        id="credential_stats_sync",
-        next_run_time=datetime.now() + timedelta(seconds=10),  # Run 10s after startup
-    )
+    # Schedule legacy credential usage stats sync only when the legacy
+    # /v0/management/usage endpoint is explicitly enabled.
+    if _should_use_management_polling():
+        scheduler.add_job(
+            lambda: sync_credential_stats(
+                CLIPROXY_URL, CLIPROXY_MANAGEMENT_KEY, db_client, app_timezone=APP_TIMEZONE
+            ),
+            "interval",
+            seconds=CREDENTIAL_SYNC_INTERVAL,
+            id="credential_stats_sync",
+            next_run_time=datetime.now() + timedelta(seconds=10),  # Run 10s after startup
+        )
 
     # Keep app logs by retention window, clear periodically
     scheduler.add_job(
@@ -3562,9 +3560,14 @@ def main():
             f"Redis queue sync scheduled every {REDIS_QUEUE_SYNC_INTERVAL}s"
             f" (addr={REDIS_QUEUE_ADDR[:30]}..., key={REDIS_QUEUE_KEY}, batch={REDIS_QUEUE_BATCH_SIZE})"
         )
-    logger.info(
-        f"Credential stats sync scheduled every {CREDENTIAL_SYNC_INTERVAL} seconds."
-    )
+    if _should_use_management_polling():
+        logger.info(
+            f"Credential stats sync scheduled every {CREDENTIAL_SYNC_INTERVAL} seconds."
+        )
+    else:
+        logger.info(
+            "Legacy credential stats sync disabled; request events are collected from usage-queue/redis."
+        )
     logger.info(
         f"App logs cleanup scheduled every {APP_LOG_CLEANUP_INTERVAL_MINUTES} minute(s) (retention={APP_LOG_RETENTION_DAYS} day(s))."
     )

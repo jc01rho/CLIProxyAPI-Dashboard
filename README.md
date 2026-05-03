@@ -47,10 +47,12 @@ Quick verification:
 
 ```bash
 curl -H "Authorization: Bearer <your-management-secret>" \
-  http://localhost:8317/v0/management/usage
+  'http://localhost:8317/v0/management/usage-queue?count=1'
 ```
 
-You should receive a JSON usage response.
+You should receive a JSON response with an `items` array. The legacy
+`/v0/management/usage` endpoint is only needed when `USAGE_SYNC_MODE=management`
+is explicitly selected for older CLIProxyAPIPlus deployments.
 
 ### 3) Clone and initialize submodule
 

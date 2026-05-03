@@ -1218,8 +1218,10 @@ function App() {
                     order: { column: 'logged_at', ascending: false },
                     limit: APP_LOGS_PAGE_SIZE,
                 }),
+                // Events tab uses request_events as its exclusive source of truth.
+                // Do not merge these rows into snapshot-based daily/model aggregates.
                 selectRows('request_events', {
-                    select: 'id,event_uid,occurred_at,api_endpoint,model_name,source_id,auth_index,latency_ms,failed,input_tokens,output_tokens,reasoning_tokens,cached_tokens,total_tokens',
+                    select: 'id,event_uid,occurred_at,api_endpoint,model_name,source_id,auth_index,latency_ms,failed,input_tokens,output_tokens,reasoning_tokens,cached_tokens,total_tokens,provider,estimated_cost_usd',
                     filters: [
                         ...(startTime ? [{ column: 'occurred_at', operator: 'gte', value: startTime }] : []),
                         ...(endTime ? [{ column: 'occurred_at', operator: 'lt', value: endTime }] : []),

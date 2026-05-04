@@ -497,10 +497,11 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
   const [selectedCred, setSelectedCred] = useState(null)
   const [dialogCred, setDialogCred] = useState(null)
   const [sortConfig, setSortConfig] = useState({ key: 'total_requests', dir: 'desc' })
+  const [failureRateSortConfig, setFailureRateSortConfig] = useState({ key: 'failure_rate', dir: 'desc' })
+  const [credentialViewMode, setCredentialViewMode] = useState('list')
   const [expandedApiKey, setExpandedApiKey] = useState(null)
   const [topologyReady, setTopologyReady] = useState(false)
   const isDesktop = useIsDesktop(900)
-
   const credentials = data?.credentials || []
   const apiKeys = data?.api_keys || []
   const apiKeyDailySeries = timeSeries?.byDay || []
@@ -555,6 +556,76 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
       cancelAnimationFrame(frameId)
     }
   }, [activeView, providerGroups])
+
+  // Failure Rates Sorting
+  const handleFailureRateSort = (key) => {
+    setFailureRateSortConfig((prev) => ({ key, dir: prev.key === key && prev.dir === 'desc' ? 'asc' : 'desc' }))
+  }
+
+  const FailureRateSortIcon = ({ column }) => {
+    if (failureRateSortConfig.key !== column) return <span className="sort-icon">&#x21C5;</span>
+    return <span className="sort-icon active">{failureRateSortConfig.dir === 'asc' ? '\u2191' : '\u2193'}</span>
+  }
+
+  const failureRateRows = useMemo(() => {
+    const rows = []
+    for (const ak of apiKeys) {
+      if (!ak.models) continue
+      for (const [modelName, m] of Object.entries(ak.models)) {
+        const req = m.requests || m.total_requests || 0
+        if (req === 0) continue
+        const fail = m.failure || m.failure_count || 0
+        const succ = m.success || m.success_count || 0
+        const failRate = req > 0 ? (fail / req) * 100 : 0
+        const succRate = req > 0 ? (succ / req) * 100 : 0
+        rows.push({
+          api_key_name: ak.api_key_name || 'unknown',
+          display_name: ak.display_name || ak.api_key_name,
+          model: modelName,
+          requests: req,
+          success: succ,
+          failure: fail,
+          failure_rate: failRate,
+          success_rate: succRate,
+          tokens: m.tokens || m.total_tokens || 0,
+          cost: m.estimated_cost_usd || m.cost || 0
+        })
+      }
+    }
+    const { key, dir } = failureRateSortConfig
+    rows.sort((a, b) => {
+      let aVal = a[key], bVal = b[key]
+      if (typeof aVal === 'string') return dir === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal)
+      aVal = aVal ?? 0; bVal = bVal ?? 0
+      return dir === 'asc' ? aVal - bVal : bVal - aVal
+    })
+    return rows
+  }, [apiKeys, failureRateSortConfig])
+
+  const credentialListRows = useMemo(() => {
+    return [...credentials]
+      .map((cred) => {
+        const requests = cred.total_requests || 0
+        const success = cred.success_count || 0
+        const failure = cred.failure_count || 0
+        const successRate = requests > 0 ? (success / requests) * 100 : 0
+        const modelNames = Object.keys(cred.models || {})
+        return {
+          key: getCredKey(cred),
+          provider: getProviderSubtitle(cred.provider, cred),
+          label: getCredDisplayName(cred),
+          requests,
+          success,
+          failure,
+          successRate,
+          failureRate: requests > 0 ? (failure / requests) * 100 : 0,
+          tokens: cred.total_tokens || 0,
+          models: modelNames,
+          raw: cred,
+        }
+      })
+      .sort((a, b) => b.failureRate - a.failureRate || b.requests - a.requests)
+  }, [credentials])
 
   // API Keys sorting
   const sortedApiKeys = useMemo(() => {
@@ -692,7 +763,53 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
       {activeView === 'credentials' ? (
         <div className="cred-monitor-split">
           <div className="cred-monitor-body">
-            {topologyReady ? (
+            <div className="cred-view-toggle" role="tablist" aria-label="Credential view mode">
+              <button
+                className={`cred-subtab ${credentialViewMode === 'list' ? 'active' : ''}`}
+                onClick={() => setCredentialViewMode('list')}
+              >
+                List
+              </button>
+              <button
+                className={`cred-subtab ${credentialViewMode === 'topology' ? 'active' : ''}`}
+                onClick={() => setCredentialViewMode('topology')}
+              >
+                Topology
+              </button>
+            </div>
+
+            {credentialViewMode === 'list' ? (
+              <div className="table-wrapper cred-table-wrapper">
+                <table className="data-table cred-table cred-compact-table">
+                  <thead>
+                    <tr>
+                      <th>Credential</th>
+                      <th>Provider</th>
+                      <th>Requests</th>
+                      <th>Fail Rate</th>
+                      <th>Failed</th>
+                      <th>Success</th>
+                      <th>Models</th>
+                      <th>Tokens</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {credentialListRows.map((row) => (
+                      <tr key={row.key} onClick={() => handleCredClick(row.raw)} className="cred-click-row">
+                        <td className="cred-compact-name" title={row.label}>{row.label}</td>
+                        <td>{row.provider}</td>
+                        <td>{formatNumber(row.requests)}</td>
+                        <td style={{ color: getSuccessColor(row.successRate) }}>{row.failureRate.toFixed(1)}%</td>
+                        <td>{formatNumber(row.failure)}</td>
+                        <td>{formatNumber(row.success)}</td>
+                        <td className="cred-model-count" title={row.models.join(', ')}>{row.models.length || 0}</td>
+                        <td>{formatNumber(row.tokens)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : topologyReady ? (
               providerGroups.map(([provider, group]) => (
                 <ProviderTopology
                   key={provider}
@@ -782,6 +899,12 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
               Overview
             </button>
             <button
+              className={`cred-subtab ${apiKeysSubView === 'failure_rates' ? 'active' : ''}`}
+              onClick={() => setApiKeysSubView('failure_rates')}
+            >
+              Failure Rates
+            </button>
+            <button
               className={`cred-subtab ${apiKeysSubView === 'by_day' ? 'active' : ''}`}
               onClick={() => setApiKeysSubView('by_day')}
             >
@@ -805,6 +928,37 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
                 setExpandedRow={setExpandedApiKey}
                 onRowClick={onRowClick}
               />
+            </div>
+          )}
+
+          {apiKeysSubView === 'failure_rates' && (
+            <div className="table-wrapper cred-table-wrapper">
+              <table className="data-table cred-table">
+                <thead>
+                  <tr>
+                    <th onClick={() => handleFailureRateSort('api_key_name')} className="sortable">API Key <FailureRateSortIcon column="api_key_name" /></th>
+                    <th onClick={() => handleFailureRateSort('model')} className="sortable">Model <FailureRateSortIcon column="model" /></th>
+                    <th onClick={() => handleFailureRateSort('requests')} className="sortable">Requests <FailureRateSortIcon column="requests" /></th>
+                    <th onClick={() => handleFailureRateSort('failure_rate')} className="sortable">Fail Rate <FailureRateSortIcon column="failure_rate" /></th>
+                    <th onClick={() => handleFailureRateSort('failure')} className="sortable">Failed <FailureRateSortIcon column="failure" /></th>
+                    <th onClick={() => handleFailureRateSort('tokens')} className="sortable">Tokens <FailureRateSortIcon column="tokens" /></th>
+                    <th onClick={() => handleFailureRateSort('cost')} className="sortable">Cost <FailureRateSortIcon column="cost" /></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {failureRateRows.map((row) => (
+                    <tr key={`${row.api_key_name}-${row.model}`}>
+                      <td>{shortenApiKeyLabel(row.api_key_name)}</td>
+                      <td>{row.model}</td>
+                      <td>{formatNumber(row.requests)}</td>
+                      <td style={{ color: getSuccessColor(row.success_rate) }}>{row.failure_rate.toFixed(1)}%</td>
+                      <td>{row.failure}</td>
+                      <td>{formatNumber(row.tokens)}</td>
+                      <td>{formatCost(row.cost)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
 

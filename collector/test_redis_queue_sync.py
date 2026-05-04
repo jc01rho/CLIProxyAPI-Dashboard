@@ -436,9 +436,11 @@ class RedisQueueTransformTests(unittest.TestCase):
         original_db = self.module.db_client
         original_available = self.module._request_events_table_available
         original_warned = self.module._request_events_table_warned
+        original_next_check = self.module._request_events_next_check_at
         self.module.db_client = _MissingDB()
         self.module._request_events_table_available = None
         self.module._request_events_table_warned = False
+        self.module._request_events_next_check_at = 0
         self.module.fetch_usage_queue_items = lambda count: calls.append(count) or ([{"request_id": "lost"}], {})
         try:
             result = self.module._usage_queue_sync_once()
@@ -446,11 +448,36 @@ class RedisQueueTransformTests(unittest.TestCase):
             self.assertEqual(calls, [])
             self.assertFalse(self.module._request_events_table_available)
             self.assertTrue(self.module._request_events_table_warned)
+            self.assertGreater(self.module._request_events_next_check_at, 0)
         finally:
             self.module.fetch_usage_queue_items = original_fetch
             self.module.db_client = original_db
             self.module._request_events_table_available = original_available
             self.module._request_events_table_warned = original_warned
+            self.module._request_events_next_check_at = original_next_check
+
+    def test_usage_queue_sync_throttles_missing_table_rechecks(self):
+        calls = []
+
+        class _UnexpectedDB:
+            def table(self, name):
+                calls.append(name)
+                raise AssertionError("availability check should be throttled")
+
+        original_db = self.module.db_client
+        original_available = self.module._request_events_table_available
+        original_next_check = self.module._request_events_next_check_at
+        self.module.db_client = _UnexpectedDB()
+        self.module._request_events_table_available = False
+        self.module._request_events_next_check_at = self.module.time.time() + 60
+        try:
+            result = self.module._usage_queue_sync_once()
+            self.assertEqual(result["popped"], 0)
+            self.assertEqual(calls, [])
+        finally:
+            self.module.db_client = original_db
+            self.module._request_events_table_available = original_available
+            self.module._request_events_next_check_at = original_next_check
 
     def test_usage_queue_drain_loop_runs_until_empty(self):
         events = []

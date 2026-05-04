@@ -121,6 +121,9 @@ if USAGE_SYNC_MODE not in ("auto", "management", "queue", "redis"):
 USAGE_QUEUE_BATCH_SIZE = _env_int("USAGE_QUEUE_BATCH_SIZE", 50)
 USAGE_QUEUE_MAX_DRAIN_ITERATIONS = _env_int("USAGE_QUEUE_MAX_DRAIN_ITERATIONS", 20)
 USAGE_QUEUE_SYNC_INTERVAL = _env_int("USAGE_QUEUE_SYNC_INTERVAL_SECONDS", 10)
+REQUEST_EVENTS_AVAILABILITY_RECHECK_SECONDS = _env_int(
+    "REQUEST_EVENTS_AVAILABILITY_RECHECK_SECONDS", 300
+)
 REDIS_QUEUE_ADDR = str(os.getenv("REDIS_QUEUE_ADDR", "")).strip()
 REDIS_QUEUE_KEY = str(os.getenv("REDIS_QUEUE_KEY", "cliproxy:usage_events")).strip()
 REDIS_QUEUE_BATCH_SIZE = _env_int("REDIS_QUEUE_BATCH_SIZE", 50)
@@ -172,6 +175,7 @@ remote_pricing_cache: Dict[str, Dict[str, float]] = {}
 remote_pricing_last_fetch: float = 0
 _request_events_table_warned: bool = False
 _request_events_table_available: Optional[bool] = None
+_request_events_next_check_at: float = 0
 
 # --- Flask App Setup ---
 flask_app = Flask(__name__)
@@ -2344,22 +2348,27 @@ def _is_request_events_missing_error(exc: Exception) -> bool:
 
 
 def _mark_request_events_unavailable() -> None:
-    global _request_events_table_warned, _request_events_table_available
+    global _request_events_table_warned, _request_events_table_available, _request_events_next_check_at
     _request_events_table_available = False
+    _request_events_next_check_at = time.time() + REQUEST_EVENTS_AVAILABILITY_RECHECK_SECONDS
     if not _request_events_table_warned:
         _request_events_table_warned = True
         logger.warning(
             "request_events table is unavailable in PostgREST/schema cache — "
-            "skipping request event persistence. Run migrations and reload schema cache."
+            "skipping request event persistence. Run migrations and reload schema cache. "
+            "Will recheck in %d seconds.",
+            REQUEST_EVENTS_AVAILABILITY_RECHECK_SECONDS,
         )
 
 
 def _request_events_available() -> bool:
-    global _request_events_table_warned, _request_events_table_available
+    global _request_events_table_warned, _request_events_table_available, _request_events_next_check_at
     if not db_client:
         return False
     if _request_events_table_available is True:
         return True
+    if _request_events_table_available is False and time.time() < _request_events_next_check_at:
+        return False
     if not hasattr(db_client, "_pool") and not hasattr(db_client, "table"):
         return False
     try:

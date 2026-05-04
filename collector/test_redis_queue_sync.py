@@ -389,7 +389,9 @@ class RedisQueueTransformTests(unittest.TestCase):
                 return _RecordingTable()
 
         original_fetch = self.module.fetch_usage_queue_items
+        original_available = self.module._request_events_table_available
         self.module.db_client = _RecordingDB()
+        self.module._request_events_table_available = True
         self.module.fetch_usage_queue_items = lambda count: ([{
             "timestamp": "2026-04-15T10:30:00Z",
             "request_id": "req-http-sync",
@@ -406,6 +408,49 @@ class RedisQueueTransformTests(unittest.TestCase):
             self.assertEqual(events[0]["request_id"], "req-http-sync")
         finally:
             self.module.fetch_usage_queue_items = original_fetch
+            self.module._request_events_table_available = original_available
+
+    def test_usage_queue_sync_skips_drain_when_request_events_missing(self):
+        class _MissingTableError(Exception):
+            def __init__(self):
+                super().__init__({
+                    "code": "PGRST205",
+                    "message": "Could not find the table 'public.request_events' in the schema cache",
+                })
+
+        class _MissingTable:
+            def select(self, *a, **kw):
+                return self
+            def limit(self, *a, **kw):
+                return self
+            def execute(self):
+                raise _MissingTableError()
+
+        class _MissingDB:
+            def table(self, name):
+                self.name = name
+                return _MissingTable()
+
+        calls = []
+        original_fetch = self.module.fetch_usage_queue_items
+        original_db = self.module.db_client
+        original_available = self.module._request_events_table_available
+        original_warned = self.module._request_events_table_warned
+        self.module.db_client = _MissingDB()
+        self.module._request_events_table_available = None
+        self.module._request_events_table_warned = False
+        self.module.fetch_usage_queue_items = lambda count: calls.append(count) or ([{"request_id": "lost"}], {})
+        try:
+            result = self.module._usage_queue_sync_once()
+            self.assertEqual(result["popped"], 0)
+            self.assertEqual(calls, [])
+            self.assertFalse(self.module._request_events_table_available)
+            self.assertTrue(self.module._request_events_table_warned)
+        finally:
+            self.module.fetch_usage_queue_items = original_fetch
+            self.module.db_client = original_db
+            self.module._request_events_table_available = original_available
+            self.module._request_events_table_warned = original_warned
 
     def test_usage_queue_drain_loop_runs_until_empty(self):
         events = []
@@ -436,7 +481,9 @@ class RedisQueueTransformTests(unittest.TestCase):
 
         original_fetch = self.module.fetch_usage_queue_items
         original_batch_size = self.module.USAGE_QUEUE_BATCH_SIZE
+        original_available = self.module._request_events_table_available
         self.module.db_client = _RecordingDB()
+        self.module._request_events_table_available = True
         self.module.fetch_usage_queue_items = fake_fetch
         self.module.USAGE_QUEUE_BATCH_SIZE = batch_size
         try:
@@ -446,6 +493,7 @@ class RedisQueueTransformTests(unittest.TestCase):
         finally:
             self.module.fetch_usage_queue_items = original_fetch
             self.module.USAGE_QUEUE_BATCH_SIZE = original_batch_size
+            self.module._request_events_table_available = original_available
 
     def test_run_full_sync_includes_usage_queue_sync(self):
         called = {"usage_queue": False, "management": False, "redis": False}
@@ -518,7 +566,9 @@ class RedisQueueTransformTests(unittest.TestCase):
         self.module.REDIS_QUEUE_ADDR = "redis://localhost:6379"
         self.module.db_client = _RecordingDB()
         original_client = self.module.RESPClient
+        original_available = self.module._request_events_table_available
         self.module.RESPClient = _FakeRESPClient
+        self.module._request_events_table_available = True
 
         try:
             result = self.module._redis_queue_sync_once()
@@ -529,6 +579,7 @@ class RedisQueueTransformTests(unittest.TestCase):
             self.assertNotIn("sk-long-secret-key-12345", json.dumps(events[0]["raw_detail"]))
         finally:
             self.module.RESPClient = original_client
+            self.module._request_events_table_available = original_available
 
 
 class RESPClientProtocolTests(unittest.TestCase):

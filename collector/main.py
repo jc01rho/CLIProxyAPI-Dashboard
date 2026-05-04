@@ -171,6 +171,7 @@ db_client: Optional[Any] = None
 remote_pricing_cache: Dict[str, Dict[str, float]] = {}
 remote_pricing_last_fetch: float = 0
 _request_events_table_warned: bool = False
+_request_events_table_available: Optional[bool] = None
 
 # --- Flask App Setup ---
 flask_app = Flask(__name__)
@@ -2317,6 +2318,75 @@ def _transform_queue_event(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
+def _is_request_events_missing_error(exc: Exception) -> bool:
+    payload = getattr(exc, "args", None)
+    if payload:
+        for item in payload:
+            if isinstance(item, dict):
+                code = str(item.get("code") or "").upper()
+                message = str(item.get("message") or "")
+                details = str(item.get("details") or "")
+                combined = f"{message} {details}".lower()
+                if code == "PGRST205" and "request_events" in combined:
+                    return True
+
+    err_msg = str(exc).lower()
+    return "request_events" in err_msg and any(
+        marker in err_msg
+        for marker in (
+            "pgrst205",
+            "does not exist",
+            "not found",
+            "schema cache",
+            "relation",
+        )
+    )
+
+
+def _mark_request_events_unavailable() -> None:
+    global _request_events_table_warned, _request_events_table_available
+    _request_events_table_available = False
+    if not _request_events_table_warned:
+        _request_events_table_warned = True
+        logger.warning(
+            "request_events table is unavailable in PostgREST/schema cache — "
+            "skipping request event persistence. Run migrations and reload schema cache."
+        )
+
+
+def _request_events_available() -> bool:
+    global _request_events_table_warned, _request_events_table_available
+    if not db_client:
+        return False
+    if _request_events_table_available is True:
+        return True
+    if not hasattr(db_client, "_pool") and not hasattr(db_client, "table"):
+        return False
+    try:
+        if hasattr(db_client, "_pool"):
+            import psycopg2.extras
+            conn = db_client._pool.getconn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1 FROM request_events LIMIT 1")
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                db_client._pool.putconn(conn)
+        else:
+            db_client.table("request_events").select("event_uid").limit(1).execute()
+        _request_events_table_available = True
+        _request_events_table_warned = False
+        return True
+    except Exception as exc:
+        if _is_request_events_missing_error(exc):
+            _mark_request_events_unavailable()
+            return False
+        logger.error("Failed to check request_events availability: %s", exc, exc_info=True)
+        return False
+
+
 def _redis_queue_sync_once() -> Dict[str, Any]:
     """Pop events from the Redis queue and persist them to request_events."""
     global _request_events_table_warned
@@ -2327,6 +2397,8 @@ def _redis_queue_sync_once() -> Dict[str, Any]:
         "duration_ms": 0,
     }
     if not db_client or not REDIS_QUEUE_ADDR:
+        return summary
+    if not _request_events_available():
         return summary
 
     t0 = time.time()
@@ -2366,18 +2438,8 @@ def _redis_queue_sync_once() -> Dict[str, Any]:
                 summary["persisted"] += len(batch)
             _request_events_table_warned = False
     except Exception as e:
-        err_msg = str(e).lower()
-        is_missing_table = any(
-            marker in err_msg
-            for marker in ("does not exist", "not found", "relation")
-        )
-        if is_missing_table:
-            if not _request_events_table_warned:
-                _request_events_table_warned = True
-                logger.warning(
-                    "request_events table not found — skipping Redis queue persistence. "
-                    "Run migrations to create it."
-                )
+        if _is_request_events_missing_error(e):
+            _mark_request_events_unavailable()
         else:
             logger.error("Failed to upsert Redis queue events: %s", e, exc_info=True)
     finally:
@@ -2402,6 +2464,8 @@ def _persist_queue_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
     summary: Dict[str, Any] = {"popped": len(payloads), "parsed": 0, "persisted": 0, "duration_ms": 0}
     if not db_client or not payloads:
         return summary
+    if not _request_events_available():
+        return summary
 
     t0 = time.time()
     try:
@@ -2418,12 +2482,8 @@ def _persist_queue_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
                 summary["persisted"] += len(batch)
             _request_events_table_warned = False
     except Exception as e:
-        err_msg = str(e).lower()
-        is_missing_table = any(marker in err_msg for marker in ("does not exist", "not found", "relation"))
-        if is_missing_table:
-            if not _request_events_table_warned:
-                _request_events_table_warned = True
-                logger.warning("request_events table not found — skipping usage queue persistence. Run migrations to create it.")
+        if _is_request_events_missing_error(e):
+            _mark_request_events_unavailable()
         else:
             logger.error("Failed to upsert usage queue events: %s", e, exc_info=True)
     summary["duration_ms"] = int((time.time() - t0) * 1000)
@@ -2432,6 +2492,8 @@ def _persist_queue_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _usage_queue_sync_once() -> Dict[str, Any]:
     total: Dict[str, Any] = {"popped": 0, "parsed": 0, "persisted": 0, "duration_ms": 0, "meta": {}}
+    if not _request_events_available():
+        return total
     iteration = 0
     while iteration < USAGE_QUEUE_MAX_DRAIN_ITERATIONS:
         payloads, meta = fetch_usage_queue_items(USAGE_QUEUE_BATCH_SIZE)
@@ -3462,6 +3524,8 @@ def main():
         logger.info("Database client initialized for provider=%s.", DATABASE_PROVIDER)
         if DATABASE_PROVIDER == "local" and hasattr(db_client, "run_migrations"):
             db_client.run_migrations()
+        if _should_use_usage_queue() or _should_use_redis_queue():
+            _request_events_available()
         deleted = _cleanup_old_app_logs()
         if deleted > 0:
             logger.info(

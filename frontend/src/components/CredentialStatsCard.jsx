@@ -40,6 +40,11 @@ const formatNumber = (num) => {
   return num.toLocaleString()
 }
 
+const formatCost = (cost) => {
+  if (!cost) return '$0'
+  return cost < 1 ? `$${cost.toFixed(2)}` : `$${cost.toLocaleString('en-US', { maximumFractionDigits: 0 })}`
+}
+
 const getProviderHex = (provider) => {
   const p = (provider || 'unknown').toLowerCase()
   return BRAND_COLORS[p] || BRAND_COLORS.unknown

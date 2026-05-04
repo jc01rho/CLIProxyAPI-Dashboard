@@ -108,6 +108,14 @@ RAW_DATA_RETENTION_DAYS = _env_int("RAW_DATA_RETENTION_DAYS", 7)
 INTRADAY_COMPACTION_INTERVAL_MINUTES = _env_int("INTRADAY_COMPACTION_INTERVAL_MINUTES", 60)
 INTRADAY_COMPACTION_MIN_AGE_MINUTES = _env_int("INTRADAY_COMPACTION_MIN_AGE_MINUTES", 30)
 
+# model_usage upload rate limiting: collect from Plus API every COLLECTOR_INTERVAL but
+# only write model_usage/usage_snapshots to DB every MODEL_USAGE_UPLOAD_INTERVAL_SECONDS.
+MODEL_USAGE_UPLOAD_INTERVAL_SECONDS = _env_int("MODEL_USAGE_UPLOAD_INTERVAL_SECONDS", 1800)
+# Standalone model_usage DB compaction (30-min buckets); also runs on every upload.
+MODEL_USAGE_COMPACTION_INTERVAL_MINUTES = _env_int("MODEL_USAGE_COMPACTION_INTERVAL_MINUTES", 60)
+MODEL_USAGE_COMPACTION_MIN_AGE_MINUTES = _env_int("MODEL_USAGE_COMPACTION_MIN_AGE_MINUTES", 30)
+MODEL_USAGE_COMPACTION_LOOKBACK_HOURS = _env_int("MODEL_USAGE_COMPACTION_LOOKBACK_HOURS", 3)
+
 # Batch size for cleanup operations to avoid Supabase REST timeout
 CLEANUP_BATCH_SIZE = 500
 
@@ -176,6 +184,8 @@ remote_pricing_last_fetch: float = 0
 _request_events_table_warned: bool = False
 _request_events_table_available: Optional[bool] = None
 _request_events_next_check_at: float = 0
+_last_management_upload_at: float = 0
+_management_upload_lock = threading.Lock()
 
 # --- Flask App Setup ---
 flask_app = Flask(__name__)
@@ -1015,6 +1025,144 @@ def _cleanup_intraday_raw_data() -> Dict[str, int]:
             ),
         )
     _run_maintenance_vacuum()
+
+    return result
+
+
+def _floor_to_30min_bucket(dt: datetime) -> datetime:
+    dt_utc = dt.astimezone(timezone.utc)
+    minute = (dt_utc.minute // 30) * 30
+    return dt_utc.replace(minute=minute, second=0, microsecond=0)
+
+
+def _plan_model_usage_snapshot_compaction(
+    snapshots: Any, min_age_minutes: int = 30
+) -> Dict[str, Any]:
+    snapshots = snapshots or []
+    keep_by_bucket: Dict[str, Dict[str, Any]] = {}
+    keep_ids: set = set()
+    skipped_ids: List = []
+    now_utc = _utcnow()
+
+    def _sort_key(snapshot: Dict[str, Any]) -> tuple:
+        collected_at = _parse_iso_datetime(snapshot.get("collected_at"))
+        try:
+            snapshot_id = int(snapshot.get("id") or 0)
+        except Exception:
+            snapshot_id = 0
+        if not collected_at:
+            return datetime.min.replace(tzinfo=timezone.utc), snapshot_id
+        return collected_at.astimezone(timezone.utc), snapshot_id
+
+    for snapshot in sorted(snapshots, key=_sort_key):
+        snapshot_id = snapshot.get("id")
+        if snapshot_id is None:
+            continue
+
+        collected_at = _parse_iso_datetime(snapshot.get("collected_at"))
+        if not collected_at:
+            keep_ids.add(snapshot_id)
+            skipped_ids.append(snapshot_id)
+            continue
+
+        age_minutes = (now_utc - collected_at).total_seconds() / 60
+        if age_minutes < min_age_minutes:
+            keep_ids.add(snapshot_id)
+            continue
+
+        bucket_key = _floor_to_30min_bucket(collected_at).isoformat()
+        keep_by_bucket[bucket_key] = snapshot
+
+    for snapshot in keep_by_bucket.values():
+        snapshot_id = snapshot.get("id")
+        if snapshot_id is not None:
+            keep_ids.add(snapshot_id)
+
+    delete_ids = [
+        snapshot.get("id")
+        for snapshot in sorted(snapshots, key=_sort_key)
+        if snapshot.get("id") is not None and snapshot.get("id") not in keep_ids
+    ]
+
+    return {
+        "keep_snapshot_ids": sorted(keep_ids),
+        "delete_snapshot_ids": delete_ids,
+        "retained_buckets": len(keep_by_bucket),
+        "skipped_snapshot_ids": skipped_ids,
+    }
+
+
+def _compact_model_usage_db() -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "snapshots_deleted": 0,
+        "retained_buckets": 0,
+        "skipped_snapshots": 0,
+        "error": False,
+    }
+    if not db_client:
+        return result
+
+    now_utc = _utcnow()
+    lookback_start = (now_utc - timedelta(hours=MODEL_USAGE_COMPACTION_LOOKBACK_HOURS)).isoformat()
+    cutoff_utc = (now_utc - timedelta(minutes=MODEL_USAGE_COMPACTION_MIN_AGE_MINUTES)).isoformat()
+
+    try:
+        snapshots = (
+            db_client.table("usage_snapshots")
+            .select("id, collected_at")
+            .gte("collected_at", lookback_start)
+            .lt("collected_at", cutoff_utc)
+            .order("collected_at")
+            .limit(CLEANUP_SNAPSHOT_PAGE_SIZE)
+            .execute()
+            .data
+        ) or []
+
+        if not snapshots:
+            return result
+
+        plan = _plan_model_usage_snapshot_compaction(
+            snapshots, min_age_minutes=MODEL_USAGE_COMPACTION_MIN_AGE_MINUTES
+        )
+        delete_ids = plan["delete_snapshot_ids"]
+        result["retained_buckets"] = plan["retained_buckets"]
+        result["skipped_snapshots"] = len(plan["skipped_snapshot_ids"])
+
+        if delete_ids:
+            try:
+                result["snapshots_deleted"] = _delete_usage_snapshots(delete_ids)
+            except Exception as e:
+                if _is_html_gateway_error(e):
+                    logger.warning(
+                        "model_usage compaction: snapshot delete skipped due to Supabase/PostgREST HTML gateway response: %s",
+                        e,
+                    )
+                else:
+                    logger.error(
+                        "model_usage compaction: failed to delete snapshots: %s",
+                        e,
+                        exc_info=True,
+                    )
+                result["error"] = True
+
+    except Exception as e:
+        if _is_html_gateway_error(e):
+            logger.warning(
+                "model_usage compaction: snapshot query skipped due to Supabase/PostgREST HTML gateway response: %s",
+                e,
+            )
+        else:
+            logger.error("model_usage compaction: failed: %s", e, exc_info=True)
+        result["error"] = True
+
+    if result["snapshots_deleted"] > 0 or result.get("error"):
+        logger.info(
+            "model_usage compaction: deleted %d snapshot(s) (cascade removes model_usage), "
+            "retained %d 30-min bucket(s)%s",
+            result["snapshots_deleted"],
+            result["retained_buckets"],
+            f", {result['skipped_snapshots']} skipped" if result["skipped_snapshots"] > 0 else "",
+        )
 
     return result
 
@@ -1952,6 +2100,8 @@ def run_full_sync_once():
 
 
 def _run_management_sync(run_id: str) -> None:
+    global _last_management_upload_at
+
     logger.info("Fetching usage data from management API...")
     _log_sync_event(
         run_id=run_id,
@@ -1964,6 +2114,19 @@ def _run_management_sync(run_id: str) -> None:
 
     data, fetch_meta = fetch_usage_data()
     if data:
+        now = time.time()
+        with _management_upload_lock:
+            elapsed = now - _last_management_upload_at
+            if elapsed < MODEL_USAGE_UPLOAD_INTERVAL_SECONDS:
+                seconds_until_next = int(MODEL_USAGE_UPLOAD_INTERVAL_SECONDS - elapsed)
+                logger.debug(
+                    "Management data collected; DB upload deferred for %ds (interval=%ds)",
+                    seconds_until_next,
+                    MODEL_USAGE_UPLOAD_INTERVAL_SECONDS,
+                )
+                return
+            _last_management_upload_at = now
+
         _log_sync_event(
             run_id=run_id,
             source="collector",
@@ -1994,7 +2157,23 @@ def _run_management_sync(run_id: str) -> None:
                 message="Usage snapshot persisted successfully.",
                 details=store_summary,
             )
+            try:
+                compact_result = _compact_model_usage_db()
+                if compact_result.get("snapshots_deleted", 0) > 0:
+                    _log_sync_event(
+                        run_id=run_id,
+                        source="collector",
+                        category="db",
+                        severity="info",
+                        title="model_usage compacted",
+                        message="model_usage rows compacted into 30-min buckets after upload.",
+                        details=compact_result,
+                    )
+            except Exception as _ce:
+                logger.warning("model_usage compaction after upload failed: %s", _ce)
         else:
+            with _management_upload_lock:
+                _last_management_upload_at = 0
             _log_sync_event(
                 run_id=run_id,
                 source="collector",
@@ -2005,6 +2184,8 @@ def _run_management_sync(run_id: str) -> None:
                 details=store_summary,
             )
     else:
+        with _management_upload_lock:
+            _last_management_upload_at = 0
         logger.warning("No data received from CLIProxy.")
         _log_sync_event(
             run_id=run_id,
@@ -3597,6 +3778,15 @@ def main():
         next_run_time=datetime.now() + timedelta(minutes=5),
     )
 
+    # Compact model_usage rows into 30-min buckets (runs hourly; also runs on every upload)
+    scheduler.add_job(
+        _compact_model_usage_db,
+        "interval",
+        minutes=MODEL_USAGE_COMPACTION_INTERVAL_MINUTES,
+        id="model_usage_compaction",
+        next_run_time=datetime.now() + timedelta(minutes=MODEL_USAGE_COMPACTION_INTERVAL_MINUTES // 2),
+    )
+
     if _should_use_redis_queue():
         scheduler.add_job(
             _redis_queue_sync_once,
@@ -3651,6 +3841,16 @@ def main():
     logger.info(
         f"Intraday compaction scheduled every {INTRADAY_COMPACTION_INTERVAL_MINUTES} minute(s) "
         f"(min_age={INTRADAY_COMPACTION_MIN_AGE_MINUTES} minute(s))."
+    )
+    if _should_use_management_polling():
+        logger.info(
+            f"model_usage upload interval: {MODEL_USAGE_UPLOAD_INTERVAL_SECONDS}s "
+            f"(collection remains at {COLLECTOR_INTERVAL}s, DB writes reduced ~{MODEL_USAGE_UPLOAD_INTERVAL_SECONDS // COLLECTOR_INTERVAL}x)."
+        )
+    logger.info(
+        f"model_usage compaction scheduled every {MODEL_USAGE_COMPACTION_INTERVAL_MINUTES} minute(s) "
+        f"(30-min buckets, min_age={MODEL_USAGE_COMPACTION_MIN_AGE_MINUTES}m, "
+        f"lookback={MODEL_USAGE_COMPACTION_LOOKBACK_HOURS}h)."
     )
 
     # Start the Flask app using Waitress

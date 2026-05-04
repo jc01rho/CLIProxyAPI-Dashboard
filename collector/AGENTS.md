@@ -1,42 +1,53 @@
-# COLLECTOR KNOWLEDGE BASE
+# DASHBOARD COLLECTOR
 
-> 상위 문서: [../AGENTS.md](../AGENTS.md)
+> Parent: [../AGENTS.md](../AGENTS.md)
 
 ## OVERVIEW
 
-`collector/`는 Python Flask API, scheduler, usage snapshot 수집, admin 세션, DB migration을 함께 가진 대시보드 백엔드다.
+`collector/` is the Python operational backend: Flask auth/API routes, scheduled sync jobs, local PostgreSQL client, Redis usage queue consumer, migration runner, and compaction/retention logic.
 
 ## STRUCTURE
 
 ```text
 collector/
-├── main.py                # Flask app + scheduler + collector jobs
-├── db.py                  # PostgreSQL query builder / migrations
+├── main.py
+├── db.py
 ├── credential_stats_sync.py
+├── redis_queue_client.py
 ├── migrations/
-│   └── 000*.sql
-└── test_main_retention.py # unittest 기반 회귀 테스트
+├── requirements.txt
+└── test_*.py
 ```
 
 ## WHERE TO LOOK
 
 | Task | Location | Notes |
 |------|----------|-------|
-| 수집 주기/로그인/health | `main.py` | `/api/collector/*` routes |
-| DB write/read 패턴 | `db.py` | Supabase-like fluent query |
-| credential 통계 보정 | `credential_stats_sync.py` | 스냅샷 외 별도 동기화 |
-| 스키마 마이그레이션 | `migrations/` | 순번 증가 유지 |
-| retention/compaction 회귀 | `test_main_retention.py` | unittest + dependency stub |
+| Scheduler/jobs | `main.py:main()` and job helpers | Sync, cleanup, compaction. |
+| Request events | `_usage_queue_sync_once`, `_redis_queue_sync_once`, `_transform_queue_event` | Missing table guard prevents data loss. |
+| Model usage compaction | `_floor_to_30min_bucket`, `_compact_model_usage_db` | Latest cumulative snapshot per bucket. |
+| DB adapter | `db.py` | QueryBuilder + JSONB wrapping + migrations. |
+| Credential deltas | `credential_stats_sync.py` | Summary/daily delta calculations. |
+| Redis protocol | `redis_queue_client.py` | Pure stdlib RESP client. |
 
 ## CONVENTIONS
 
-- 환경변수 기본값과 scheduler 간격은 `main.py` 상단 상수에서 관리한다.
-- JSONB 컬럼 write 처리는 `db.py`의 wrapper를 거친다.
-- migration 파일은 widening/additive 변경 위주로 작성한다.
-- 테스트는 `unittest` 스타일이며, 외부 의존성은 stub로 치환한다.
+- `USAGE_SYNC_MODE=auto` drains queue/Redis and avoids legacy `/usage` polling by default.
+- `request_events` availability is preflighted and throttled; do not drain queues when table is unavailable.
+- Cloudflare-style HTML 502/522 cleanup failures are warning-only via `_is_html_gateway_error()`.
+- `MAINTENANCE_DATABASE_URL` is used for `VACUUM (ANALYZE, TRUNCATE ON)` on large tables.
+
+## TESTS
+
+```bash
+python3 -m py_compile main.py
+python3 -m unittest test_model_usage_compaction.py test_main_retention.py test_redis_queue_sync.py test_request_events_api.py
+python3 -m unittest test_credential_stats_sync.py
+```
 
 ## ANTI-PATTERNS
 
-- schema 변경 시 `init-db/schema.sql` 갱신을 빼먹지 않는다.
-- 로컬/수파베이스 분기 로직을 여러 파일에 흩뿌리지 않는다.
-- gateway HTML 오류, retention, compaction 로직을 테스트 없이 손대지 않는다.
+- Do not pop request events from Plus/Redis before confirming table availability.
+- Do not treat legacy `/v0/management/usage` 404 as a collector crash.
+- Do not write source IDs/API keys raw into stored event detail.
+- Do not change compaction to sum cumulative model_usage snapshots.

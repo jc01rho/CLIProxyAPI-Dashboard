@@ -5,6 +5,7 @@ import Dashboard from './components/Dashboard'
 const APP_LOGS_PAGE_SIZE = Number(import.meta.env.VITE_APP_LOGS_PAGE_SIZE || 500)
 const FRONTEND_AUTO_REFRESH_MS = Math.max(1000, Number(import.meta.env.VITE_AUTO_REFRESH_SECONDS || 60) * 1000)
 const COLLECTOR_BASE = '/api/collector'
+const SESSION_FETCH_TIMEOUT_MS = Math.max(1000, Number(import.meta.env.VITE_SESSION_FETCH_TIMEOUT_MS || 5000))
 const DEV_BYPASS_AUTH = import.meta.env.DEV && String(import.meta.env.VITE_DEV_BYPASS_AUTH || '').toLowerCase() === 'true'
 const DEV_MOCK_SKILLS = import.meta.env.DEV && String(import.meta.env.VITE_DEV_MOCK_SKILLS || '').toLowerCase() === 'true'
 
@@ -356,8 +357,15 @@ function App() {
             return true
         }
 
+        const controller = new AbortController()
+        const timeout = window.setTimeout(() => controller.abort(), SESSION_FETCH_TIMEOUT_MS)
+
         try {
-            const response = await authFetch(`${COLLECTOR_BASE}/auth/session`, { method: 'GET', skipUnauthorized: true })
+            const response = await authFetch(`${COLLECTOR_BASE}/auth/session`, {
+                method: 'GET',
+                skipUnauthorized: true,
+                signal: controller.signal,
+            })
             if (!response.ok) {
                 setAuthState({ loading: false, authenticated: false, expiresAt: null, rememberMe: false })
                 return false
@@ -375,7 +383,10 @@ function App() {
         } catch (error) {
             console.error('Error fetching session:', error)
             setAuthState({ loading: false, authenticated: false, expiresAt: null, rememberMe: false })
+            setLoginError('Không thể kết nối tới collector để kiểm tra phiên đăng nhập.')
             return false
+        } finally {
+            window.clearTimeout(timeout)
         }
     }, [authFetch])
 
@@ -1362,12 +1373,15 @@ function App() {
 
         setLoginError('')
         setLoginSubmitting(true)
+        const controller = new AbortController()
+        const timeout = window.setTimeout(() => controller.abort(), SESSION_FETCH_TIMEOUT_MS)
 
         try {
             const response = await authFetch(`${COLLECTOR_BASE}/auth/login`, {
                 method: 'POST',
                 body: JSON.stringify(loginForm),
                 skipUnauthorized: true,
+                signal: controller.signal,
             })
 
             if (!response.ok) {
@@ -1390,6 +1404,7 @@ function App() {
             console.error('Login failed:', error)
             setLoginError('Không thể kết nối tới collector để đăng nhập.')
         } finally {
+            window.clearTimeout(timeout)
             setLoginSubmitting(false)
         }
     }

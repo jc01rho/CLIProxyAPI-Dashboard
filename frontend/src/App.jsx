@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { selectRows, selectSingle } from './lib/database'
 import Dashboard from './components/Dashboard'
 
-const APP_LOGS_PAGE_SIZE = Number(import.meta.env.VITE_APP_LOGS_PAGE_SIZE || 500)
 const FRONTEND_AUTO_REFRESH_MS = Math.max(1000, Number(import.meta.env.VITE_AUTO_REFRESH_SECONDS || 60) * 1000)
 const COLLECTOR_BASE = '/api/collector'
 const SESSION_FETCH_TIMEOUT_MS = Math.max(1000, Number(import.meta.env.VITE_SESSION_FETCH_TIMEOUT_MS || 5000))
@@ -264,7 +263,6 @@ function App() {
         setHourlyStats([])
         setSkillRuns([])
         setSkillDailyStats([])
-        setAppLogs([])
         setRequestEvents([])
         setLastUpdated(null)
         setCredentialData(null)
@@ -292,7 +290,6 @@ function App() {
     const [hourlyStats, setHourlyStats] = useState([])
     const [skillRuns, setSkillRuns] = useState([])
     const [skillDailyStats, setSkillDailyStats] = useState([])
-    const [appLogs, setAppLogs] = useState([])
     const [requestEvents, setRequestEvents] = useState([])
     const [loading, setLoading] = useState(true)
     const [isRefreshing, setIsRefreshing] = useState(false)
@@ -1201,7 +1198,7 @@ function App() {
                 }
             }
 
-            const [skillRunsData, skillDailyData, appLogsData, requestEventsData] = await Promise.all([
+            const [skillRunsData, skillDailyData, requestEventsData] = await Promise.all([
                 selectRows('skill_runs', {
                     select: 'event_uid,tool_use_id,skill_name,session_id,machine_id,source,triggered_at,status,error_type,error_message,attempt_no,tokens_used,output_tokens,duration_ms,model,tool_calls,estimated_cost_usd,is_skeleton,project_dir',
                     filters: [
@@ -1220,15 +1217,6 @@ function App() {
                     ],
                     order: { column: 'stat_date', ascending: true },
                 }),
-                selectRows('app_logs', {
-                    select: 'id,event_uid,logged_at,source,category,severity,title,message,details,session_id,machine_id,project_dir',
-                    filters: [
-                        ...(startTime ? [{ column: 'logged_at', operator: 'gte', value: startTime }] : []),
-                        ...(endTime ? [{ column: 'logged_at', operator: 'lt', value: endTime }] : []),
-                    ],
-                    order: { column: 'logged_at', ascending: false },
-                    limit: APP_LOGS_PAGE_SIZE,
-                }),
                 // Events tab uses request_events as its exclusive source of truth.
                 // Do not merge these rows into snapshot-based daily/model aggregates.
                 selectRows('request_events', {
@@ -1242,11 +1230,8 @@ function App() {
                 }),
             ])
 
-            const appRows = appLogsData || []
-
             setSkillRuns(skillRunsData || [])
             setSkillDailyStats(skillDailyData || [])
-            setAppLogs(appRows)
             setRequestEvents(requestEventsData || [])
             setHasInitialDataLoaded(true)
             setLoading(false)
@@ -1339,19 +1324,6 @@ function App() {
         }
         setDateRange(days)
     }
-
-    const clearAllAppLogs = useCallback(async () => {
-        const response = await authFetch(`${COLLECTOR_BASE}/logs/clear`, {
-            method: 'POST',
-            body: JSON.stringify({ scope: 'all' })
-        })
-
-        if (!response.ok) {
-            throw new Error(`Clear logs failed: ${response.status}`)
-        }
-
-        await fetchData(dateRange)
-    }, [authFetch, dateRange, fetchData])
 
     const handleCustomRangeApply = (range) => {
         setCustomRange({
@@ -1511,9 +1483,7 @@ function App() {
                 isAuthenticated={authState.authenticated}
                 skillRuns={mockSkillData.skillRuns}
                 skillDailyStats={mockSkillData.skillDailyStats}
-                appLogs={appLogs}
                 requestEvents={requestEvents}
-                onClearAllLogs={clearAllAppLogs}
                 onLogout={handleLogout}
             />
         </div>

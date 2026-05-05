@@ -2300,7 +2300,12 @@ def fetch_usage_queue_items(count: int) -> Tuple[List[Dict[str, Any]], Dict[str,
         response = requests.get(url, headers=headers, params={"count": count}, timeout=30)
         response.raise_for_status()
         payload = response.json()
-        items = payload.get("items") if isinstance(payload, dict) else []
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict):
+            items = payload.get("items")
+        else:
+            items = []
         if not isinstance(items, list):
             items = []
         return [item for item in items if isinstance(item, dict)], {

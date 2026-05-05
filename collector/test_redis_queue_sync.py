@@ -376,6 +376,30 @@ class RedisQueueTransformTests(unittest.TestCase):
             self.module.CLIPROXY_URL = original_url
             self.module.CLIPROXY_MANAGEMENT_KEY = original_key
 
+    def test_fetch_usage_queue_items_parses_plus_array_response(self):
+        class _Response:
+            status_code = 200
+            content = b'[{"request_id":"req-array","model":"gpt-5.4"}]'
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return [{"request_id": "req-array", "model": "gpt-5.4"}]
+
+        original_get = self.module.requests.get
+        original_url = self.module.CLIPROXY_URL
+        self.module.requests.get = lambda *a, **kw: _Response()
+        self.module.CLIPROXY_URL = "http://cliproxy.local"
+        try:
+            items, meta = self.module.fetch_usage_queue_items(25)
+            self.assertEqual(items, [{"request_id": "req-array", "model": "gpt-5.4"}])
+            self.assertEqual(meta["count"], 1)
+            self.assertEqual(meta["http_status"], 200)
+        finally:
+            self.module.requests.get = original_get
+            self.module.CLIPROXY_URL = original_url
+
     def test_usage_queue_sync_fetches_and_persists(self):
         events = []
 

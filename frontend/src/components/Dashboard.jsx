@@ -46,6 +46,92 @@ const DATE_RANGES = [
     { label: 'This Year', id: 'year' },
 ]
 
+const isRequestEventAggregate = (ev) => ['daily_request_events', 'request_events_upload_window'].includes(ev?.raw_detail?.aggregate)
+
+const eventStatDate = (ev) => {
+    const aggregateDay = ev?.raw_detail?.day
+    if (typeof aggregateDay === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(aggregateDay)) return aggregateDay
+    const value = aggregateDay || ev?.occurred_at
+    if (!value) return null
+    const parsed = new Date(value)
+    if (Number.isNaN(parsed.getTime())) return null
+    return parsed.toLocaleDateString('en-CA')
+}
+
+const aggregateRequestEventsByDay = (events) => {
+    const days = new Map()
+    for (const ev of events || []) {
+        const day = eventStatDate(ev)
+        if (!day) continue
+        if (!days.has(day)) {
+            days.set(day, {
+                stat_date: day,
+                total_requests: 0,
+                total_tokens: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                success_count: 0,
+                failure_count: 0,
+                estimated_cost_usd: 0,
+                models: {},
+            })
+        }
+        const row = days.get(day)
+        if (isRequestEventAggregate(ev)) {
+            const detail = ev.raw_detail || {}
+            row.total_requests += Number(detail.request_count) || 0
+            row.success_count += Number(detail.success_count) || 0
+            row.failure_count += Number(detail.failed_count) || 0
+            row.input_tokens += Number(detail.input_tokens) || 0
+            row.output_tokens += Number(detail.output_tokens) || 0
+            row.total_tokens += Number(detail.total_tokens) || 0
+            row.estimated_cost_usd += Number(detail.estimated_cost_usd) || 0
+            for (const [model, data] of Object.entries(detail.models || {})) {
+                if (!row.models[model]) row.models[model] = { requests: 0, tokens: 0, cost: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0 }
+                row.models[model].requests += Number(data.requests) || 0
+                row.models[model].tokens += Number(data.tokens) || 0
+                row.models[model].cost += Number(data.cost) || 0
+            }
+            continue
+        }
+        row.total_requests += 1
+        if (ev.failed) row.failure_count += 1
+        else row.success_count += 1
+        row.input_tokens += Number(ev.input_tokens) || 0
+        row.output_tokens += Number(ev.output_tokens) || 0
+        row.total_tokens += Number(ev.total_tokens) || 0
+        row.estimated_cost_usd += Number(ev.estimated_cost_usd) || 0
+        const model = ev.model_name || 'Unknown'
+        if (!row.models[model]) row.models[model] = { requests: 0, tokens: 0, cost: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0 }
+        row.models[model].requests += 1
+        row.models[model].tokens += Number(ev.total_tokens) || 0
+        row.models[model].cost += Number(ev.estimated_cost_usd) || 0
+    }
+    return Array.from(days.values())
+}
+
+const mergeDailyStatsWithRequestEvents = (dailyStats, requestEvents) => {
+    const eventRows = aggregateRequestEventsByDay(requestEvents)
+    const eventsByDay = new Map(eventRows.map(row => [row.stat_date, row]))
+    const merged = []
+    const seenDays = new Set()
+
+    for (const row of dailyStats || []) {
+        const day = row.stat_date
+        seenDays.add(day)
+        const eventRow = eventsByDay.get(day)
+        if (eventRow && (Number(row.total_requests) || 0) <= 0 && eventRow.total_requests > 0) {
+            merged.push({ ...eventRow })
+        } else {
+            merged.push(row)
+        }
+    }
+    for (const eventRow of eventRows) {
+        if (!seenDays.has(eventRow.stat_date)) merged.push(eventRow)
+    }
+    return merged.sort((a, b) => String(a.stat_date || '').localeCompare(String(b.stat_date || '')))
+}
+
 // Animated Stat Card Component
 const StatCard = ({ label, value, meta, icon, sparklineData, dataKey, stroke }) => {
     const [animate, setAnimate] = useState(false)
@@ -351,7 +437,9 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
     }
 
     // Use data directly from props (already filtered by API)
-    const filteredDailyStats = dailyStats || []
+    const filteredDailyStats = useMemo(() => {
+        return mergeDailyStatsWithRequestEvents(dailyStats || [], requestEvents || [])
+    }, [dailyStats, requestEvents])
     const filteredModelUsage = modelUsage || []
 
     // Calculate totals from filtered daily stats (properly filtered by date range)

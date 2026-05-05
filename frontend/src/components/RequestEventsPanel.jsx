@@ -31,7 +31,7 @@ const normalizeGroupValue = (value) => {
 
 const getStatus = (failed) => failed ? 'failure' : 'success'
 
-const isDailyAggregateEvent = (ev) => ev?.raw_detail?.aggregate === 'daily_request_events'
+const isDailyAggregateEvent = (ev) => ['daily_request_events', 'request_events_upload_window'].includes(ev?.raw_detail?.aggregate)
 const isInternalAggregateValue = (value) => String(value || '').startsWith('__daily_aggregate__')
 
 const getEventWeight = (ev) => {
@@ -713,7 +713,7 @@ function RequestEventsPanel({ requestEvents = [] }) {
                                     return (
                                         <tr key={r.event_uid || `aggregate-${idx}`}>
                                             <td title={r.occurred_at}>{formatDateTime(r.occurred_at)}</td>
-                                            <td colSpan={5}>Daily aggregate summary ({formatNumber(getEventWeight(r))} request events)</td>
+                                            <td colSpan={5}>Aggregate summary ({formatNumber(getEventWeight(r))} request events)</td>
                                             <td><span className="status-success">SUMMARY</span></td>
                                             <td>{r.latency_ms ? `${formatNumber(r.latency_ms)}ms avg` : '-'}</td>
                                             <td>{formatNumber(r.raw_detail?.input_tokens)}</td>

@@ -34,6 +34,9 @@ class _DummyTable:
     def eq(self, *args, **kwargs):
         return self
 
+    def neq(self, *args, **kwargs):
+        return self
+
     def gte(self, *args, **kwargs):
         return self
 
@@ -712,6 +715,31 @@ class MainSchedulerTests(unittest.TestCase):
         flush_jobs = [
             job for job in scheduler.jobs
             if job["kwargs"].get("id") == "app_logs_upload_flush"
+        ]
+        self.assertEqual(len(flush_jobs), 1)
+        job = flush_jobs[0]
+        self.assertEqual(job["trigger"], "interval")
+        self.assertEqual(job["kwargs"]["seconds"], self.m.MODEL_USAGE_UPLOAD_INTERVAL_SECONDS)
+
+    def test_main_schedules_request_events_upload_flush_job(self):
+        serve_calls = []
+        fake_db = object()
+
+        self.m.init_db = lambda: fake_db
+        self.m.db_client = fake_db
+        self.m.flask_app = self.m.Flask(__name__)
+        self.m._cleanup_old_app_logs = lambda: 0
+        self.m._run_startup_cleanup = lambda: {}
+        self.m.run_full_sync_once = lambda: None
+        self.m.sync_credential_stats = lambda *args, **kwargs: None
+        self.m.serve = lambda *args, **kwargs: serve_calls.append(True)
+
+        self.m.main()
+
+        scheduler = _RecordedScheduler.instances[-1]
+        flush_jobs = [
+            job for job in scheduler.jobs
+            if job["kwargs"].get("id") == "request_events_upload_flush"
         ]
         self.assertEqual(len(flush_jobs), 1)
         job = flush_jobs[0]

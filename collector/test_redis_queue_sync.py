@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import sys
+import tempfile
 import types
 import unittest
 from datetime import datetime, timezone
@@ -135,6 +136,16 @@ def _load_module():
 
 
 class _DummyTable:
+    def select(self, *a, **kw):
+        return self
+    def eq(self, *a, **kw):
+        return self
+    def neq(self, *a, **kw):
+        return self
+    def lt(self, *a, **kw):
+        return self
+    def limit(self, *a, **kw):
+        return self
     def upsert(self, *a, **kw):
         return self
     def insert(self, *a, **kw):
@@ -152,6 +163,17 @@ class RedisQueueTransformTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.module = _load_module()
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._original_spool_path = self.module.REQUEST_EVENTS_SPOOL_PATH
+        self.module.REQUEST_EVENTS_SPOOL_PATH = Path(self._tmpdir.name) / "request_events_spool.jsonl"
+        self.module._reset_request_event_upload_state()
+
+    def tearDown(self):
+        self.module._reset_request_event_upload_state()
+        self.module.REQUEST_EVENTS_SPOOL_PATH = self._original_spool_path
+        self._tmpdir.cleanup()
 
     def test_transform_complete_payload(self):
         payload = {
@@ -546,6 +568,190 @@ class RedisQueueTransformTests(unittest.TestCase):
             self.module.USAGE_QUEUE_BATCH_SIZE = original_batch_size
             self.module._request_events_table_available = original_available
 
+    def test_usage_queue_first_run_flushes_all_drained_events_immediately(self):
+        events = []
+        call_count = [0]
+        batch_size = 2
+        all_batches = [
+            [{"timestamp": "2026-04-15T10:30:00Z", "request_id": f"startup-{i}", "model": "gpt-4o"}
+             for i in range(batch_size)],
+            [{"timestamp": "2026-04-15T10:30:01Z", "request_id": f"startup-{batch_size + j}", "model": "gpt-4o"}
+             for j in range(batch_size)],
+            [],
+        ]
+
+        class _RecordingTable(_DummyTable):
+            def upsert(self, data, on_conflict=None):
+                events.extend(data if isinstance(data, list) else [data])
+                return self
+
+        class _RecordingDB:
+            def table(self, *a, **kw):
+                return _RecordingTable()
+
+        def fake_fetch(count):
+            idx = call_count[0]
+            call_count[0] += 1
+            batch = all_batches[min(idx, len(all_batches) - 1)]
+            return batch, {"count": len(batch)}
+
+        original_fetch = self.module.fetch_usage_queue_items
+        original_batch_size = self.module.USAGE_QUEUE_BATCH_SIZE
+        original_available = self.module._request_events_table_available
+        self.module.db_client = _RecordingDB()
+        self.module._request_events_table_available = True
+        self.module.fetch_usage_queue_items = fake_fetch
+        self.module.USAGE_QUEUE_BATCH_SIZE = batch_size
+        try:
+            result = self.module._usage_queue_sync_once()
+            self.assertEqual(result["popped"], batch_size * 2)
+            self.assertEqual(result["persisted"], batch_size * 2)
+            self.assertFalse(result["upload_deferred"])
+            self.assertEqual(len(events), batch_size * 2)
+        finally:
+            self.module.fetch_usage_queue_items = original_fetch
+            self.module.USAGE_QUEUE_BATCH_SIZE = original_batch_size
+            self.module._request_events_table_available = original_available
+
+    def test_usage_queue_subsequent_run_defers_upload_until_interval(self):
+        events = []
+
+        class _RecordingTable(_DummyTable):
+            def upsert(self, data, on_conflict=None):
+                events.extend(data if isinstance(data, list) else [data])
+                return self
+
+        class _RecordingDB:
+            def table(self, *a, **kw):
+                return _RecordingTable()
+
+        original_fetch = self.module.fetch_usage_queue_items
+        original_available = self.module._request_events_table_available
+        self.module.db_client = _RecordingDB()
+        self.module._request_events_table_available = True
+        self.module._last_request_event_upload_at = self.module.time.time()
+        self.module.fetch_usage_queue_items = lambda count: ([{
+            "timestamp": "2026-04-15T10:30:00Z",
+            "request_id": "deferred-req",
+            "model": "gpt-4o",
+        }], {"count": 1})
+        try:
+            result = self.module._usage_queue_sync_once()
+            self.assertEqual(result["popped"], 1)
+            self.assertEqual(result["persisted"], 0)
+            self.assertTrue(result["upload_deferred"])
+            self.assertEqual(len(events), 0)
+            self.assertEqual(len(self.module._request_event_upload_buffer), 1)
+            self.assertTrue(self.module.REQUEST_EVENTS_SPOOL_PATH.exists())
+        finally:
+            self.module.fetch_usage_queue_items = original_fetch
+            self.module._request_events_table_available = original_available
+
+    def test_request_event_spool_survives_restart_until_scheduled_flush(self):
+        events = []
+
+        class _RecordingTable(_DummyTable):
+            def upsert(self, data, on_conflict=None):
+                events.extend(data if isinstance(data, list) else [data])
+                return self
+
+        class _RecordingDB:
+            def table(self, *a, **kw):
+                return _RecordingTable()
+
+        original_fetch = self.module.fetch_usage_queue_items
+        original_available = self.module._request_events_table_available
+        self.module.db_client = _RecordingDB()
+        self.module._request_events_table_available = True
+        self.module._last_request_event_upload_at = self.module.time.time()
+        self.module.fetch_usage_queue_items = lambda count: ([{
+            "timestamp": "2026-04-15T10:30:00Z",
+            "request_id": "spooled-req",
+            "model": "gpt-4o",
+        }], {"count": 1})
+        try:
+            result = self.module._usage_queue_sync_once()
+            self.assertEqual(result["persisted"], 0)
+            self.assertEqual(len(events), 0)
+            self.assertTrue(self.module.REQUEST_EVENTS_SPOOL_PATH.exists())
+
+            # Simulate collector restart: memory buffer is gone but durable spool remains.
+            self.module._request_event_upload_buffer = []
+            self.module._last_request_event_upload_at = 0
+            flush = self.module._flush_request_event_upload_buffer("scheduled")
+
+            self.assertTrue(flush["flushed"])
+            self.assertEqual(flush["persisted"], 1)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["request_id"], "spooled-req")
+            spool_contents = self.module.REQUEST_EVENTS_SPOOL_PATH.read_text(encoding="utf-8")
+            self.assertEqual(spool_contents, "")
+        finally:
+            self.module.fetch_usage_queue_items = original_fetch
+            self.module._request_events_table_available = original_available
+
+    def test_request_event_spool_retained_when_db_flush_fails(self):
+        class _FailingTable(_DummyTable):
+            def upsert(self, *a, **kw):
+                raise RuntimeError("db unavailable")
+
+        class _FailingDB:
+            def table(self, *a, **kw):
+                return _FailingTable()
+
+        self.module.db_client = _FailingDB()
+        self.module._request_events_table_available = True
+        self.module._buffer_request_events_for_upload([self.module._transform_queue_event({
+            "timestamp": "2026-04-15T10:30:00Z",
+            "request_id": "db-fail-req",
+            "model": "gpt-4o",
+        })])
+
+        result = self.module._flush_request_event_upload_buffer("scheduled", force=True)
+
+        self.assertFalse(result["flushed"])
+        self.assertEqual(result["skipped"], 1)
+        self.assertIn("db-fail-req", self.module.REQUEST_EVENTS_SPOOL_PATH.read_text(encoding="utf-8"))
+
+    def test_flush_preserves_events_appended_during_upload(self):
+        original_upsert = self.module._upsert_request_events_batch
+        uploaded = []
+
+        first_event = self.module._transform_queue_event({
+            "timestamp": "2026-04-15T10:30:00Z",
+            "request_id": "first-req",
+            "model": "gpt-4o",
+        })
+        second_event = self.module._transform_queue_event({
+            "timestamp": "2026-04-15T10:31:00Z",
+            "request_id": "second-req",
+            "model": "gpt-4o",
+        })
+
+        def fake_upsert(events):
+            uploaded.extend(events)
+            self.module._buffer_request_events_for_upload([second_event])
+            return len(events)
+
+        class _RecordingDB:
+            def table(self, *a, **kw):
+                return _DummyTable()
+
+        self.module.db_client = _RecordingDB()
+        self.module._request_events_table_available = True
+        self.module._upsert_request_events_batch = fake_upsert
+        self.module._buffer_request_events_for_upload([first_event])
+        try:
+            result = self.module._flush_request_event_upload_buffer("scheduled", force=True)
+
+            self.assertTrue(result["flushed"])
+            self.assertEqual([event["request_id"] for event in uploaded], ["first-req"])
+            spool_contents = self.module.REQUEST_EVENTS_SPOOL_PATH.read_text(encoding="utf-8")
+            self.assertIn("second-req", spool_contents)
+            self.assertNotIn("first-req", spool_contents)
+        finally:
+            self.module._upsert_request_events_batch = original_upsert
+
     def test_persist_queue_payloads_deduplicates_event_uid_within_batch(self):
         events = []
 
@@ -572,6 +778,51 @@ class RedisQueueTransformTests(unittest.TestCase):
             self.assertEqual(result["parsed"], 2)
             self.assertEqual(result["persisted"], 1)
             self.assertEqual(len(events), 1)
+        finally:
+            self.module.db_client = original_db
+            self.module._request_events_table_available = original_available
+
+    def test_persist_queue_payloads_logs_aggregated_usage_summary(self):
+        class _RecordingTable(_DummyTable):
+            def upsert(self, *a, **kw):
+                return self
+
+        class _RecordingDB:
+            def table(self, *a, **kw):
+                return _RecordingTable()
+
+        original_db = self.module.db_client
+        original_available = self.module._request_events_table_available
+        self.module.db_client = _RecordingDB()
+        self.module._request_events_table_available = True
+        payloads = [
+            {
+                "timestamp": "2026-04-15T10:30:00Z",
+                "request_id": "req-summary-1",
+                "model": "gpt-4o",
+                "tokens": {"input_tokens": 100, "output_tokens": 40, "total_tokens": 140},
+                "failed": False,
+            },
+            {
+                "timestamp": "2026-04-15T10:31:00Z",
+                "request_id": "req-summary-2",
+                "model": "gpt-4o",
+                "tokens": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60},
+                "failed": True,
+            },
+        ]
+        try:
+            with mock.patch.object(self.module.logger, "info") as info_mock:
+                result = self.module._persist_queue_payloads(payloads)
+
+            self.assertEqual(result["persisted"], 2)
+            message = "Aggregated request event usage (%s): requests=%d, success=%d, failure=%d, total_tokens=%d, estimated_cost_usd=%.6f, top_models=[%s]"
+            matching_calls = [call.args[1:] for call in info_mock.call_args_list if call.args and call.args[0] == message]
+            self.assertTrue(matching_calls)
+            args = matching_calls[0]
+            self.assertEqual(args[0], "usage_queue_collected")
+            self.assertEqual(args[1:5], (2, 1, 1, 200))
+            self.assertIn("gpt-4o:requests=2,failures=1,tokens=200", args[6])
         finally:
             self.module.db_client = original_db
             self.module._request_events_table_available = original_available

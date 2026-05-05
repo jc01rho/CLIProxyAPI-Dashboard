@@ -14,7 +14,7 @@ import threading
 from uuid import uuid4
 from datetime import datetime, date, timezone, timedelta
 import json
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, Tuple, List, Set
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -137,6 +137,9 @@ REDIS_QUEUE_KEY = str(os.getenv("REDIS_QUEUE_KEY", "cliproxy:usage_events")).str
 REDIS_QUEUE_BATCH_SIZE = _env_int("REDIS_QUEUE_BATCH_SIZE", 50)
 REDIS_QUEUE_SOCKET_TIMEOUT = float(os.getenv("REDIS_QUEUE_SOCKET_TIMEOUT", "5"))
 REDIS_QUEUE_SYNC_INTERVAL = _env_int("REDIS_QUEUE_SYNC_INTERVAL_SECONDS", 60)
+REQUEST_EVENTS_SPOOL_PATH = Path(
+    os.getenv("REQUEST_EVENTS_SPOOL_PATH", Path(__file__).parent / "request_events_spool.jsonl")
+)
 
 # Default pricing (USD per 1M tokens) - Updated Dec 2024
 DEFAULT_PRICING = {
@@ -189,6 +192,9 @@ _management_upload_lock = threading.Lock()
 _management_deferred_sync_count: int = 0
 _app_log_buffer: List[Dict[str, Any]] = []
 _app_log_buffer_lock = threading.Lock()
+_request_event_upload_buffer: List[Dict[str, Any]] = []
+_request_event_upload_lock = threading.Lock()
+_last_request_event_upload_at: float = 0
 
 # --- Flask App Setup ---
 flask_app = Flask(__name__)
@@ -514,6 +520,75 @@ def _snapshot_local_day(snapshot: Dict[str, Any]) -> Optional[str]:
     return collected_at.astimezone(APP_TIMEZONE).date().isoformat()
 
 
+def _local_day_start_utc_iso(day_key: str) -> str:
+    day = date.fromisoformat(day_key)
+    start_local = datetime(day.year, day.month, day.day, tzinfo=APP_TIMEZONE)
+    return start_local.astimezone(timezone.utc).isoformat()
+
+
+def _event_local_day(row: Dict[str, Any], timestamp_key: str) -> Optional[str]:
+    occurred_at = _parse_iso_datetime(row.get(timestamp_key))
+    if not occurred_at:
+        return None
+    return occurred_at.astimezone(APP_TIMEZONE).date().isoformat()
+
+
+def _is_daily_aggregate_row(row: Dict[str, Any], prefix: str) -> bool:
+    event_uid = str(row.get("event_uid") or "")
+    return event_uid.startswith(prefix)
+
+
+def _fetch_existing_daily_aggregate(table_name: str, event_uid: str, detail_column: str) -> Dict[str, Any]:
+    if not db_client:
+        return {}
+    try:
+        rows = (
+            db_client.table(table_name)
+            .select(detail_column)
+            .eq("event_uid", event_uid)
+            .limit(1)
+            .execute()
+            .data
+        ) or []
+        if not rows:
+            return {}
+        raw = rows[0].get(detail_column)
+        if detail_column == "arguments" and isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = {}
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def _daily_aggregate_included_ids(existing: Dict[str, Any]) -> Set[str]:
+    raw_ids = existing.get("included_ids")
+    if not isinstance(raw_ids, list):
+        return set()
+    return {str(raw_id) for raw_id in raw_ids if raw_id is not None}
+
+
+def _append_daily_aggregate_included_ids(agg: Dict[str, Any], existing: Dict[str, Any], row_ids: List[Any]) -> None:
+    included = _daily_aggregate_included_ids(existing)
+    for row_id in row_ids:
+        if row_id is not None:
+            included.add(str(row_id))
+    agg["included_ids"] = sorted(included)
+
+
+def _merge_numeric_bucket(target: Dict[str, Any], source: Dict[str, Any], fields: tuple[str, ...]) -> None:
+    for key in fields:
+        try:
+            if key == "cost":
+                target[key] = float(target.get(key) or 0) + float(source.get(key) or 0)
+            else:
+                target[key] = _safe_int(target.get(key), 0) + _safe_int(source.get(key), 0)
+        except Exception:
+            pass
+
+
 def _slim_raw_data(raw_data: Any) -> Any:
     if not raw_data or not isinstance(raw_data, dict):
         return raw_data
@@ -732,7 +807,7 @@ def _run_maintenance_vacuum() -> None:
         cursor = conn.cursor()
         
         # Vacuum only tables touched by cleanup
-        tables = ["app_logs", "usage_snapshots", "model_usage", "skill_runs"]
+        tables = ["app_logs", "usage_snapshots", "model_usage", "skill_runs", "request_events"]
         for table in tables:
             try:
                 cursor.execute(f"VACUUM (ANALYZE, TRUNCATE ON) {table}")
@@ -797,6 +872,9 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
             "snapshots": 0,
             "model_usage": 0,
             "skill_runs": 0,
+            "request_events": 0,
+            "request_event_aggregate_days": 0,
+            "skill_run_aggregate_days": 0,
             "retained_days": 0,
             "skipped_snapshots": 0,
             "slimmed_snapshots": 0,
@@ -811,6 +889,9 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
         "snapshots": 0,
         "model_usage": 0,
         "skill_runs": 0,
+        "request_events": 0,
+        "request_event_aggregate_days": 0,
+        "skill_run_aggregate_days": 0,
         "retained_days": 0,
         "skipped_snapshots": 0,
         "slimmed_snapshots": 0,
@@ -898,37 +979,41 @@ def _cleanup_old_raw_data() -> Dict[str, int]:
         result["error"] = True
 
     try:
-        deleted_skill_runs = (
-            db_client.table("skill_runs")
-            .delete()
-            .lt("triggered_at", cutoff_utc)
-            .execute()
-            .data
-        ) or []
-        result["skill_runs"] = len(deleted_skill_runs)
+        request_event_compaction = _compact_request_events_daily()
+        result["request_events"] = request_event_compaction.get("deleted", 0)
+        result["request_event_aggregate_days"] = request_event_compaction.get("aggregated_days", 0)
+        if request_event_compaction.get("error"):
+            result["error"] = True
     except Exception as e:
-        if _is_html_gateway_error(e):
-            logger.warning(
-                "Cleanup old skill_runs skipped due to likely transient Supabase/PostgREST HTML gateway response: %s",
-                e,
-            )
-        else:
-            logger.error(f"Failed to cleanup old skill_runs: {e}", exc_info=True)
+        logger.error("Failed to compact request_events daily: %s", e, exc_info=True)
         result["error"] = True
 
-    total = result["snapshots"] + result["model_usage"] + result["skill_runs"]
+    try:
+        skill_run_compaction = _compact_skill_runs_daily()
+        result["skill_runs"] = skill_run_compaction.get("deleted", 0)
+        result["skill_run_aggregate_days"] = skill_run_compaction.get("aggregated_days", 0)
+        if skill_run_compaction.get("error"):
+            result["error"] = True
+    except Exception as e:
+        logger.error("Failed to compact skill_runs daily: %s", e, exc_info=True)
+        result["error"] = True
+
+    total = result["snapshots"] + result["model_usage"] + result["skill_runs"] + result["request_events"]
     if total > 0 or result["skipped_snapshots"] > 0 or result["slimmed_snapshots"] > 0:
         logger.info(
             "Raw data cleanup: deleted %s historical snapshots, deleted %s model_usage rows, "
             "retained %s day-end snapshots before today, slimmed %s retained snapshot(s), "
-            "removed %s skill_runs older than %s days"
+            "compacted %s request_events into %s daily row(s), "
+            "compacted %s skill_runs into %s daily row(s)"
             "%s",
             result["snapshots"],
             result["model_usage"],
             result["retained_days"],
             result["slimmed_snapshots"],
+            result["request_events"],
+            result["request_event_aggregate_days"],
             result["skill_runs"],
-            RAW_DATA_RETENTION_DAYS,
+            result["skill_run_aggregate_days"],
             (
                 f", skipped {result['skipped_snapshots']} snapshot(s) with invalid timestamps"
                 if result["skipped_snapshots"] > 0
@@ -1029,6 +1114,341 @@ def _cleanup_intraday_raw_data() -> Dict[str, int]:
         )
     _run_maintenance_vacuum()
 
+    return result
+
+
+def _compact_request_events_daily() -> Dict[str, int]:
+    result = {"deleted": 0, "aggregated_days": 0, "skipped": 0, "error": False}
+    if not db_client:
+        return result
+
+    today_start_utc, _ = _current_local_day_bounds_utc()
+    try:
+        rows = (
+            db_client.table("request_events")
+            .select(
+                "id,event_uid,occurred_at,api_endpoint,endpoint_method,endpoint_path,model_name,"
+                "source_id,auth_index,latency_ms,failed,input_tokens,output_tokens,reasoning_tokens,"
+                "cached_tokens,total_tokens,provider,estimated_cost_usd"
+            )
+            .lt("occurred_at", today_start_utc)
+            .neq("api_endpoint", "__daily_aggregate__")
+            .limit(CLEANUP_SNAPSHOT_PAGE_SIZE)
+            .execute()
+            .data
+        ) or []
+    except Exception as e:
+        logger.error("request_events daily compaction: failed to query rows: %s", e, exc_info=True)
+        result["error"] = True
+        return result
+
+    days: Dict[str, Dict[str, Any]] = {}
+    day_delete_ids: Dict[str, List[Any]] = {}
+    delete_ids: List[Any] = []
+    for row in rows:
+        if _is_daily_aggregate_row(row, "daily-request-events:"):
+            continue
+        day_key = _event_local_day(row, "occurred_at")
+        if not day_key:
+            result["skipped"] += 1
+            continue
+        row_id = row.get("id")
+        if row_id is not None:
+            day_delete_ids.setdefault(day_key, []).append(row_id)
+            delete_ids.append(row_id)
+        event_uid = f"daily-request-events:{day_key}"
+        existing = _fetch_existing_daily_aggregate("request_events", event_uid, "raw_detail")
+        if str(row_id) in _daily_aggregate_included_ids(existing):
+            continue
+        agg = days.setdefault(day_key, {
+            "request_count": 0,
+            "failed_count": 0,
+            "success_count": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+            "cached_tokens": 0,
+            "total_tokens": 0,
+            "estimated_cost_usd": 0.0,
+            "latency_sum_ms": 0,
+            "latency_count": 0,
+            "models": {},
+            "auth_models": {},
+            "providers": {},
+            "endpoints": {},
+        })
+        agg["request_count"] += 1
+        if row.get("failed"):
+            agg["failed_count"] += 1
+        else:
+            agg["success_count"] += 1
+        for key in ("input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens", "total_tokens"):
+            agg[key] += _safe_int(row.get(key), 0)
+        try:
+            agg["estimated_cost_usd"] += float(row.get("estimated_cost_usd") or 0)
+        except Exception:
+            pass
+        latency = _safe_int(row.get("latency_ms"), 0)
+        if latency > 0:
+            agg["latency_sum_ms"] += latency
+            agg["latency_count"] += 1
+
+        model = str(row.get("model_name") or "Unknown")
+        auth = str(row.get("auth_index") if row.get("auth_index") is not None else "Unknown") or "Unknown"
+        provider = str(row.get("provider") or "Unknown")
+        endpoint = str(row.get("api_endpoint") or "Unknown")
+
+        def add_bucket(bucket: Dict[str, Any], name: str) -> None:
+            item = bucket.setdefault(name, {"requests": 0, "success": 0, "failure": 0, "tokens": 0, "cost": 0.0})
+            item["requests"] += 1
+            if row.get("failed"):
+                item["failure"] += 1
+            else:
+                item["success"] += 1
+            item["tokens"] += _safe_int(row.get("total_tokens"), 0)
+            try:
+                item["cost"] += float(row.get("estimated_cost_usd") or 0)
+            except Exception:
+                pass
+
+        add_bucket(agg["models"], model)
+        add_bucket(agg["providers"], provider)
+        add_bucket(agg["endpoints"], endpoint)
+        auth_model_key = f"{auth}\u0000{model}"
+        auth_model = agg["auth_models"].setdefault(auth_model_key, {
+            "auth": auth, "model": model, "requests": 0, "success": 0, "failure": 0, "tokens": 0, "cost": 0.0,
+        })
+        auth_model["requests"] += 1
+        if row.get("failed"):
+            auth_model["failure"] += 1
+        else:
+            auth_model["success"] += 1
+        auth_model["tokens"] += _safe_int(row.get("total_tokens"), 0)
+        try:
+            auth_model["cost"] += float(row.get("estimated_cost_usd") or 0)
+        except Exception:
+            pass
+
+    if not days:
+        if delete_ids:
+            try:
+                result["deleted"] = _batch_delete("request_events", "id", delete_ids)
+            except Exception as e:
+                logger.error("request_events daily compaction: failed to delete already aggregated rows: %s", e, exc_info=True)
+                result["error"] = True
+        return result
+
+    aggregate_rows = []
+    for day_key, agg in days.items():
+        event_uid = f"daily-request-events:{day_key}"
+        existing = _fetch_existing_daily_aggregate("request_events", event_uid, "raw_detail")
+        if existing.get("aggregate") == "daily_request_events":
+            for key in (
+                "request_count", "failed_count", "success_count", "input_tokens", "output_tokens",
+                "reasoning_tokens", "cached_tokens", "total_tokens", "latency_sum_ms", "latency_count",
+            ):
+                agg[key] = _safe_int(existing.get(key), 0) + _safe_int(agg.get(key), 0)
+            try:
+                agg["estimated_cost_usd"] = float(existing.get("estimated_cost_usd") or 0) + float(agg.get("estimated_cost_usd") or 0)
+            except Exception:
+                pass
+            for bucket_key in ("models", "auth_models", "providers", "endpoints"):
+                existing_bucket = existing.get(bucket_key) if isinstance(existing.get(bucket_key), dict) else {}
+                for name, data in existing_bucket.items():
+                    if bucket_key == "auth_models":
+                        target = agg[bucket_key].setdefault(name, {"auth": data.get("auth"), "model": data.get("model"), "requests": 0, "success": 0, "failure": 0, "tokens": 0, "cost": 0.0})
+                    else:
+                        target = agg[bucket_key].setdefault(name, {"requests": 0, "success": 0, "failure": 0, "tokens": 0, "cost": 0.0})
+                    _merge_numeric_bucket(target, data, ("requests", "success", "failure", "tokens", "cost"))
+        _append_daily_aggregate_included_ids(agg, existing, day_delete_ids.get(day_key, []))
+        agg["estimated_cost_usd"] = round(float(agg["estimated_cost_usd"] or 0), 6)
+        agg["avg_latency_ms"] = round(agg["latency_sum_ms"] / agg["latency_count"], 2) if agg["latency_count"] else 0
+        aggregate_rows.append({
+            "event_uid": event_uid,
+            "request_id": None,
+            "occurred_at": _local_day_start_utc_iso(day_key),
+            "api_endpoint": "__daily_aggregate__",
+            "endpoint_method": "AGGREGATE",
+            "endpoint_path": "__daily_aggregate__",
+            "model_name": "__daily_aggregate__",
+            "source_id": "__daily_aggregate__",
+            "auth_index": "__daily_aggregate__",
+            "latency_ms": int(agg["avg_latency_ms"]),
+            "failed": agg["failed_count"] > 0,
+            "input_tokens": agg["input_tokens"],
+            "output_tokens": agg["output_tokens"],
+            "reasoning_tokens": agg["reasoning_tokens"],
+            "cached_tokens": agg["cached_tokens"],
+            "total_tokens": agg["total_tokens"],
+            "provider": "__daily_aggregate__",
+            "estimated_cost_usd": agg["estimated_cost_usd"],
+            "raw_detail": {"aggregate": "daily_request_events", "day": day_key, **agg},
+            "ingested_at": _utcnow().isoformat(),
+        })
+
+    try:
+        _upsert_request_events_batch(aggregate_rows)
+        result["aggregated_days"] = len(aggregate_rows)
+        if delete_ids:
+            result["deleted"] = _batch_delete("request_events", "id", delete_ids)
+    except Exception as e:
+        logger.error("request_events daily compaction: failed to write aggregate rows: %s", e, exc_info=True)
+        result["error"] = True
+    return result
+
+
+def _compact_skill_runs_daily() -> Dict[str, int]:
+    result = {"deleted": 0, "aggregated_days": 0, "skipped": 0, "error": False}
+    if not db_client:
+        return result
+
+    today_start_utc, _ = _current_local_day_bounds_utc()
+    try:
+        rows = (
+            db_client.table("skill_runs")
+            .select(
+                "id,event_uid,machine_id,source,skill_name,session_id,triggered_at,trigger_type,status,"
+                "error_type,error_message,attempt_no,tokens_used,output_tokens,tool_calls,duration_ms,"
+                "estimated_cost_usd,model,is_skeleton,project_dir"
+            )
+            .lt("triggered_at", today_start_utc)
+            .neq("skill_name", "__daily_aggregate__")
+            .eq("is_skeleton", False)
+            .limit(CLEANUP_SNAPSHOT_PAGE_SIZE)
+            .execute()
+            .data
+        ) or []
+    except Exception as e:
+        logger.error("skill_runs daily compaction: failed to query rows: %s", e, exc_info=True)
+        result["error"] = True
+        return result
+
+    days: Dict[str, Dict[str, Any]] = {}
+    day_delete_ids: Dict[str, List[Any]] = {}
+    delete_ids: List[Any] = []
+    for row in rows:
+        if _is_daily_aggregate_row(row, "daily-skill-runs:"):
+            continue
+        day_key = _event_local_day(row, "triggered_at")
+        if not day_key:
+            result["skipped"] += 1
+            continue
+        row_id = row.get("id")
+        if row_id is not None:
+            day_delete_ids.setdefault(day_key, []).append(row_id)
+            delete_ids.append(row_id)
+        event_uid = f"daily-skill-runs:{day_key}"
+        existing = _fetch_existing_daily_aggregate("skill_runs", event_uid, "arguments")
+        if str(row_id) in _daily_aggregate_included_ids(existing):
+            continue
+        agg = days.setdefault(day_key, {
+            "run_count": 0,
+            "success_count": 0,
+            "failure_count": 0,
+            "tokens_used": 0,
+            "output_tokens": 0,
+            "tool_calls": 0,
+            "duration_ms": 0,
+            "estimated_cost_usd": 0.0,
+            "skills": {},
+            "machines": {},
+            "projects": {},
+            "models": {},
+        })
+        status = str(row.get("status") or "success")
+        is_success = status != "failure"
+        agg["run_count"] += 1
+        if is_success:
+            agg["success_count"] += 1
+        else:
+            agg["failure_count"] += 1
+        for key in ("tokens_used", "output_tokens", "tool_calls", "duration_ms"):
+            agg[key] += _safe_int(row.get(key), 0)
+        try:
+            agg["estimated_cost_usd"] += float(row.get("estimated_cost_usd") or 0)
+        except Exception:
+            pass
+
+        def add_skill_bucket(bucket: Dict[str, Any], name: str) -> None:
+            item = bucket.setdefault(name or "Unknown", {"runs": 0, "success": 0, "failure": 0, "tokens": 0, "output_tokens": 0, "cost": 0.0})
+            item["runs"] += 1
+            if is_success:
+                item["success"] += 1
+            else:
+                item["failure"] += 1
+            item["tokens"] += _safe_int(row.get("tokens_used"), 0)
+            item["output_tokens"] += _safe_int(row.get("output_tokens"), 0)
+            try:
+                item["cost"] += float(row.get("estimated_cost_usd") or 0)
+            except Exception:
+                pass
+
+        add_skill_bucket(agg["skills"], str(row.get("skill_name") or "Unknown"))
+        add_skill_bucket(agg["machines"], str(row.get("machine_id") or "Unknown"))
+        add_skill_bucket(agg["projects"], str(row.get("project_dir") or "Unknown"))
+        add_skill_bucket(agg["models"], str(row.get("model") or "Unknown"))
+    if not days:
+        if delete_ids:
+            try:
+                result["deleted"] = _batch_delete("skill_runs", "id", delete_ids)
+            except Exception as e:
+                logger.error("skill_runs daily compaction: failed to delete already aggregated rows: %s", e, exc_info=True)
+                result["error"] = True
+        return result
+
+    aggregate_rows = []
+    for day_key, agg in days.items():
+        event_uid = f"daily-skill-runs:{day_key}"
+        existing = _fetch_existing_daily_aggregate("skill_runs", event_uid, "arguments")
+        if existing.get("aggregate") == "daily_skill_runs":
+            for key in ("run_count", "success_count", "failure_count", "tokens_used", "output_tokens", "tool_calls", "duration_ms"):
+                agg[key] = _safe_int(existing.get(key), 0) + _safe_int(agg.get(key), 0)
+            try:
+                agg["estimated_cost_usd"] = float(existing.get("estimated_cost_usd") or 0) + float(agg.get("estimated_cost_usd") or 0)
+            except Exception:
+                pass
+            for bucket_key in ("skills", "machines", "projects", "models"):
+                existing_bucket = existing.get(bucket_key) if isinstance(existing.get(bucket_key), dict) else {}
+                for name, data in existing_bucket.items():
+                    target = agg[bucket_key].setdefault(name, {"runs": 0, "success": 0, "failure": 0, "tokens": 0, "output_tokens": 0, "cost": 0.0})
+                    _merge_numeric_bucket(target, data, ("runs", "success", "failure", "tokens", "output_tokens", "cost"))
+        _append_daily_aggregate_included_ids(agg, existing, day_delete_ids.get(day_key, []))
+        agg["estimated_cost_usd"] = round(float(agg["estimated_cost_usd"] or 0), 6)
+        aggregate_rows.append({
+            "event_uid": event_uid,
+            "machine_id": "__daily_aggregate__",
+            "source": "daily_aggregate",
+            "sqlite_id": None,
+            "tool_use_id": None,
+            "skill_name": "__daily_aggregate__",
+            "session_id": f"daily-aggregate:{day_key}",
+            "triggered_at": _local_day_start_utc_iso(day_key),
+            "trigger_type": "aggregate",
+            "status": "success" if agg["failure_count"] == 0 else "failure",
+            "error_type": None,
+            "error_message": json.dumps({"aggregate": "daily_skill_runs", "day": day_key, **agg}, separators=(",", ":")),
+            "attempt_no": 1,
+            "arguments": json.dumps({"aggregate": "daily_skill_runs", "day": day_key, **agg}, separators=(",", ":")),
+            "tokens_used": agg["tokens_used"],
+            "output_tokens": agg["output_tokens"],
+            "tool_calls": agg["tool_calls"],
+            "duration_ms": agg["duration_ms"],
+            "estimated_cost_usd": agg["estimated_cost_usd"],
+            "model": "__daily_aggregate__",
+            "is_skeleton": False,
+            "synced_at": _utcnow().isoformat(),
+            "project_dir": "__daily_aggregate__",
+        })
+
+    try:
+        for row in aggregate_rows:
+            db_client.table("skill_runs").upsert(row, on_conflict="event_uid").execute()
+        result["aggregated_days"] = len(aggregate_rows)
+        if delete_ids:
+            result["deleted"] = _batch_delete("skill_runs", "id", delete_ids)
+    except Exception as e:
+        logger.error("skill_runs daily compaction: failed to write aggregate rows: %s", e, exc_info=True)
+        result["error"] = True
     return result
 
 
@@ -1187,6 +1607,9 @@ def _run_startup_cleanup() -> Dict[str, int]:
         "snapshots": 0,
         "model_usage": 0,
         "skill_runs": 0,
+        "request_events": 0,
+        "request_event_aggregate_days": 0,
+        "skill_run_aggregate_days": 0,
         "retained_days": 0,
         "skipped_snapshots": 0,
         "slimmed_snapshots": 0,
@@ -1207,11 +1630,20 @@ def _run_startup_cleanup() -> Dict[str, int]:
             )
             break
 
-        deleted = result.get("snapshots", 0) + result.get("model_usage", 0) + result.get("skill_runs", 0)
+        deleted = (
+            result.get("snapshots", 0)
+            + result.get("model_usage", 0)
+            + result.get("skill_runs", 0)
+            + result.get("request_events", 0)
+        )
         slimmed = result.get("slimmed_snapshots", 0)
         progress = deleted + slimmed
 
-        for key in ("snapshots", "model_usage", "skill_runs", "skipped_snapshots", "slimmed_snapshots"):
+        for key in (
+            "snapshots", "model_usage", "skill_runs", "request_events",
+            "request_event_aggregate_days", "skill_run_aggregate_days",
+            "skipped_snapshots", "slimmed_snapshots",
+        ):
             aggregate[key] = aggregate.get(key, 0) + result.get(key, 0)
         if result.get("retained_days", 0) > aggregate.get("retained_days", 0):
             aggregate["retained_days"] = result["retained_days"]
@@ -1230,11 +1662,12 @@ def _run_startup_cleanup() -> Dict[str, int]:
             break
 
         logger.info(
-            "Startup cleanup: iteration %d deleted %d rows (snapshots=%d, model_usage=%d, skill_runs=%d), slimmed=%d",
+            "Startup cleanup: iteration %d deleted %d rows (snapshots=%d, model_usage=%d, request_events=%d, skill_runs=%d), slimmed=%d",
             iteration,
             deleted,
             result.get("snapshots", 0),
             result.get("model_usage", 0),
+            result.get("request_events", 0),
             result.get("skill_runs", 0),
             slimmed,
         )
@@ -1248,11 +1681,15 @@ def _run_startup_cleanup() -> Dict[str, int]:
     aggregate["iterations"] = iteration
     logger.info(
         "Startup cleanup: completed in %d iteration(s). "
-        "Total deleted: snapshots=%d, model_usage=%d, skill_runs=%d; slimmed=%d.",
+        "Total deleted: snapshots=%d, model_usage=%d, request_events=%d, skill_runs=%d; "
+        "daily aggregate rows: request_events=%d, skill_runs=%d; slimmed=%d.",
         iteration,
         aggregate["snapshots"],
         aggregate["model_usage"],
+        aggregate["request_events"],
         aggregate["skill_runs"],
+        aggregate["request_event_aggregate_days"],
+        aggregate["skill_run_aggregate_days"],
         aggregate["slimmed_snapshots"],
     )
     return aggregate
@@ -2655,6 +3092,228 @@ def _request_events_available() -> bool:
         return False
 
 
+def _summarize_request_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {
+        "requests": len(events),
+        "success": 0,
+        "failure": 0,
+        "total_tokens": 0,
+        "estimated_cost_usd": 0.0,
+        "models": {},
+    }
+    for event in events:
+        if event.get("failed"):
+            summary["failure"] += 1
+        else:
+            summary["success"] += 1
+        summary["total_tokens"] += _safe_int(event.get("total_tokens"), 0)
+        try:
+            summary["estimated_cost_usd"] += float(event.get("estimated_cost_usd") or 0)
+        except Exception:
+            pass
+
+        model_name = str(event.get("model_name") or "unknown")
+        models = summary["models"]
+        if model_name not in models:
+            models[model_name] = {"requests": 0, "failure": 0, "tokens": 0, "cost": 0.0}
+        model_row = models[model_name]
+        model_row["requests"] += 1
+        if event.get("failed"):
+            model_row["failure"] += 1
+        model_row["tokens"] += _safe_int(event.get("total_tokens"), 0)
+        try:
+            model_row["cost"] += float(event.get("estimated_cost_usd") or 0)
+        except Exception:
+            pass
+    summary["estimated_cost_usd"] = round(summary["estimated_cost_usd"], 6)
+    return summary
+
+
+def _log_request_event_usage_summary(source: str, events: List[Dict[str, Any]]) -> None:
+    if not events:
+        return
+    summary = _summarize_request_events(events)
+    top_models = sorted(
+        summary["models"].items(),
+        key=lambda item: (item[1]["requests"], item[1]["tokens"]),
+        reverse=True,
+    )[:5]
+    top_models_text = ", ".join(
+        f"{model}:requests={stats['requests']},failures={stats['failure']},tokens={stats['tokens']}"
+        for model, stats in top_models
+    ) or "none"
+    logger.info(
+        "Aggregated request event usage (%s): requests=%d, success=%d, failure=%d, total_tokens=%d, estimated_cost_usd=%.6f, top_models=[%s]",
+        source,
+        summary["requests"],
+        summary["success"],
+        summary["failure"],
+        summary["total_tokens"],
+        summary["estimated_cost_usd"],
+        top_models_text,
+    )
+
+
+def _upsert_request_events_batch(events: List[Dict[str, Any]]) -> int:
+    persisted = 0
+    for i in range(0, len(events), 100):
+        batch = events[i: i + 100]
+        db_client.table("request_events").upsert(batch, on_conflict="event_uid").execute()
+        persisted += len(batch)
+    return persisted
+
+
+def _read_request_event_spool() -> List[Dict[str, Any]]:
+    try:
+        if not REQUEST_EVENTS_SPOOL_PATH.exists():
+            return []
+        events: List[Dict[str, Any]] = []
+        with REQUEST_EVENTS_SPOOL_PATH.open("r", encoding="utf-8") as spool_file:
+            for line in spool_file:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    event = json.loads(raw)
+                    if isinstance(event, dict):
+                        events.append(event)
+                except Exception:
+                    logger.warning("Skipping malformed request event spool line")
+        return events
+    except Exception as e:
+        logger.error("Failed to read request event spool: %s", e, exc_info=True)
+        return []
+
+
+def _rewrite_request_event_spool(events: List[Dict[str, Any]]) -> None:
+    try:
+        REQUEST_EVENTS_SPOOL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = REQUEST_EVENTS_SPOOL_PATH.with_suffix(REQUEST_EVENTS_SPOOL_PATH.suffix + ".tmp")
+        with temp_path.open("w", encoding="utf-8") as spool_file:
+            for event in events:
+                spool_file.write(json.dumps(event, separators=(",", ":"), sort_keys=True) + "\n")
+            spool_file.flush()
+            os.fsync(spool_file.fileno())
+        temp_path.replace(REQUEST_EVENTS_SPOOL_PATH)
+    except Exception as e:
+        logger.error("Failed to rewrite request event spool: %s", e, exc_info=True)
+
+
+def _remove_uploaded_request_events_from_spool(uploaded_uids: Set[str]) -> None:
+    if not uploaded_uids:
+        return
+    with _request_event_upload_lock:
+        remaining = []
+        for event in _read_request_event_spool():
+            event_uid = event.get("event_uid")
+            if event_uid and str(event_uid) in uploaded_uids:
+                continue
+            remaining.append(event)
+        _rewrite_request_event_spool(remaining)
+
+
+def _append_request_events_to_spool(events: List[Dict[str, Any]]) -> None:
+    if not events:
+        return
+    try:
+        REQUEST_EVENTS_SPOOL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with REQUEST_EVENTS_SPOOL_PATH.open("a", encoding="utf-8") as spool_file:
+            for event in events:
+                spool_file.write(json.dumps(event, separators=(",", ":"), sort_keys=True) + "\n")
+            spool_file.flush()
+            os.fsync(spool_file.fileno())
+    except Exception as e:
+        logger.error("Failed to append request events to spool: %s", e, exc_info=True)
+
+
+def _buffer_request_events_for_upload(events: List[Dict[str, Any]]) -> None:
+    if not events:
+        return
+    _append_request_events_to_spool(events)
+    with _request_event_upload_lock:
+        _request_event_upload_buffer.extend(events)
+
+
+def _flush_request_event_upload_buffer(source: str, force: bool = False) -> Dict[str, Any]:
+    global _last_request_event_upload_at, _request_events_table_warned
+
+    summary: Dict[str, Any] = {
+        "buffered": 0,
+        "persisted": 0,
+        "skipped": 0,
+        "duration_ms": 0,
+        "flushed": False,
+    }
+    if not db_client:
+        return summary
+
+    now = time.time()
+    with _request_event_upload_lock:
+        spool_events = _read_request_event_spool()
+        if spool_events:
+            known_uids = {str(event.get("event_uid")) for event in _request_event_upload_buffer if event.get("event_uid")}
+            for event in spool_events:
+                event_uid = event.get("event_uid")
+                if event_uid and str(event_uid) in known_uids:
+                    continue
+                _request_event_upload_buffer.append(event)
+        pending_count = len(_request_event_upload_buffer)
+        summary["buffered"] = pending_count
+        if pending_count == 0:
+            return summary
+        if _last_request_event_upload_at > 0 and not force:
+            elapsed = now - _last_request_event_upload_at
+            if elapsed < MODEL_USAGE_UPLOAD_INTERVAL_SECONDS:
+                summary["skipped"] = pending_count
+                summary["seconds_until_next_upload"] = int(MODEL_USAGE_UPLOAD_INTERVAL_SECONDS - elapsed)
+                return summary
+        pending = list(_request_event_upload_buffer)
+        _request_event_upload_buffer.clear()
+
+    started_at = time.time()
+    try:
+        deduped_events: Dict[str, Dict[str, Any]] = {}
+        for event in pending:
+            event_uid = event.get("event_uid")
+            if event_uid:
+                deduped_events[str(event_uid)] = event
+        events_to_upload = list(deduped_events.values())
+        summary["persisted"] = _upsert_request_events_batch(events_to_upload)
+        _remove_uploaded_request_events_from_spool(set(deduped_events.keys()))
+        summary["flushed"] = True
+        _last_request_event_upload_at = now
+        _request_events_table_warned = False
+        _log_request_event_usage_summary(source, events_to_upload)
+        logger.info(
+            "Request event upload window flushed (%s): buffered=%d, persisted=%d, interval=%ds",
+            source,
+            summary["buffered"],
+            summary["persisted"],
+            MODEL_USAGE_UPLOAD_INTERVAL_SECONDS,
+        )
+    except Exception as e:
+        with _request_event_upload_lock:
+            _request_event_upload_buffer[:0] = pending
+        summary["skipped"] = len(pending)
+        if _is_request_events_missing_error(e):
+            _mark_request_events_unavailable()
+        else:
+            logger.error("Failed to flush request_events upload buffer: %s", e, exc_info=True)
+    summary["duration_ms"] = int((time.time() - started_at) * 1000)
+    return summary
+
+
+def _reset_request_event_upload_state() -> None:
+    global _request_event_upload_buffer, _last_request_event_upload_at
+    with _request_event_upload_lock:
+        _request_event_upload_buffer = []
+    _last_request_event_upload_at = 0
+    try:
+        REQUEST_EVENTS_SPOOL_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _redis_queue_sync_once() -> Dict[str, Any]:
     """Pop events from the Redis queue and persist them to request_events."""
     global _request_events_table_warned
@@ -2703,14 +3362,12 @@ def _redis_queue_sync_once() -> Dict[str, Any]:
                 if event_uid:
                     deduped_events[str(event_uid)] = event
             events = list(deduped_events.values())
-            batch_size = 100
-            for i in range(0, len(events), batch_size):
-                batch = events[i: i + batch_size]
-                db_client.table("request_events").upsert(
-                    batch, on_conflict="event_uid"
-                ).execute()
-                summary["persisted"] += len(batch)
-            _request_events_table_warned = False
+            _log_request_event_usage_summary("redis_collected", events)
+            _buffer_request_events_for_upload(events)
+            flush_summary = _flush_request_event_upload_buffer("redis")
+            summary["persisted"] += flush_summary.get("persisted", 0)
+            summary["buffered"] = flush_summary.get("buffered", len(events))
+            summary["upload_deferred"] = not flush_summary.get("flushed", False)
     except Exception as e:
         if _is_request_events_missing_error(e):
             _mark_request_events_unavailable()
@@ -2732,7 +3389,7 @@ def _redis_queue_sync_once() -> Dict[str, Any]:
     return summary
 
 
-def _persist_queue_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _persist_queue_payloads(payloads: List[Dict[str, Any]], flush: bool = True) -> Dict[str, Any]:
     """Persist already decoded usage queue payloads into request_events."""
     global _request_events_table_warned
     summary: Dict[str, Any] = {"popped": len(payloads), "parsed": 0, "persisted": 0, "duration_ms": 0}
@@ -2756,11 +3413,16 @@ def _persist_queue_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
                 if event_uid:
                     deduped_events[str(event_uid)] = event
             persisted_events = list(deduped_events.values())
-            for i in range(0, len(persisted_events), 100):
-                batch = persisted_events[i: i + 100]
-                db_client.table("request_events").upsert(batch, on_conflict="event_uid").execute()
-                summary["persisted"] += len(batch)
-            _request_events_table_warned = False
+            _log_request_event_usage_summary("usage_queue_collected", persisted_events)
+            _buffer_request_events_for_upload(persisted_events)
+            if flush:
+                flush_summary = _flush_request_event_upload_buffer("usage_queue")
+                summary["persisted"] += flush_summary.get("persisted", 0)
+                summary["buffered"] = flush_summary.get("buffered", len(persisted_events))
+                summary["upload_deferred"] = not flush_summary.get("flushed", False)
+            else:
+                summary["buffered"] = len(persisted_events)
+                summary["upload_deferred"] = True
     except Exception as e:
         if _is_request_events_missing_error(e):
             _mark_request_events_unavailable()
@@ -2780,7 +3442,7 @@ def _usage_queue_sync_once() -> Dict[str, Any]:
         total["meta"] = meta
         if not payloads:
             break
-        summary = _persist_queue_payloads(payloads)
+        summary = _persist_queue_payloads(payloads, flush=False)
         total["popped"] += summary["popped"]
         total["parsed"] += summary["parsed"]
         total["persisted"] += summary["persisted"]
@@ -2788,6 +3450,11 @@ def _usage_queue_sync_once() -> Dict[str, Any]:
         iteration += 1
         if len(payloads) < USAGE_QUEUE_BATCH_SIZE:
             break
+    if total["parsed"] > 0:
+        flush_summary = _flush_request_event_upload_buffer("usage_queue")
+        total["persisted"] += flush_summary.get("persisted", 0)
+        total["buffered"] = flush_summary.get("buffered", total["parsed"])
+        total["upload_deferred"] = not flush_summary.get("flushed", False)
     if total["popped"] > 0:
         logger.info(
             "Usage queue sync: iterations=%d, popped=%d, parsed=%d, persisted=%d, duration_ms=%d",
@@ -3854,6 +4521,14 @@ def main():
         "interval",
         seconds=MODEL_USAGE_UPLOAD_INTERVAL_SECONDS,
         id="app_logs_upload_flush",
+        next_run_time=datetime.now() + timedelta(seconds=MODEL_USAGE_UPLOAD_INTERVAL_SECONDS),
+    )
+
+    scheduler.add_job(
+        lambda: _flush_request_event_upload_buffer("scheduled"),
+        "interval",
+        seconds=MODEL_USAGE_UPLOAD_INTERVAL_SECONDS,
+        id="request_events_upload_flush",
         next_run_time=datetime.now() + timedelta(seconds=MODEL_USAGE_UPLOAD_INTERVAL_SECONDS),
     )
 

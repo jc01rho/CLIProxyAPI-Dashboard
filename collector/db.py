@@ -24,6 +24,7 @@ JSONB_COLUMNS: Dict[str, set] = {
     'credential_usage_summary': {'credentials', 'api_keys'},
     'credential_daily_stats': {'credentials', 'api_keys'},
     'app_logs': {'details'},
+    'request_events': {'raw_detail'},
 }
 
 
@@ -89,6 +90,10 @@ class QueryBuilder:
 
     def eq(self, col: str, val: Any) -> 'QueryBuilder':
         self._conditions.append((col, '=', val))
+        return self
+
+    def neq(self, col: str, val: Any) -> 'QueryBuilder':
+        self._conditions.append((col, '<>', val))
         return self
 
     def gte(self, col: str, val: Any) -> 'QueryBuilder':
@@ -232,10 +237,13 @@ class QueryBuilder:
         return QueryResult(data=rows)
 
     def _exec_upsert(self, cur) -> QueryResult:
-        cols = list(self._data.keys())
+        records = self._data if isinstance(self._data, list) else [self._data]
+        if not records:
+            return QueryResult(data=[])
+
+        cols = list(records[0].keys())
         col_names = ', '.join(f'"{c}"' for c in cols)
         placeholders = ', '.join(['%s'] * len(cols))
-        vals = [self._wrap_jsonb(c, self._data[c]) for c in cols]
 
         sql = f'INSERT INTO "{self._table}" ({col_names}) VALUES ({placeholders})'
 
@@ -268,9 +276,16 @@ class QueryBuilder:
                     sql += f' ON CONFLICT ({conflict_target}) DO NOTHING'
 
         sql += ' RETURNING *'
-        cur.execute(sql, vals)
-        row = cur.fetchone()
-        return QueryResult(data=dict(row) if row else None)
+        rows = []
+        for record in records:
+            vals = [self._wrap_jsonb(c, record.get(c)) for c in cols]
+            cur.execute(sql, vals)
+            row = cur.fetchone()
+            if row:
+                rows.append(dict(row))
+        if isinstance(self._data, list):
+            return QueryResult(data=rows)
+        return QueryResult(data=rows[0] if rows else None)
 
 
 class PostgreSQLClient:

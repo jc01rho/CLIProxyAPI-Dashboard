@@ -1200,7 +1200,7 @@ function App() {
 
             const [skillRunsData, skillDailyData, requestEventsData] = await Promise.all([
                 selectRows('skill_runs', {
-                    select: 'event_uid,tool_use_id,skill_name,session_id,machine_id,source,triggered_at,status,error_type,error_message,attempt_no,tokens_used,output_tokens,duration_ms,model,tool_calls,estimated_cost_usd,is_skeleton,project_dir',
+                    select: 'event_uid,tool_use_id,skill_name,session_id,machine_id,source,triggered_at,status,error_type,error_message,attempt_no,arguments,tokens_used,output_tokens,duration_ms,model,tool_calls,estimated_cost_usd,is_skeleton,project_dir',
                     filters: [
                         { column: 'is_skeleton', operator: 'eq', value: false },
                         ...(startTime ? [{ column: 'triggered_at', operator: 'gte', value: startTime }] : []),
@@ -1220,7 +1220,7 @@ function App() {
                 // Events tab uses request_events as its exclusive source of truth.
                 // Do not merge these rows into snapshot-based daily/model aggregates.
                 selectRows('request_events', {
-                    select: 'id,event_uid,occurred_at,api_endpoint,model_name,source_id,auth_index,latency_ms,failed,input_tokens,output_tokens,reasoning_tokens,cached_tokens,total_tokens,provider,estimated_cost_usd',
+                    select: 'id,event_uid,occurred_at,api_endpoint,model_name,source_id,auth_index,latency_ms,failed,input_tokens,output_tokens,reasoning_tokens,cached_tokens,total_tokens,provider,estimated_cost_usd,raw_detail',
                     filters: [
                         ...(startTime ? [{ column: 'occurred_at', operator: 'gte', value: startTime }] : []),
                         ...(endTime ? [{ column: 'occurred_at', operator: 'lt', value: endTime }] : []),

@@ -31,6 +31,41 @@ const normalizeGroupValue = (value) => {
 
 const getStatus = (failed) => failed ? 'failure' : 'success'
 
+const isDailyAggregateEvent = (ev) => ev?.raw_detail?.aggregate === 'daily_request_events'
+const isInternalAggregateValue = (value) => String(value || '').startsWith('__daily_aggregate__')
+
+const getEventWeight = (ev) => {
+    if (!isDailyAggregateEvent(ev)) return 1
+    return Number(ev?.raw_detail?.request_count) || 0
+}
+
+const expandAuthModelStats = (ev) => {
+    const aggregate = ev?.raw_detail?.auth_models
+    if (!aggregate || typeof aggregate !== 'object') return null
+    return Object.values(aggregate).map((row) => ({
+        auth: normalizeGroupValue(row.auth),
+        model: normalizeGroupValue(row.model),
+        requests: Number(row.requests) || 0,
+        success: Number(row.success) || 0,
+        failure: Number(row.failure) || 0,
+        tokens: Number(row.tokens) || 0,
+        cost: Number(row.cost) || 0,
+    })).filter(row => row.requests > 0)
+}
+
+const expandAggregateRows = (ev, key) => {
+    const aggregate = ev?.raw_detail?.[key]
+    if (!aggregate || typeof aggregate !== 'object') return null
+    return Object.entries(aggregate).map(([name, row]) => ({
+        name: normalizeGroupValue(name),
+        requests: Number(row.requests) || 0,
+        success: Number(row.success) || 0,
+        failure: Number(row.failure) || 0,
+        tokens: Number(row.tokens) || 0,
+        cost: Number(row.cost) || 0,
+    })).filter(row => row.requests > 0)
+}
+
 const calculatePercentiles = (values) => {
     if (!values || values.length === 0) return { p50: 0, p95: 0, p99: 0 }
     const sorted = [...values].sort((a, b) => a - b)
@@ -80,10 +115,21 @@ function RequestEventsPanel({ requestEvents = [] }) {
         const a = new Set()
         const p = new Set()
         for (const ev of baseEvents) {
-            if (ev.model_name) m.add(ev.model_name)
-            if (ev.source_id) s.add(ev.source_id)
-            if (ev.auth_index) a.add(ev.auth_index)
-            p.add(ev.provider || inferProvider(ev.api_endpoint, ev.model_name))
+            if (isDailyAggregateEvent(ev)) {
+                for (const row of (expandAuthModelStats(ev) || [])) {
+                    if (row.model !== 'Unknown') m.add(row.model)
+                    if (row.auth !== 'Unknown') a.add(row.auth)
+                }
+                for (const row of (expandAggregateRows(ev, 'providers') || [])) {
+                    if (row.name !== 'Unknown') p.add(row.name)
+                }
+                continue
+            }
+            if (ev.model_name && !isInternalAggregateValue(ev.model_name)) m.add(ev.model_name)
+            if (ev.source_id && !isInternalAggregateValue(ev.source_id)) s.add(ev.source_id)
+            if (ev.auth_index !== undefined && ev.auth_index !== null && ev.auth_index !== '' && !isInternalAggregateValue(ev.auth_index)) a.add(String(ev.auth_index))
+            const provider = ev.provider || inferProvider(ev.api_endpoint, ev.model_name)
+            if (!isInternalAggregateValue(provider)) p.add(provider)
         }
         return {
             models: Array.from(m).sort(),
@@ -95,6 +141,18 @@ function RequestEventsPanel({ requestEvents = [] }) {
 
     const filteredEvents = useMemo(() => {
         return baseEvents.filter(ev => {
+            if (isDailyAggregateEvent(ev)) {
+                const authModelRows = expandAuthModelStats(ev) || []
+                const modelMatch = modelFilter === 'all' || authModelRows.some(row => row.model === modelFilter)
+                const authMatch = authFilter === 'all' || authModelRows.some(row => row.auth === authFilter)
+                const sourceMatch = sourceFilter === 'all'
+                const providerRows = expandAggregateRows(ev, 'providers') || []
+                const providerMatch = providerFilter === 'all' || providerRows.some(row => row.name === providerFilter)
+                const statusMatch = statusFilter === 'all'
+                    || (statusFilter === 'failure' && (Number(ev.raw_detail?.failed_count) || 0) > 0)
+                    || (statusFilter === 'success' && (Number(ev.raw_detail?.success_count) || 0) > 0)
+                return modelMatch && authMatch && sourceMatch && providerMatch && statusMatch
+            }
             if (modelFilter !== 'all' && ev.model_name !== modelFilter) return false
             if (sourceFilter !== 'all' && ev.source_id !== sourceFilter) return false
             if (authFilter !== 'all' && ev.auth_index !== authFilter) return false
@@ -138,6 +196,40 @@ function RequestEventsPanel({ requestEvents = [] }) {
         let tokenBreakdown = { input: 0, output: 0, reasoning: 0, cached: 0 }
 
         for (const ev of filteredEvents) {
+            if (isDailyAggregateEvent(ev)) {
+                const requests = getEventWeight(ev)
+                const failedCount = Number(ev.raw_detail?.failed_count) || 0
+                const successCount = Number(ev.raw_detail?.success_count) || Math.max(0, requests - failedCount)
+                successes += successCount
+                failures += failedCount
+                totalCost += Number(ev.raw_detail?.estimated_cost_usd ?? ev.estimated_cost_usd) || 0
+                tokenBreakdown.input += Number(ev.raw_detail?.input_tokens) || 0
+                tokenBreakdown.output += Number(ev.raw_detail?.output_tokens) || 0
+                tokenBreakdown.reasoning += Number(ev.raw_detail?.reasoning_tokens) || 0
+                tokenBreakdown.cached += Number(ev.raw_detail?.cached_tokens) || 0
+
+                for (const row of (expandAggregateRows(ev, 'providers') || [])) {
+                    if (!providerStats[row.name]) providerStats[row.name] = { requests: 0, cost: 0, errors: 0 }
+                    providerStats[row.name].requests += row.requests
+                    providerStats[row.name].cost += row.cost
+                    providerStats[row.name].errors += row.failure
+                }
+                for (const row of (expandAggregateRows(ev, 'endpoints') || [])) {
+                    if (!endpointStats[row.name]) endpointStats[row.name] = { requests: 0, errors: 0, cost: 0, tokens: 0, latency: [], models: new Set() }
+                    endpointStats[row.name].requests += row.requests
+                    endpointStats[row.name].errors += row.failure
+                    endpointStats[row.name].cost += row.cost
+                    endpointStats[row.name].tokens += row.tokens
+                }
+                for (const row of (expandAggregateRows(ev, 'models') || [])) {
+                    if (!modelStats[row.name]) modelStats[row.name] = { requests: 0, cost: 0, tokens: 0, errors: 0, provider: 'Aggregate' }
+                    modelStats[row.name].requests += row.requests
+                    modelStats[row.name].cost += row.cost
+                    modelStats[row.name].tokens += row.tokens
+                    modelStats[row.name].errors += row.failure
+                }
+                continue
+            }
             const lat = Number(ev.latency_ms) || 0
             if (lat > 0) {
                 totalLatency += lat
@@ -190,7 +282,7 @@ function RequestEventsPanel({ requestEvents = [] }) {
             sampleCount: count,
             successes,
             failures,
-            total: filteredEvents.length,
+            total: successes + failures,
             totalCost,
             providerStats,
             endpointStats,
@@ -221,6 +313,22 @@ function RequestEventsPanel({ requestEvents = [] }) {
         const byAuthModel = {}
 
         for (const ev of filteredEvents) {
+            if (isDailyAggregateEvent(ev)) {
+                for (const aggregateRow of (expandAuthModelStats(ev) || [])) {
+                    const aggKey = `${aggregateRow.auth}\u0000${aggregateRow.model}`
+                    if (!byAuthModel[aggKey]) {
+                        byAuthModel[aggKey] = { auth: aggregateRow.auth, model: aggregateRow.model, requests: 0, success: 0, failure: 0, tokens: 0, cost: 0 }
+                    }
+                    const target = byAuthModel[aggKey]
+                    target.requests += aggregateRow.requests
+                    target.success += aggregateRow.success
+                    target.failure += aggregateRow.failure
+                    target.tokens += aggregateRow.tokens
+                    target.cost += aggregateRow.cost
+                }
+                continue
+            }
+
             const auth = normalizeGroupValue(ev.auth_index)
             const model = normalizeGroupValue(ev.model_name)
             const key = `${auth}\u0000${model}`
@@ -238,6 +346,7 @@ function RequestEventsPanel({ requestEvents = [] }) {
             }
 
             const row = byAuthModel[key]
+
             row.requests++
             if (ev.failed) row.failure++
             else row.success++
@@ -304,7 +413,10 @@ function RequestEventsPanel({ requestEvents = [] }) {
             'estimated_cost_usd'
         ]
 
-        const csvRows = filteredEvents.map((row) =>
+        const exportRows = filteredEvents.filter(row => !isDailyAggregateEvent(row))
+        if (!exportRows.length) return
+
+        const csvRows = exportRows.map((row) =>
             [
                 row.occurred_at,
                 row.model_name,
@@ -549,7 +661,7 @@ function RequestEventsPanel({ requestEvents = [] }) {
                         <h3>Request Events</h3>
                         <div style={{ display: 'flex', gap: '8px' }}>
                             <button className="events-action-btn" onClick={clearFilters}>Clear Filters</button>
-                            <button className="events-action-btn" onClick={handleExportCsv} disabled={filteredEvents.length === 0}>Export CSV</button>
+                            <button className="events-action-btn" onClick={handleExportCsv} disabled={!filteredEvents.some(row => !isDailyAggregateEvent(row))}>Export CSV</button>
                         </div>
                     </div>
                     <div className="events-filter-toolbar">
@@ -596,28 +708,46 @@ function RequestEventsPanel({ requestEvents = [] }) {
                             </tr>
                         </thead>
                         <tbody>
-                            {sortedEvents.length > 0 ? sortedEvents.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map((r, idx) => (
-                                <tr key={r.id || `event-${idx}`}>
-                                    <td title={r.occurred_at}>{formatDateTime(r.occurred_at)}</td>
-                                    <td>{r.model_name || '-'}</td>
-                                    <td>{r.provider || inferProvider(r.api_endpoint, r.model_name)}</td>
-                                    <td title={r.api_endpoint}>{r.api_endpoint || '-'}</td>
-                                    <td title={r.source_id}>{r.source_id || '-'}</td>
-                                    <td title={r.auth_index}>{r.auth_index || '-'}</td>
-                                    <td>
-                                        <span className={r.failed ? 'status-failure' : 'status-success'}>
-                                            {r.failed ? 'FAILURE' : 'SUCCESS'}
-                                        </span>
-                                    </td>
-                                    <td>{r.latency_ms ? `${formatNumber(r.latency_ms)}ms` : '-'}</td>
-                                    <td>{formatNumber(r.input_tokens)}</td>
-                                    <td>{formatNumber(r.output_tokens)}</td>
-                                    <td>{formatNumber(r.reasoning_tokens)}</td>
-                                    <td>{formatNumber(r.cached_tokens)}</td>
-                                    <td>{formatNumber(r.total_tokens)}</td>
-                                    <td>{formatCurrency(r.estimated_cost_usd)}</td>
-                                </tr>
-                            )) : (
+                            {sortedEvents.length > 0 ? sortedEvents.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map((r, idx) => {
+                                if (isDailyAggregateEvent(r)) {
+                                    return (
+                                        <tr key={r.event_uid || `aggregate-${idx}`}>
+                                            <td title={r.occurred_at}>{formatDateTime(r.occurred_at)}</td>
+                                            <td colSpan={5}>Daily aggregate summary ({formatNumber(getEventWeight(r))} request events)</td>
+                                            <td><span className="status-success">SUMMARY</span></td>
+                                            <td>{r.latency_ms ? `${formatNumber(r.latency_ms)}ms avg` : '-'}</td>
+                                            <td>{formatNumber(r.raw_detail?.input_tokens)}</td>
+                                            <td>{formatNumber(r.raw_detail?.output_tokens)}</td>
+                                            <td>{formatNumber(r.raw_detail?.reasoning_tokens)}</td>
+                                            <td>{formatNumber(r.raw_detail?.cached_tokens)}</td>
+                                            <td>{formatNumber(r.raw_detail?.total_tokens)}</td>
+                                            <td>{formatCurrency(r.raw_detail?.estimated_cost_usd)}</td>
+                                        </tr>
+                                    )
+                                }
+                                return (
+                                    <tr key={r.id || `event-${idx}`}>
+                                        <td title={r.occurred_at}>{formatDateTime(r.occurred_at)}</td>
+                                        <td>{r.model_name || '-'}</td>
+                                        <td>{r.provider || inferProvider(r.api_endpoint, r.model_name)}</td>
+                                        <td title={r.api_endpoint}>{r.api_endpoint || '-'}</td>
+                                        <td title={r.source_id}>{r.source_id || '-'}</td>
+                                        <td title={r.auth_index}>{r.auth_index || '-'}</td>
+                                        <td>
+                                            <span className={r.failed ? 'status-failure' : 'status-success'}>
+                                                {r.failed ? 'FAILURE' : 'SUCCESS'}
+                                            </span>
+                                        </td>
+                                        <td>{r.latency_ms ? `${formatNumber(r.latency_ms)}ms` : '-'}</td>
+                                        <td>{formatNumber(r.input_tokens)}</td>
+                                        <td>{formatNumber(r.output_tokens)}</td>
+                                        <td>{formatNumber(r.reasoning_tokens)}</td>
+                                        <td>{formatNumber(r.cached_tokens)}</td>
+                                        <td>{formatNumber(r.total_tokens)}</td>
+                                        <td>{formatCurrency(r.estimated_cost_usd)}</td>
+                                    </tr>
+                                )
+                            }) : (
                                 <tr><td colSpan={columns.length} className="empty">No events found</td></tr>
                             )}
                         </tbody>

@@ -141,6 +141,8 @@ class _DummyTable:
         return self
     def eq(self, *a, **kw):
         return self
+    def neq(self, *a, **kw):
+        return self
     def gte(self, *a, **kw):
         return self
     def lt(self, *a, **kw):

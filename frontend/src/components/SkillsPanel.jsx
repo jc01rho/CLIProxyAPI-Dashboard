@@ -41,6 +41,18 @@ const getProjectLabel = (value) => value || 'Unknown Project'
 const getMachineLabel = (value) => value || 'Unknown Device'
 const getModelLabel = (value) => value || 'Unknown Model'
 
+const parseSkillAggregate = (run) => {
+    if (run?.event_uid && String(run.event_uid).startsWith('daily-skill-runs:')) {
+        try {
+            const parsed = typeof run.arguments === 'string' ? JSON.parse(run.arguments) : run.arguments
+            return parsed?.aggregate === 'daily_skill_runs' ? parsed : null
+        } catch (_err) {
+            return null
+        }
+    }
+    return null
+}
+
 const RECENT_COLUMNS = [
     { key: 'skill_name', label: 'Skill', sortable: true, getValue: r => r.skill_name || '' },
     { key: 'project_dir', label: 'Project', sortable: true, getValue: r => r.project_dir || '' },
@@ -153,6 +165,33 @@ const aggregateSkillRows = (runs) => {
     const skillMap = new Map()
 
     for (const run of runs) {
+        const aggregate = parseSkillAggregate(run)
+        if (aggregate?.skills) {
+            for (const [skillName, data] of Object.entries(aggregate.skills)) {
+                const key = getSkillLabel(skillName)
+                if (!skillMap.has(key)) {
+                    skillMap.set(key, {
+                        skill_name: key,
+                        run_count: 0,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        estimated_cost: 0,
+                        success_count: 0,
+                        failure_count: 0,
+                        projects: new Set(),
+                        machines: new Set(),
+                    })
+                }
+                const row = skillMap.get(key)
+                row.run_count += data.runs || 0
+                row.input_tokens += data.tokens || 0
+                row.output_tokens += data.output_tokens || 0
+                row.estimated_cost += Number(data.cost || 0)
+                row.success_count += data.success || 0
+                row.failure_count += data.failure || 0
+            }
+            continue
+        }
         const key = getSkillLabel(run.skill_name)
         if (!skillMap.has(key)) {
             skillMap.set(key, {
@@ -193,6 +232,34 @@ const aggregateDimensionRows = (runs, dimension) => {
     const rowsMap = new Map()
 
     for (const run of runs) {
+        const aggregate = parseSkillAggregate(run)
+        const aggregateRows = aggregate?.[dimension === 'project' ? 'projects' : 'machines']
+        if (aggregateRows) {
+            for (const [name, data] of Object.entries(aggregateRows)) {
+                const key = labelGetter(name)
+                if (!rowsMap.has(key)) {
+                    rowsMap.set(key, {
+                        name: key,
+                        run_count: 0,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        estimated_cost: 0,
+                        success_count: 0,
+                        failure_count: 0,
+                        skills: new Map(),
+                        latest_run_at: run.triggered_at || null,
+                    })
+                }
+                const row = rowsMap.get(key)
+                row.run_count += data.runs || 0
+                row.input_tokens += data.tokens || 0
+                row.output_tokens += data.output_tokens || 0
+                row.estimated_cost += Number(data.cost || 0)
+                row.success_count += data.success || 0
+                row.failure_count += data.failure || 0
+            }
+            continue
+        }
         const key = labelGetter(run[field])
         if (!rowsMap.has(key)) {
             rowsMap.set(key, {
@@ -278,7 +345,6 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
         uniqueMachines,
         uniqueProjects,
         totalInputTokens,
-        totalOutputTokens,
         totalCost,
         successCount,
         failureCount,
@@ -289,14 +355,23 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
         topDevices,
     } = useMemo(() => {
         const runs = baseRuns
-        const totalInput = runs.reduce((sum, r) => sum + (r.tokens_used || 0), 0)
-        const totalOutput = runs.reduce((sum, r) => sum + (r.output_tokens || 0), 0)
-        const totalEstimatedCost = runs.reduce((sum, r) => sum + Number(r.estimated_cost_usd || 0), 0)
-        const success = runs.filter(r => getStatus(r.status) === 'success').length
-        const failure = runs.length - success
+        const aggregateRows = runs.map(parseSkillAggregate).filter(Boolean)
+        const regularRuns = runs.filter(r => !parseSkillAggregate(r))
+        const aggregateInput = aggregateRows.reduce((sum, r) => sum + (r.tokens_used || 0), 0)
+        const aggregateOutput = aggregateRows.reduce((sum, r) => sum + (r.output_tokens || 0), 0)
+        const aggregateCost = aggregateRows.reduce((sum, r) => sum + Number(r.estimated_cost_usd || 0), 0)
+        const aggregateSuccess = aggregateRows.reduce((sum, r) => sum + (r.success_count || 0), 0)
+        const aggregateFailure = aggregateRows.reduce((sum, r) => sum + (r.failure_count || 0), 0)
+        const aggregateRuns = aggregateRows.reduce((sum, r) => sum + (r.run_count || 0), 0)
+        const totalInput = regularRuns.reduce((sum, r) => sum + (r.tokens_used || 0), 0) + aggregateInput
+        const totalOutput = regularRuns.reduce((sum, r) => sum + (r.output_tokens || 0), 0) + aggregateOutput
+        const totalEstimatedCost = regularRuns.reduce((sum, r) => sum + Number(r.estimated_cost_usd || 0), 0) + aggregateCost
+        const success = regularRuns.filter(r => getStatus(r.status) === 'success').length + aggregateSuccess
+        const failure = regularRuns.filter(r => getStatus(r.status) === 'failure').length + aggregateFailure
+        const runTotal = regularRuns.length + aggregateRuns
 
         return {
-            totalRuns: runs.length,
+            totalRuns: runTotal,
             uniqueSkills: new Set(runs.map(r => getSkillLabel(r.skill_name))).size,
             uniqueMachines: new Set(runs.map(r => getMachineLabel(r.machine_id))).size,
             uniqueProjects: new Set(runs.map(r => getProjectLabel(r.project_dir))).size,
@@ -305,11 +380,12 @@ function SkillsPanel({ skillRuns = [], skillDailyStats = [], dateRange, customRa
             totalCost: totalEstimatedCost,
             successCount: success,
             failureCount: failure,
-            successRate: runs.length > 0 ? (success / runs.length) * 100 : 0,
+            successRate: runTotal > 0 ? (success / runTotal) * 100 : 0,
             topSkills: aggregateSkillRows(runs)
                 .sort((a, b) => (b.run_count - a.run_count) || (b.input_tokens - a.input_tokens))
                 .slice(0, 15),
             recentRuns: runs
+                .filter(r => !parseSkillAggregate(r))
                 .slice()
                 .sort((a, b) => new Date(b.triggered_at) - new Date(a.triggered_at))
                 .slice(0, 50),

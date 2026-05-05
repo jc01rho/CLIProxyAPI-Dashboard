@@ -34,6 +34,9 @@ class _DummyTable:
     def eq(self, *args, **kwargs):
         return self
 
+    def neq(self, *args, **kwargs):
+        return self
+
     def gte(self, *args, **kwargs):
         return self
 
@@ -449,6 +452,316 @@ class RetentionTests(unittest.TestCase):
         self.assertIn("slimmed_snapshots", result)
         self.assertIn("retained_days", result)
 
+    def test_compact_request_events_daily_replaces_raw_rows_with_aggregate(self):
+        tables = {
+            "request_events": [
+                {
+                    "id": 1,
+                    "event_uid": "req-1",
+                    "occurred_at": "2026-04-01T01:00:00+00:00",
+                    "api_endpoint": "/v1/chat",
+                    "endpoint_method": "POST",
+                    "endpoint_path": "/v1/chat",
+                    "model_name": "gpt-4o",
+                    "source_id": "sk-a",
+                    "auth_index": "0",
+                    "latency_ms": 100,
+                    "failed": False,
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "reasoning_tokens": 0,
+                    "cached_tokens": 0,
+                    "total_tokens": 15,
+                    "provider": "openai",
+                    "estimated_cost_usd": 0.001,
+                },
+                {
+                    "id": 2,
+                    "event_uid": "req-2",
+                    "occurred_at": "2026-04-01T02:00:00+00:00",
+                    "api_endpoint": "/v1/chat",
+                    "endpoint_method": "POST",
+                    "endpoint_path": "/v1/chat",
+                    "model_name": "gpt-4o",
+                    "source_id": "sk-a",
+                    "auth_index": "0",
+                    "latency_ms": 300,
+                    "failed": True,
+                    "input_tokens": 20,
+                    "output_tokens": 5,
+                    "reasoning_tokens": 0,
+                    "cached_tokens": 0,
+                    "total_tokens": 25,
+                    "provider": "openai",
+                    "estimated_cost_usd": 0.002,
+                },
+            ]
+        }
+
+        class MemoryTable(_DummyTable):
+            def __init__(self, name):
+                self.name = name
+                self._delete = False
+                self._ids = []
+                self._event_uid = None
+            def select(self, *args, **kwargs):
+                return self
+            def lt(self, *args, **kwargs):
+                return self
+            def neq(self, *args, **kwargs):
+                return self
+            def limit(self, *args, **kwargs):
+                return self
+            def eq(self, column, value):
+                if column == "event_uid":
+                    self._event_uid = value
+                return self
+            def upsert(self, data, on_conflict=None):
+                rows = data if isinstance(data, list) else [data]
+                for row in rows:
+                    existing = next((r for r in tables[self.name] if r.get("event_uid") == row.get("event_uid")), None)
+                    if existing:
+                        existing.update(row)
+                    else:
+                        tables[self.name].append(dict(row))
+                return self
+            def delete(self):
+                self._delete = True
+                return self
+            def in_(self, column, values):
+                self._ids = list(values)
+                return self
+            def execute(self):
+                if self._delete:
+                    deleted = [r for r in tables[self.name] if r.get("id") in self._ids]
+                    tables[self.name] = [r for r in tables[self.name] if r.get("id") not in self._ids]
+                    return _DummyResponse(deleted)
+                rows = tables[self.name]
+                if self._event_uid is not None:
+                    rows = [r for r in rows if r.get("event_uid") == self._event_uid]
+                return _DummyResponse(rows)
+
+        class MemoryDB:
+            def table(self, name):
+                return MemoryTable(name)
+
+        original_db = self.module.db_client
+        self.module.db_client = MemoryDB()
+        try:
+            result = self.module._compact_request_events_daily()
+            self.assertEqual(result["deleted"], 2)
+            self.assertEqual(result["aggregated_days"], 1)
+            aggregate = next(r for r in tables["request_events"] if r["event_uid"].startswith("daily-request-events:"))
+            self.assertEqual(aggregate["raw_detail"]["request_count"], 2)
+            self.assertEqual(aggregate["raw_detail"]["failed_count"], 1)
+            self.assertEqual(aggregate["raw_detail"]["total_tokens"], 40)
+            self.assertEqual(aggregate["raw_detail"]["included_ids"], ["1", "2"])
+        finally:
+            self.module.db_client = original_db
+
+    def test_compact_request_events_daily_does_not_recount_included_raw_rows(self):
+        aggregate_detail = {
+            "aggregate": "daily_request_events",
+            "day": "2026-04-01",
+            "request_count": 2,
+            "failed_count": 1,
+            "success_count": 1,
+            "input_tokens": 30,
+            "output_tokens": 10,
+            "reasoning_tokens": 0,
+            "cached_tokens": 0,
+            "total_tokens": 40,
+            "estimated_cost_usd": 0.003,
+            "latency_sum_ms": 400,
+            "latency_count": 2,
+            "models": {},
+            "auth_models": {},
+            "providers": {},
+            "endpoints": {},
+            "included_ids": ["1", "2"],
+        }
+        tables = {
+            "request_events": [
+                {
+                    "id": 1,
+                    "event_uid": "req-1",
+                    "occurred_at": "2026-04-01T01:00:00+00:00",
+                    "api_endpoint": "/v1/chat",
+                    "endpoint_method": "POST",
+                    "endpoint_path": "/v1/chat",
+                    "model_name": "gpt-4o",
+                    "source_id": "sk-a",
+                    "auth_index": "0",
+                    "latency_ms": 100,
+                    "failed": False,
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "reasoning_tokens": 0,
+                    "cached_tokens": 0,
+                    "total_tokens": 15,
+                    "provider": "openai",
+                    "estimated_cost_usd": 0.001,
+                },
+                {
+                    "event_uid": "daily-request-events:2026-04-01",
+                    "api_endpoint": "__daily_aggregate__",
+                    "raw_detail": aggregate_detail,
+                },
+            ]
+        }
+
+        class MemoryTable(_DummyTable):
+            def __init__(self, name):
+                self.name = name
+                self._delete = False
+                self._ids = []
+                self._event_uid = None
+            def select(self, *args, **kwargs):
+                return self
+            def lt(self, *args, **kwargs):
+                return self
+            def neq(self, *args, **kwargs):
+                return self
+            def limit(self, *args, **kwargs):
+                return self
+            def eq(self, column, value):
+                if column == "event_uid":
+                    self._event_uid = value
+                return self
+            def upsert(self, data, on_conflict=None):
+                self.fail("included raw rows should not be re-upserted")
+            def delete(self):
+                self._delete = True
+                return self
+            def in_(self, column, values):
+                self._ids = list(values)
+                return self
+            def execute(self):
+                if self._delete:
+                    deleted = [r for r in tables[self.name] if r.get("id") in self._ids]
+                    tables[self.name] = [r for r in tables[self.name] if r.get("id") not in self._ids]
+                    return _DummyResponse(deleted)
+                rows = tables[self.name]
+                if self._event_uid is not None:
+                    rows = [r for r in rows if r.get("event_uid") == self._event_uid]
+                return _DummyResponse(rows)
+
+        class MemoryDB:
+            def table(self, name):
+                return MemoryTable(name)
+
+        original_db = self.module.db_client
+        self.module.db_client = MemoryDB()
+        try:
+            result = self.module._compact_request_events_daily()
+            self.assertEqual(result["deleted"], 1)
+            self.assertEqual(result["aggregated_days"], 0)
+            aggregate = next(r for r in tables["request_events"] if r["event_uid"].startswith("daily-request-events:"))
+            self.assertEqual(aggregate["raw_detail"]["request_count"], 2)
+        finally:
+            self.module.db_client = original_db
+
+    def test_compact_skill_runs_daily_replaces_raw_rows_with_aggregate(self):
+        tables = {
+            "skill_runs": [
+                {
+                    "id": 1,
+                    "event_uid": "skill-1",
+                    "machine_id": "m1",
+                    "source": "sqlite",
+                    "skill_name": "review-work",
+                    "session_id": "s1",
+                    "triggered_at": "2026-04-01T01:00:00+00:00",
+                    "trigger_type": "explicit",
+                    "status": "success",
+                    "tokens_used": 100,
+                    "output_tokens": 50,
+                    "tool_calls": 2,
+                    "duration_ms": 1000,
+                    "estimated_cost_usd": 0.01,
+                    "model": "claude",
+                    "is_skeleton": False,
+                    "project_dir": "/repo",
+                },
+                {
+                    "id": 2,
+                    "event_uid": "skill-2",
+                    "machine_id": "m1",
+                    "source": "sqlite",
+                    "skill_name": "review-work",
+                    "session_id": "s2",
+                    "triggered_at": "2026-04-01T02:00:00+00:00",
+                    "trigger_type": "explicit",
+                    "status": "failure",
+                    "tokens_used": 20,
+                    "output_tokens": 5,
+                    "tool_calls": 1,
+                    "duration_ms": 2000,
+                    "estimated_cost_usd": 0.02,
+                    "model": "claude",
+                    "is_skeleton": False,
+                    "project_dir": "/repo",
+                },
+            ]
+        }
+
+        class MemoryTable(_DummyTable):
+            def __init__(self, name):
+                self.name = name
+                self._delete = False
+                self._ids = []
+                self._event_uid = None
+            def select(self, *args, **kwargs):
+                return self
+            def lt(self, *args, **kwargs):
+                return self
+            def neq(self, *args, **kwargs):
+                return self
+            def eq(self, column, value):
+                if column == "event_uid":
+                    self._event_uid = value
+                return self
+            def limit(self, *args, **kwargs):
+                return self
+            def upsert(self, data, on_conflict=None):
+                row = dict(data)
+                tables[self.name].append(row)
+                return self
+            def delete(self):
+                self._delete = True
+                return self
+            def in_(self, column, values):
+                self._ids = list(values)
+                return self
+            def execute(self):
+                if self._delete:
+                    deleted = [r for r in tables[self.name] if r.get("id") in self._ids]
+                    tables[self.name] = [r for r in tables[self.name] if r.get("id") not in self._ids]
+                    return _DummyResponse(deleted)
+                rows = tables[self.name]
+                if self._event_uid is not None:
+                    rows = [r for r in rows if r.get("event_uid") == self._event_uid]
+                return _DummyResponse(rows)
+
+        class MemoryDB:
+            def table(self, name):
+                return MemoryTable(name)
+
+        original_db = self.module.db_client
+        self.module.db_client = MemoryDB()
+        try:
+            result = self.module._compact_skill_runs_daily()
+            self.assertEqual(result["deleted"], 2)
+            self.assertEqual(result["aggregated_days"], 1)
+            aggregate = next(r for r in tables["skill_runs"] if r["event_uid"].startswith("daily-skill-runs:"))
+            args = __import__("json").loads(aggregate["arguments"])
+            self.assertEqual(args["run_count"], 2)
+            self.assertEqual(args["failure_count"], 1)
+            self.assertEqual(args["tokens_used"], 120)
+            self.assertEqual(args["included_ids"], ["1", "2"])
+        finally:
+            self.module.db_client = original_db
+
     def test_cleanup_skips_invalid_timestamp_snapshots(self):
         plan = self.module._plan_historical_snapshot_compaction(
             [
@@ -489,6 +802,9 @@ class RetentionTests(unittest.TestCase):
                 return _DummyResponse([{"id": i} for i in range(10)])
             
             def eq(self, *args, **kwargs):
+                return self
+
+            def neq(self, *args, **kwargs):
                 return self
             
             def lt(self, *args, **kwargs):
@@ -562,6 +878,9 @@ class RetentionTests(unittest.TestCase):
                 return _DummyResponse([{"id": i} for i in range(10)])
             
             def eq(self, *args, **kwargs):
+                return self
+
+            def neq(self, *args, **kwargs):
                 return self
             
             def lt(self, *args, **kwargs):

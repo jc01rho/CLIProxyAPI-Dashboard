@@ -128,7 +128,7 @@ if USAGE_SYNC_MODE not in ("auto", "management", "queue", "redis"):
     USAGE_SYNC_MODE = "auto"
 USAGE_QUEUE_BATCH_SIZE = _env_int("USAGE_QUEUE_BATCH_SIZE", 50)
 USAGE_QUEUE_MAX_DRAIN_ITERATIONS = _env_int("USAGE_QUEUE_MAX_DRAIN_ITERATIONS", 20)
-USAGE_QUEUE_SYNC_INTERVAL = _env_int("USAGE_QUEUE_SYNC_INTERVAL_SECONDS", 10)
+USAGE_QUEUE_SYNC_INTERVAL = _env_int("USAGE_QUEUE_SYNC_INTERVAL_SECONDS", 60)
 REQUEST_EVENTS_AVAILABILITY_RECHECK_SECONDS = _env_int(
     "REQUEST_EVENTS_AVAILABILITY_RECHECK_SECONDS", 300
 )
@@ -136,7 +136,7 @@ REDIS_QUEUE_ADDR = str(os.getenv("REDIS_QUEUE_ADDR", "")).strip()
 REDIS_QUEUE_KEY = str(os.getenv("REDIS_QUEUE_KEY", "cliproxy:usage_events")).strip()
 REDIS_QUEUE_BATCH_SIZE = _env_int("REDIS_QUEUE_BATCH_SIZE", 50)
 REDIS_QUEUE_SOCKET_TIMEOUT = float(os.getenv("REDIS_QUEUE_SOCKET_TIMEOUT", "5"))
-REDIS_QUEUE_SYNC_INTERVAL = _env_int("REDIS_QUEUE_SYNC_INTERVAL_SECONDS", 10)
+REDIS_QUEUE_SYNC_INTERVAL = _env_int("REDIS_QUEUE_SYNC_INTERVAL_SECONDS", 60)
 
 # Default pricing (USD per 1M tokens) - Updated Dec 2024
 DEFAULT_PRICING = {
@@ -186,6 +186,9 @@ _request_events_table_available: Optional[bool] = None
 _request_events_next_check_at: float = 0
 _last_management_upload_at: float = 0
 _management_upload_lock = threading.Lock()
+_management_deferred_sync_count: int = 0
+_app_log_buffer: List[Dict[str, Any]] = []
+_app_log_buffer_lock = threading.Lock()
 
 # --- Flask App Setup ---
 flask_app = Flask(__name__)
@@ -1285,6 +1288,65 @@ def _normalize_app_log_event(evt: Any) -> Optional[Dict[str, Any]]:
     }
 
 
+def _buffer_app_log_event(evt: Dict[str, Any]) -> None:
+    with _app_log_buffer_lock:
+        _app_log_buffer.append(evt)
+
+
+def _flush_app_log_buffer() -> Dict[str, int]:
+    if not db_client:
+        return {"buffered": 0, "persisted": 0, "skipped": 0}
+
+    with _app_log_buffer_lock:
+        pending = list(_app_log_buffer)
+        _app_log_buffer.clear()
+
+    summary = {"buffered": len(pending), "persisted": 0, "skipped": 0}
+    if not pending:
+        return summary
+
+    try:
+        deduped: Dict[str, Dict[str, Any]] = {}
+        inserts: List[Dict[str, Any]] = []
+        for evt in pending:
+            event_uid = evt.get("event_uid")
+            if event_uid:
+                deduped[str(event_uid)] = evt
+            else:
+                inserts.append(evt)
+
+        upserts = list(deduped.values())
+        for i in range(0, len(upserts), 100):
+            batch = upserts[i : i + 100]
+            db_client.table("app_logs").upsert(batch, on_conflict="event_uid").execute()
+            summary["persisted"] += len(batch)
+
+        for i in range(0, len(inserts), 100):
+            batch = inserts[i : i + 100]
+            db_client.table("app_logs").insert(batch).execute()
+            summary["persisted"] += len(batch)
+    except Exception as e:
+        with _app_log_buffer_lock:
+            _app_log_buffer[:0] = pending
+        summary["persisted"] = 0
+        summary["skipped"] = len(pending)
+        logger.error(f"Failed to flush app log buffer: {e}", exc_info=True)
+
+    return summary
+
+
+def _flush_app_logs_after_upload_window() -> Dict[str, int]:
+    summary = _flush_app_log_buffer()
+    if summary.get("buffered", 0) > 0:
+        logger.info(
+            "App log buffer flushed after upload window: buffered=%d, persisted=%d, skipped=%d",
+            summary.get("buffered", 0),
+            summary.get("persisted", 0),
+            summary.get("skipped", 0),
+        )
+    return summary
+
+
 def _log_app_event(
     *,
     source: str,
@@ -1312,14 +1374,7 @@ def _log_app_event(
     )
     if not evt:
         return
-
-    try:
-        if evt.get("event_uid"):
-            db_client.table("app_logs").upsert(evt, on_conflict="event_uid").execute()
-        else:
-            db_client.table("app_logs").insert(evt).execute()
-    except Exception as e:
-        logger.error(f"Failed to write app log event: {e}", exc_info=True)
+    _buffer_app_log_event(evt)
 
 
 @api_bp.route("/health", methods=["GET"])
@@ -1808,21 +1863,8 @@ def ingest_log_events():
             skipped += 1
             continue
 
-        try:
-            if evt.get("event_uid"):
-                result = (
-                    db_client.table("app_logs")
-                    .upsert(evt, on_conflict="event_uid")
-                    .execute()
-                )
-                if result.data is None:
-                    db_client.table("app_logs").insert(evt).execute()
-            else:
-                db_client.table("app_logs").insert(evt).execute()
-            upserted += 1
-        except Exception as e:
-            logger.error(f"Failed to ingest app log event: {e}", exc_info=True)
-            skipped += 1
+        _buffer_app_log_event(evt)
+        upserted += 1
 
     return jsonify({"status": "ok", "upserted": upserted, "skipped": skipped})
 
@@ -2100,7 +2142,7 @@ def run_full_sync_once():
 
 
 def _run_management_sync(run_id: str) -> None:
-    global _last_management_upload_at
+    global _last_management_upload_at, _management_deferred_sync_count
 
     logger.info("Fetching usage data from management API...")
     _log_sync_event(
@@ -2118,13 +2160,34 @@ def _run_management_sync(run_id: str) -> None:
         with _management_upload_lock:
             elapsed = now - _last_management_upload_at
             if elapsed < MODEL_USAGE_UPLOAD_INTERVAL_SECONDS:
+                _management_deferred_sync_count += 1
                 seconds_until_next = int(MODEL_USAGE_UPLOAD_INTERVAL_SECONDS - elapsed)
                 logger.debug(
                     "Management data collected; DB upload deferred for %ds (interval=%ds)",
                     seconds_until_next,
                     MODEL_USAGE_UPLOAD_INTERVAL_SECONDS,
                 )
+                current_usage = data.get("usage") or {}
+                _log_sync_event(
+                    run_id=run_id,
+                    source="collector",
+                    category="sync",
+                    severity="info",
+                    title="Usage accumulation snapshot",
+                    message="Collected current cumulative management usage for the active upload window.",
+                    details={
+                        "accumulated_syncs_since_last_upload": _management_deferred_sync_count,
+                        "seconds_until_next_upload": seconds_until_next,
+                        "upload_interval_seconds": MODEL_USAGE_UPLOAD_INTERVAL_SECONDS,
+                        "total_requests": current_usage.get("total_requests", 0),
+                        "success_count": current_usage.get("success_count", 0),
+                        "failure_count": current_usage.get("failure_count", 0),
+                        "total_tokens": current_usage.get("total_tokens", 0),
+                    },
+                )
                 return
+            deferred_syncs = _management_deferred_sync_count
+            _management_deferred_sync_count = 0
             _last_management_upload_at = now
 
         _log_sync_event(
@@ -2148,15 +2211,18 @@ def _run_management_sync(run_id: str) -> None:
 
         ok, store_summary = store_usage_data(data, run_id=run_id)
         if ok:
+            store_summary["deferred_syncs_since_last_upload"] = deferred_syncs
+            store_summary["upload_interval_seconds"] = MODEL_USAGE_UPLOAD_INTERVAL_SECONDS
             _log_sync_event(
                 run_id=run_id,
                 source="collector",
                 category="db",
                 severity="info",
-                title="Store usage ok",
-                message="Usage snapshot persisted successfully.",
+                title="30-minute usage upload ok",
+                message="Buffered management usage was merged into one DB upload window and persisted successfully.",
                 details=store_summary,
             )
+            _flush_app_logs_after_upload_window()
             try:
                 compact_result = _compact_model_usage_db()
                 if compact_result.get("snapshots_deleted", 0) > 0:
@@ -2624,6 +2690,12 @@ def _redis_queue_sync_once() -> Dict[str, Any]:
         summary["parsed"] = len(events)
 
         if events:
+            deduped_events: Dict[str, Dict[str, Any]] = {}
+            for event in events:
+                event_uid = event.get("event_uid")
+                if event_uid:
+                    deduped_events[str(event_uid)] = event
+            events = list(deduped_events.values())
             batch_size = 100
             for i in range(0, len(events), batch_size):
                 batch = events[i: i + batch_size]
@@ -2671,8 +2743,14 @@ def _persist_queue_payloads(payloads: List[Dict[str, Any]]) -> Dict[str, Any]:
                 events.append(row)
         summary["parsed"] = len(events)
         if events:
-            for i in range(0, len(events), 100):
-                batch = events[i: i + 100]
+            deduped_events: Dict[str, Dict[str, Any]] = {}
+            for event in events:
+                event_uid = event.get("event_uid")
+                if event_uid:
+                    deduped_events[str(event_uid)] = event
+            persisted_events = list(deduped_events.values())
+            for i in range(0, len(persisted_events), 100):
+                batch = persisted_events[i: i + 100]
                 db_client.table("request_events").upsert(batch, on_conflict="event_uid").execute()
                 summary["persisted"] += len(batch)
             _request_events_table_warned = False
@@ -3762,6 +3840,14 @@ def main():
         minutes=APP_LOG_CLEANUP_INTERVAL_MINUTES,
         id="app_logs_cleanup",
         next_run_time=datetime.now() + timedelta(seconds=20),
+    )
+
+    scheduler.add_job(
+        _flush_app_logs_after_upload_window,
+        "interval",
+        seconds=MODEL_USAGE_UPLOAD_INTERVAL_SECONDS,
+        id="app_logs_upload_flush",
+        next_run_time=datetime.now() + timedelta(seconds=MODEL_USAGE_UPLOAD_INTERVAL_SECONDS),
     )
 
     # Compact historical usage data daily at local midnight; trim old skill_runs

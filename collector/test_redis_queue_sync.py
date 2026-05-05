@@ -546,6 +546,36 @@ class RedisQueueTransformTests(unittest.TestCase):
             self.module.USAGE_QUEUE_BATCH_SIZE = original_batch_size
             self.module._request_events_table_available = original_available
 
+    def test_persist_queue_payloads_deduplicates_event_uid_within_batch(self):
+        events = []
+
+        class _RecordingTable(_DummyTable):
+            def upsert(self, data, on_conflict=None):
+                events.extend(data if isinstance(data, list) else [data])
+                return self
+
+        class _RecordingDB:
+            def table(self, *a, **kw):
+                return _RecordingTable()
+
+        original_db = self.module.db_client
+        original_available = self.module._request_events_table_available
+        self.module.db_client = _RecordingDB()
+        self.module._request_events_table_available = True
+        duplicate_payloads = [
+            {"timestamp": "2026-04-15T10:30:00Z", "request_id": "same-req", "model": "gpt-4o"},
+            {"timestamp": "2026-04-15T10:30:00Z", "request_id": "same-req", "model": "gpt-4o"},
+        ]
+        try:
+            result = self.module._persist_queue_payloads(duplicate_payloads)
+            self.assertEqual(result["popped"], 2)
+            self.assertEqual(result["parsed"], 2)
+            self.assertEqual(result["persisted"], 1)
+            self.assertEqual(len(events), 1)
+        finally:
+            self.module.db_client = original_db
+            self.module._request_events_table_available = original_available
+
     def test_run_full_sync_includes_usage_queue_sync(self):
         called = {"usage_queue": False, "management": False, "redis": False}
         original_usage_queue = self.module._usage_queue_sync_once

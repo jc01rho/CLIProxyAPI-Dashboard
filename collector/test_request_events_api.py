@@ -127,6 +127,7 @@ def _load_module():
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
+    module.jsonify = lambda x=None, *args, **kwargs: x if x is not None else kwargs
     return module
 
 
@@ -179,6 +180,35 @@ class TransformQueueEventCostProviderTests(unittest.TestCase):
         row = self.module._transform_queue_event(payload)
         self.assertIsNotNone(row)
         self.assertEqual(row["provider"], "openai")
+
+    def test_admin_session_pgrst116_returns_none_without_error_log(self):
+        class _PgrstNoRowsError(Exception):
+            def __init__(self):
+                super().__init__({
+                    "message": "Cannot coerce the result to a single JSON object",
+                    "code": "PGRST116",
+                    "details": "The result contains 0 rows",
+                })
+
+        class _NoRowsTable(_DummyTable):
+            def single(self):
+                return self
+            def execute(self):
+                raise _PgrstNoRowsError()
+
+        class _NoRowsDB:
+            def table(self, name):
+                self.name = name
+                return _NoRowsTable()
+
+        original_db = self.module.db_client
+        self.module.db_client = _NoRowsDB()
+        try:
+            with mock.patch.object(self.module.logger, "error") as error_mock:
+                self.assertIsNone(self.module._get_session_row("missing-session-token"))
+            error_mock.assert_not_called()
+        finally:
+            self.module.db_client = original_db
 
     def test_provider_defaults_to_empty_string(self):
         payload = {"timestamp": "2026-04-15T10:00:00Z", "model": "gpt-4o"}

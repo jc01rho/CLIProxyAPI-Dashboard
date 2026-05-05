@@ -449,9 +449,18 @@ class RedisQueueTransformTests(unittest.TestCase):
             result = self.module._usage_queue_sync_once()
             self.assertEqual(result["popped"], 1)
             self.assertEqual(result["parsed"], 1)
-            self.assertEqual(result["persisted"], 1)
+            self.assertEqual(result["persisted"], 0)
+            self.assertTrue(result["upload_deferred"])
+            self.assertEqual(len(events), 0)
+
+            flush = self.module._flush_request_event_upload_buffer("scheduled", force=True)
+            self.assertTrue(flush["flushed"])
+            self.assertEqual(flush["persisted"], 1)
+            self.assertEqual(flush["aggregated_events"], 1)
             self.assertEqual(len(events), 1)
-            self.assertEqual(events[0]["request_id"], "req-http-sync")
+            self.assertEqual(events[0]["api_endpoint"], "__request_events_aggregate__")
+            self.assertEqual(events[0]["raw_detail"]["request_count"], 1)
+            self.assertEqual(len(events[0]["raw_detail"]["event_uids"]), 1)
         finally:
             self.module.fetch_usage_queue_items = original_fetch
             self.module._request_events_table_available = original_available
@@ -562,13 +571,21 @@ class RedisQueueTransformTests(unittest.TestCase):
         try:
             result = self.module._usage_queue_sync_once()
             self.assertEqual(result["popped"], batch_size * 2)
-            self.assertEqual(len(events), batch_size * 2)
+            self.assertEqual(result["persisted"], 0)
+            self.assertTrue(result["upload_deferred"])
+            self.assertEqual(len(events), 0)
+
+            flush = self.module._flush_request_event_upload_buffer("scheduled", force=True)
+            self.assertEqual(flush["persisted"], 1)
+            self.assertEqual(flush["aggregated_events"], batch_size * 2)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["raw_detail"]["request_count"], batch_size * 2)
         finally:
             self.module.fetch_usage_queue_items = original_fetch
             self.module.USAGE_QUEUE_BATCH_SIZE = original_batch_size
             self.module._request_events_table_available = original_available
 
-    def test_usage_queue_first_run_flushes_all_drained_events_immediately(self):
+    def test_usage_queue_first_run_buffers_all_drained_events_until_upload_window(self):
         events = []
         call_count = [0]
         batch_size = 2
@@ -605,9 +622,15 @@ class RedisQueueTransformTests(unittest.TestCase):
         try:
             result = self.module._usage_queue_sync_once()
             self.assertEqual(result["popped"], batch_size * 2)
-            self.assertEqual(result["persisted"], batch_size * 2)
-            self.assertFalse(result["upload_deferred"])
-            self.assertEqual(len(events), batch_size * 2)
+            self.assertEqual(result["persisted"], 0)
+            self.assertTrue(result["upload_deferred"])
+            self.assertEqual(len(events), 0)
+
+            flush = self.module._flush_request_event_upload_buffer("scheduled", force=True)
+            self.assertEqual(flush["persisted"], 1)
+            self.assertEqual(flush["aggregated_events"], batch_size * 2)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["raw_detail"]["request_count"], batch_size * 2)
         finally:
             self.module.fetch_usage_queue_items = original_fetch
             self.module.USAGE_QUEUE_BATCH_SIZE = original_batch_size
@@ -677,13 +700,16 @@ class RedisQueueTransformTests(unittest.TestCase):
 
             # Simulate collector restart: memory buffer is gone but durable spool remains.
             self.module._request_event_upload_buffer = []
-            self.module._last_request_event_upload_at = 0
+            self.module._last_request_event_upload_at = self.module.time.time() - self.module.MODEL_USAGE_UPLOAD_INTERVAL_SECONDS - 1
             flush = self.module._flush_request_event_upload_buffer("scheduled")
 
             self.assertTrue(flush["flushed"])
             self.assertEqual(flush["persisted"], 1)
+            self.assertEqual(flush["aggregated_events"], 1)
             self.assertEqual(len(events), 1)
-            self.assertEqual(events[0]["request_id"], "spooled-req")
+            self.assertEqual(events[0]["api_endpoint"], "__request_events_aggregate__")
+            self.assertEqual(events[0]["raw_detail"]["request_count"], 1)
+            self.assertEqual(len(events[0]["raw_detail"]["event_uids"]), 1)
             spool_contents = self.module.REQUEST_EVENTS_SPOOL_PATH.read_text(encoding="utf-8")
             self.assertEqual(spool_contents, "")
         finally:
@@ -745,12 +771,75 @@ class RedisQueueTransformTests(unittest.TestCase):
             result = self.module._flush_request_event_upload_buffer("scheduled", force=True)
 
             self.assertTrue(result["flushed"])
-            self.assertEqual([event["request_id"] for event in uploaded], ["first-req"])
+            self.assertEqual(len(uploaded), 1)
+            self.assertEqual(uploaded[0]["api_endpoint"], "__request_events_aggregate__")
+            self.assertEqual(uploaded[0]["raw_detail"]["event_uids"], [first_event["event_uid"]])
             spool_contents = self.module.REQUEST_EVENTS_SPOOL_PATH.read_text(encoding="utf-8")
             self.assertIn("second-req", spool_contents)
             self.assertNotIn("first-req", spool_contents)
         finally:
             self.module._upsert_request_events_batch = original_upsert
+
+    def test_buffer_spool_append_uses_upload_lock(self):
+        original_append = self.module._append_request_events_to_spool
+        observed = []
+
+        def fake_append(events):
+            acquired = self.module._request_event_upload_lock.acquire(blocking=False)
+            if acquired:
+                self.module._request_event_upload_lock.release()
+            observed.append(acquired)
+            original_append(events)
+
+        event = self.module._transform_queue_event({
+            "timestamp": "2026-04-15T10:30:00Z",
+            "request_id": "lock-req",
+            "model": "gpt-4o",
+        })
+        self.module._append_request_events_to_spool = fake_append
+        try:
+            self.module._buffer_request_events_for_upload([event])
+        finally:
+            self.module._append_request_events_to_spool = original_append
+
+        self.assertEqual(observed, [False])
+        self.assertIn("lock-req", self.module.REQUEST_EVENTS_SPOOL_PATH.read_text(encoding="utf-8"))
+
+    def test_flush_groups_request_event_aggregates_by_local_day(self):
+        uploaded = []
+
+        class _RecordingTable(_DummyTable):
+            def upsert(self, data, on_conflict=None):
+                uploaded.extend(data if isinstance(data, list) else [data])
+                return self
+
+        class _RecordingDB:
+            def table(self, *a, **kw):
+                return _RecordingTable()
+
+        first_event = self.module._transform_queue_event({
+            "timestamp": "2026-04-15T10:30:00Z",
+            "request_id": "day-one",
+            "model": "gpt-4o",
+        })
+        second_event = self.module._transform_queue_event({
+            "timestamp": "2026-04-16T10:30:00Z",
+            "request_id": "day-two",
+            "model": "gpt-4o",
+        })
+
+        self.module.db_client = _RecordingDB()
+        self.module._request_events_table_available = True
+        self.module._buffer_request_events_for_upload([first_event, second_event])
+
+        result = self.module._flush_request_event_upload_buffer("scheduled", force=True)
+
+        self.assertTrue(result["flushed"])
+        self.assertEqual(result["persisted"], 2)
+        self.assertEqual(result["aggregated_events"], 2)
+        self.assertEqual(len(uploaded), 2)
+        self.assertEqual([row["raw_detail"]["request_count"] for row in uploaded], [1, 1])
+        self.assertEqual([row["raw_detail"]["day"] for row in uploaded], ["2026-04-15", "2026-04-16"])
 
     def test_persist_queue_payloads_deduplicates_event_uid_within_batch(self):
         events = []
@@ -768,6 +857,7 @@ class RedisQueueTransformTests(unittest.TestCase):
         original_available = self.module._request_events_table_available
         self.module.db_client = _RecordingDB()
         self.module._request_events_table_available = True
+        self.module._last_request_event_upload_at = self.module.time.time() - self.module.MODEL_USAGE_UPLOAD_INTERVAL_SECONDS - 1
         duplicate_payloads = [
             {"timestamp": "2026-04-15T10:30:00Z", "request_id": "same-req", "model": "gpt-4o"},
             {"timestamp": "2026-04-15T10:30:00Z", "request_id": "same-req", "model": "gpt-4o"},
@@ -778,6 +868,8 @@ class RedisQueueTransformTests(unittest.TestCase):
             self.assertEqual(result["parsed"], 2)
             self.assertEqual(result["persisted"], 1)
             self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["api_endpoint"], "__request_events_aggregate__")
+            self.assertEqual(events[0]["raw_detail"]["request_count"], 1)
         finally:
             self.module.db_client = original_db
             self.module._request_events_table_available = original_available
@@ -795,6 +887,7 @@ class RedisQueueTransformTests(unittest.TestCase):
         original_available = self.module._request_events_table_available
         self.module.db_client = _RecordingDB()
         self.module._request_events_table_available = True
+        self.module._last_request_event_upload_at = self.module.time.time() - self.module.MODEL_USAGE_UPLOAD_INTERVAL_SECONDS - 1
         payloads = [
             {
                 "timestamp": "2026-04-15T10:30:00Z",
@@ -815,7 +908,7 @@ class RedisQueueTransformTests(unittest.TestCase):
             with mock.patch.object(self.module.logger, "info") as info_mock:
                 result = self.module._persist_queue_payloads(payloads)
 
-            self.assertEqual(result["persisted"], 2)
+            self.assertEqual(result["persisted"], 1)
             message = "Aggregated request event usage (%s): requests=%d, success=%d, failure=%d, total_tokens=%d, estimated_cost_usd=%.6f, top_models=[%s]"
             matching_calls = [call.args[1:] for call in info_mock.call_args_list if call.args and call.args[0] == message]
             self.assertTrue(matching_calls)
@@ -943,7 +1036,12 @@ class RedisQueueTransformTests(unittest.TestCase):
             result = self.module._redis_queue_sync_once()
             self.assertEqual(result["popped"], 1)
             self.assertEqual(result["parsed"], 1)
-            self.assertEqual(result["persisted"], 1)
+            self.assertEqual(result["persisted"], 0)
+            self.assertTrue(result["upload_deferred"])
+            self.assertEqual(len(events), 0)
+
+            flush = self.module._flush_request_event_upload_buffer("scheduled", force=True)
+            self.assertEqual(flush["persisted"], 1)
             self.assertEqual(len(events), 1)
             self.assertNotIn("sk-long-secret-key-12345", json.dumps(events[0]["raw_detail"]))
         finally:

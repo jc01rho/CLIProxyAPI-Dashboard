@@ -46,6 +46,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _is_postgrest_no_rows_error(exc: Exception) -> bool:
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict) and details.get("code") == "PGRST116":
+        return True
+    args = getattr(exc, "args", ())
+    for arg in args:
+        if isinstance(arg, dict) and arg.get("code") == "PGRST116":
+            return True
+    return "PGRST116" in str(exc)
+
+
 def _env_int(name: str, default: int, min_value: int = 1) -> int:
     raw = os.getenv(name, str(default))
     try:
@@ -343,6 +354,8 @@ def _get_session_row(token: Optional[str]) -> Optional[Dict[str, Any]]:
             .data
         )
     except Exception as e:
+        if _is_postgrest_no_rows_error(e):
+            return None
         logger.error(f"Failed to load admin session: {e}", exc_info=True)
         return None
 
@@ -536,6 +549,11 @@ def _event_local_day(row: Dict[str, Any], timestamp_key: str) -> Optional[str]:
 def _is_daily_aggregate_row(row: Dict[str, Any], prefix: str) -> bool:
     event_uid = str(row.get("event_uid") or "")
     return event_uid.startswith(prefix)
+
+
+def _is_request_event_window_aggregate(row: Dict[str, Any]) -> bool:
+    detail = row.get("raw_detail")
+    return isinstance(detail, dict) and detail.get("aggregate") == "request_events_upload_window"
 
 
 def _fetch_existing_daily_aggregate(table_name: str, event_uid: str, detail_column: str) -> Dict[str, Any]:
@@ -1129,7 +1147,7 @@ def _compact_request_events_daily() -> Dict[str, int]:
             .select(
                 "id,event_uid,occurred_at,api_endpoint,endpoint_method,endpoint_path,model_name,"
                 "source_id,auth_index,latency_ms,failed,input_tokens,output_tokens,reasoning_tokens,"
-                "cached_tokens,total_tokens,provider,estimated_cost_usd"
+                "cached_tokens,total_tokens,provider,estimated_cost_usd,raw_detail"
             )
             .lt("occurred_at", today_start_utc)
             .neq("api_endpoint", "__daily_aggregate__")
@@ -1177,6 +1195,26 @@ def _compact_request_events_daily() -> Dict[str, int]:
             "providers": {},
             "endpoints": {},
         })
+        if _is_request_event_window_aggregate(row):
+            detail = row.get("raw_detail") or {}
+            agg["request_count"] += _safe_int(detail.get("request_count"), 0)
+            agg["failed_count"] += _safe_int(detail.get("failed_count"), 0)
+            agg["success_count"] += _safe_int(detail.get("success_count"), 0)
+            for key in ("input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens", "total_tokens", "latency_sum_ms", "latency_count"):
+                agg[key] += _safe_int(detail.get(key), 0)
+            try:
+                agg["estimated_cost_usd"] += float(detail.get("estimated_cost_usd") or 0)
+            except Exception:
+                pass
+            for bucket_key in ("models", "auth_models", "providers", "endpoints"):
+                for name, data in (detail.get(bucket_key) or {}).items():
+                    if bucket_key == "auth_models":
+                        target = agg[bucket_key].setdefault(name, {"auth": data.get("auth"), "model": data.get("model"), "requests": 0, "success": 0, "failure": 0, "tokens": 0, "cost": 0.0})
+                    else:
+                        target = agg[bucket_key].setdefault(name, {"requests": 0, "success": 0, "failure": 0, "tokens": 0, "cost": 0.0})
+                    _merge_numeric_bucket(target, data, ("requests", "success", "failure", "tokens", "cost"))
+            continue
+
         agg["request_count"] += 1
         if row.get("failed"):
             agg["failed_count"] += 1
@@ -3097,36 +3135,147 @@ def _summarize_request_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         "requests": len(events),
         "success": 0,
         "failure": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "cached_tokens": 0,
         "total_tokens": 0,
         "estimated_cost_usd": 0.0,
         "models": {},
+        "auth_models": {},
+        "providers": {},
+        "endpoints": {},
+        "latency_sum_ms": 0,
+        "latency_count": 0,
     }
     for event in events:
+        failed = bool(event.get("failed"))
         if event.get("failed"):
             summary["failure"] += 1
         else:
             summary["success"] += 1
-        summary["total_tokens"] += _safe_int(event.get("total_tokens"), 0)
+        for token_key in ("input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens", "total_tokens"):
+            summary[token_key] += _safe_int(event.get(token_key), 0)
         try:
             summary["estimated_cost_usd"] += float(event.get("estimated_cost_usd") or 0)
         except Exception:
             pass
+        latency = _safe_int(event.get("latency_ms"), 0)
+        if latency > 0:
+            summary["latency_sum_ms"] += latency
+            summary["latency_count"] += 1
 
-        model_name = str(event.get("model_name") or "unknown")
-        models = summary["models"]
-        if model_name not in models:
-            models[model_name] = {"requests": 0, "failure": 0, "tokens": 0, "cost": 0.0}
-        model_row = models[model_name]
-        model_row["requests"] += 1
-        if event.get("failed"):
-            model_row["failure"] += 1
-        model_row["tokens"] += _safe_int(event.get("total_tokens"), 0)
+        model_name = str(event.get("model_name") or "Unknown")
+        provider = str(event.get("provider") or "Unknown")
+        endpoint = str(event.get("api_endpoint") or "Unknown")
+        auth = str(event.get("auth_index") if event.get("auth_index") is not None else "Unknown") or "Unknown"
+        total_tokens = _safe_int(event.get("total_tokens"), 0)
         try:
-            model_row["cost"] += float(event.get("estimated_cost_usd") or 0)
+            cost = float(event.get("estimated_cost_usd") or 0)
         except Exception:
-            pass
+            cost = 0.0
+
+        def add_bucket(bucket: Dict[str, Any], name: str) -> None:
+            item = bucket.setdefault(name, {"requests": 0, "success": 0, "failure": 0, "tokens": 0, "cost": 0.0})
+            item["requests"] += 1
+            if failed:
+                item["failure"] += 1
+            else:
+                item["success"] += 1
+            item["tokens"] += total_tokens
+            item["cost"] += cost
+
+        add_bucket(summary["models"], model_name)
+        add_bucket(summary["providers"], provider)
+        add_bucket(summary["endpoints"], endpoint)
+        auth_model_key = f"{auth}\u0000{model_name}"
+        auth_model = summary["auth_models"].setdefault(auth_model_key, {
+            "auth": auth, "model": model_name, "requests": 0, "success": 0, "failure": 0, "tokens": 0, "cost": 0.0,
+        })
+        auth_model["requests"] += 1
+        if failed:
+            auth_model["failure"] += 1
+        else:
+            auth_model["success"] += 1
+        auth_model["tokens"] += total_tokens
+        auth_model["cost"] += cost
     summary["estimated_cost_usd"] = round(summary["estimated_cost_usd"], 6)
     return summary
+
+
+def _request_events_aggregate_row(source: str, events: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not events:
+        return None
+    summary = _summarize_request_events(events)
+    if summary["requests"] <= 0:
+        return None
+    event_uids = sorted(str(event.get("event_uid")) for event in events if event.get("event_uid"))
+    first_event = min(events, key=lambda ev: str(ev.get("occurred_at") or ""))
+    last_event = max(events, key=lambda ev: str(ev.get("occurred_at") or ""))
+    first_at = first_event.get("occurred_at") or _utcnow().isoformat()
+    last_at = last_event.get("occurred_at") or first_at
+    uid_seed = "|".join([source, first_at, last_at, *event_uids])
+    aggregate_uid = "request-events-aggregate:" + hashlib.sha256(uid_seed.encode("utf-8")).hexdigest()
+    avg_latency_ms = round(summary["latency_sum_ms"] / summary["latency_count"], 2) if summary["latency_count"] else 0
+    raw_detail = {
+        "aggregate": "request_events_upload_window",
+        "source": source,
+        "first_occurred_at": first_at,
+        "last_occurred_at": last_at,
+        "event_uids": event_uids,
+        "request_count": summary["requests"],
+        "success_count": summary["success"],
+        "failed_count": summary["failure"],
+        "input_tokens": summary["input_tokens"],
+        "output_tokens": summary["output_tokens"],
+        "reasoning_tokens": summary["reasoning_tokens"],
+        "cached_tokens": summary["cached_tokens"],
+        "total_tokens": summary["total_tokens"],
+        "estimated_cost_usd": summary["estimated_cost_usd"],
+        "latency_sum_ms": summary["latency_sum_ms"],
+        "latency_count": summary["latency_count"],
+        "avg_latency_ms": avg_latency_ms,
+        "models": summary["models"],
+        "auth_models": summary["auth_models"],
+        "providers": summary["providers"],
+        "endpoints": summary["endpoints"],
+    }
+    return {
+        "event_uid": aggregate_uid,
+        "request_id": None,
+        "occurred_at": first_at,
+        "api_endpoint": "__request_events_aggregate__",
+        "endpoint_method": "AGGREGATE",
+        "endpoint_path": "__request_events_aggregate__",
+        "model_name": "__request_events_aggregate__",
+        "source_id": "__request_events_aggregate__",
+        "auth_index": "__request_events_aggregate__",
+        "latency_ms": int(avg_latency_ms),
+        "failed": summary["failure"] > 0,
+        "input_tokens": summary["input_tokens"],
+        "output_tokens": summary["output_tokens"],
+        "reasoning_tokens": summary["reasoning_tokens"],
+        "cached_tokens": summary["cached_tokens"],
+        "total_tokens": summary["total_tokens"],
+        "provider": "__request_events_aggregate__",
+        "estimated_cost_usd": summary["estimated_cost_usd"],
+        "raw_detail": raw_detail,
+        "ingested_at": _utcnow().isoformat(),
+    }
+
+
+def _request_events_aggregate_rows(source: str, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    events_by_day: Dict[str, List[Dict[str, Any]]] = {}
+    for event in events:
+        day_key = _event_local_day(event, "occurred_at") or "unknown"
+        events_by_day.setdefault(day_key, []).append(event)
+    rows = []
+    for day_key in sorted(events_by_day):
+        row = _request_events_aggregate_row(source, events_by_day[day_key])
+        if row:
+            row["raw_detail"]["day"] = None if day_key == "unknown" else day_key
+            rows.append(row)
+    return rows
 
 
 def _log_request_event_usage_summary(source: str, events: List[Dict[str, Any]]) -> None:
@@ -3229,8 +3378,8 @@ def _append_request_events_to_spool(events: List[Dict[str, Any]]) -> None:
 def _buffer_request_events_for_upload(events: List[Dict[str, Any]]) -> None:
     if not events:
         return
-    _append_request_events_to_spool(events)
     with _request_event_upload_lock:
+        _append_request_events_to_spool(events)
         _request_event_upload_buffer.extend(events)
 
 
@@ -3261,6 +3410,11 @@ def _flush_request_event_upload_buffer(source: str, force: bool = False) -> Dict
         summary["buffered"] = pending_count
         if pending_count == 0:
             return summary
+        if _last_request_event_upload_at <= 0 and not force:
+            _last_request_event_upload_at = now
+            summary["skipped"] = pending_count
+            summary["seconds_until_next_upload"] = MODEL_USAGE_UPLOAD_INTERVAL_SECONDS
+            return summary
         if _last_request_event_upload_at > 0 and not force:
             elapsed = now - _last_request_event_upload_at
             if elapsed < MODEL_USAGE_UPLOAD_INTERVAL_SECONDS:
@@ -3278,16 +3432,19 @@ def _flush_request_event_upload_buffer(source: str, force: bool = False) -> Dict
             if event_uid:
                 deduped_events[str(event_uid)] = event
         events_to_upload = list(deduped_events.values())
-        summary["persisted"] = _upsert_request_events_batch(events_to_upload)
+        aggregate_rows = _request_events_aggregate_rows(source, events_to_upload)
+        summary["persisted"] = _upsert_request_events_batch(aggregate_rows)
+        summary["aggregated_events"] = len(events_to_upload)
         _remove_uploaded_request_events_from_spool(set(deduped_events.keys()))
         summary["flushed"] = True
         _last_request_event_upload_at = now
         _request_events_table_warned = False
         _log_request_event_usage_summary(source, events_to_upload)
         logger.info(
-            "Request event upload window flushed (%s): buffered=%d, persisted=%d, interval=%ds",
+            "Request event upload window flushed (%s): buffered=%d, aggregated=%d, persisted=%d, interval=%ds",
             source,
             summary["buffered"],
+            summary["aggregated_events"],
             summary["persisted"],
             MODEL_USAGE_UPLOAD_INTERVAL_SECONDS,
         )

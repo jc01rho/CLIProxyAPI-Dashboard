@@ -24,6 +24,11 @@ const compactText = (text, max = 72) => {
     return value.length > max ? `${value.slice(0, max - 1)}…` : value
 }
 
+const normalizeGroupValue = (value) => {
+    if (value === undefined || value === null || value === '') return 'Unknown'
+    return String(value)
+}
+
 const getStatus = (failed) => failed ? 'failure' : 'success'
 
 const calculatePercentiles = (values) => {
@@ -211,6 +216,44 @@ function RequestEventsPanel({ requestEvents = [] }) {
             .sort((a, b) => b.cost - a.cost || b.requests - a.requests)
             .slice(0, 10)
     }, [summary.modelStats])
+
+    const authModelRows = useMemo(() => {
+        const byAuthModel = {}
+
+        for (const ev of filteredEvents) {
+            const auth = normalizeGroupValue(ev.auth_index)
+            const model = normalizeGroupValue(ev.model_name)
+            const key = `${auth}\u0000${model}`
+
+            if (!byAuthModel[key]) {
+                byAuthModel[key] = {
+                    auth,
+                    model,
+                    requests: 0,
+                    success: 0,
+                    failure: 0,
+                    tokens: 0,
+                    cost: 0,
+                }
+            }
+
+            const row = byAuthModel[key]
+            row.requests++
+            if (ev.failed) row.failure++
+            else row.success++
+            row.tokens += Number(ev.total_tokens) || 0
+            row.cost += Number(ev.estimated_cost_usd) || 0
+        }
+
+        return Object.values(byAuthModel)
+            .map(row => ({
+                ...row,
+                successRate: row.requests ? (row.success / row.requests) * 100 : 0,
+                failureRate: row.requests ? (row.failure / row.requests) * 100 : 0,
+            }))
+            .sort((a, b) => b.failureRate - a.failureRate || b.failure - a.failure || b.requests - a.requests)
+            .slice(0, 25)
+    }, [filteredEvents])
 
     const tokenPieData = useMemo(() => [
         { name: 'Input', value: summary.tokenBreakdown.input, fill: '#3b82f6' },
@@ -453,6 +496,47 @@ function RequestEventsPanel({ requestEvents = [] }) {
             </div>
 
             <div className="chart-card chart-full">
+                <div className="chart-header">
+                    <h3>Authentication × Model Failure Ratio</h3>
+                </div>
+                <div className="stat-meta" style={{ marginBottom: '12px' }}>
+                    Filtered request events grouped by authentication index and model. Sorted by highest failure rate first.
+                </div>
+                <div className="table-wrapper">
+                    <table className="data-table">
+                        <thead>
+                            <tr>
+                                <th>Auth Index</th>
+                                <th>Model</th>
+                                <th>Requests</th>
+                                <th>Success</th>
+                                <th>Failure</th>
+                                <th>Success Rate</th>
+                                <th>Failure Rate</th>
+                                <th>Tokens</th>
+                                <th>Cost</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {authModelRows.length ? authModelRows.map(row => (
+                                <tr key={`${row.auth}-${row.model}`}>
+                                    <td title={row.auth}>{compactText(row.auth, 36)}</td>
+                                    <td title={row.model}>{compactText(row.model, 48)}</td>
+                                    <td>{formatNumber(row.requests)}</td>
+                                    <td><span className="status-success">{formatNumber(row.success)}</span></td>
+                                    <td><span className={row.failure > 0 ? 'status-failure' : 'status-success'}>{formatNumber(row.failure)}</span></td>
+                                    <td>{row.successRate.toFixed(1)}%</td>
+                                    <td><span className={row.failureRate > 0 ? 'status-failure' : 'status-success'}>{row.failureRate.toFixed(1)}%</span></td>
+                                    <td>{formatNumber(row.tokens)}</td>
+                                    <td>{formatCurrency(row.cost)}</td>
+                                </tr>
+                            )) : <tr><td colSpan="9" className="empty">No authentication/model data</td></tr>}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div className="chart-card chart-full">
                 <div className="chart-header"><h3>Price Settings</h3></div>
                 <div className="stat-meta">
                     Event cost is calculated by the collector from model pricing and persisted as estimated_cost_usd. Unknown models use the collector fallback pricing, so this panel remains read-only in Dashboard.
@@ -464,29 +548,29 @@ function RequestEventsPanel({ requestEvents = [] }) {
                     <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', alignItems: 'center' }}>
                         <h3>Request Events</h3>
                         <div style={{ display: 'flex', gap: '8px' }}>
-                            <button className="terminal-btn" onClick={clearFilters}>Clear Filters</button>
-                            <button className="terminal-btn" onClick={handleExportCsv} disabled={filteredEvents.length === 0}>Export CSV</button>
+                            <button className="events-action-btn" onClick={clearFilters}>Clear Filters</button>
+                            <button className="events-action-btn" onClick={handleExportCsv} disabled={filteredEvents.length === 0}>Export CSV</button>
                         </div>
                     </div>
-                    <div className="terminal-toolbar" style={{ width: '100%', borderBottom: 'none', padding: 0 }}>
+                    <div className="events-filter-toolbar">
                         <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-                            <select className="terminal-search" value={providerFilter} onChange={e => setProviderFilter(e.target.value)} style={{ width: 'auto', minWidth: '150px' }}>
+                            <select className="events-filter-select" value={providerFilter} onChange={e => setProviderFilter(e.target.value)}>
                                 <option value="all">All Providers</option>
                                 {providers.map(p => <option key={p} value={p}>{p}</option>)}
                             </select>
-                            <select className="terminal-search" value={modelFilter} onChange={e => setModelFilter(e.target.value)} style={{ width: 'auto', minWidth: '150px' }}>
+                            <select className="events-filter-select" value={modelFilter} onChange={e => setModelFilter(e.target.value)}>
                                 <option value="all">All Models</option>
                                 {models.map(m => <option key={m} value={m}>{m}</option>)}
                             </select>
-                            <select className="terminal-search" value={sourceFilter} onChange={e => setSourceFilter(e.target.value)} style={{ width: 'auto', minWidth: '150px' }}>
+                            <select className="events-filter-select" value={sourceFilter} onChange={e => setSourceFilter(e.target.value)}>
                                 <option value="all">All Sources</option>
                                 {sources.map(s => <option key={s} value={s}>{s}</option>)}
                             </select>
-                            <select className="terminal-search" value={authFilter} onChange={e => setAuthFilter(e.target.value)} style={{ width: 'auto', minWidth: '150px' }}>
+                            <select className="events-filter-select" value={authFilter} onChange={e => setAuthFilter(e.target.value)}>
                                 <option value="all">All Auth Indexes</option>
                                 {auths.map(a => <option key={a} value={a}>{a}</option>)}
                             </select>
-                            <select className="terminal-search" value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={{ width: 'auto', minWidth: '150px' }}>
+                            <select className="events-filter-select" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
                                 <option value="all">All Statuses</option>
                                 <option value="success">Success</option>
                                 <option value="failure">Failure</option>
@@ -542,9 +626,9 @@ function RequestEventsPanel({ requestEvents = [] }) {
 
                 {filteredEvents.length > PAGE_SIZE && (
                     <div style={{ display: 'flex', justifyContent: 'center', gap: '8px', padding: '16px', borderTop: '1px solid var(--border)' }}>
-                        <button className="terminal-btn" disabled={page === 1} onClick={() => setPage(p => Math.max(1, p - 1))}>Prev</button>
+                        <button className="events-action-btn" disabled={page === 1} onClick={() => setPage(p => Math.max(1, p - 1))}>Prev</button>
                         <span style={{ padding: '4px 8px', color: 'var(--text-dim)' }}>Page {page} of {Math.ceil(filteredEvents.length / PAGE_SIZE)}</span>
-                        <button className="terminal-btn" disabled={page >= Math.ceil(filteredEvents.length / PAGE_SIZE)} onClick={() => setPage(p => Math.min(Math.ceil(filteredEvents.length / PAGE_SIZE), p + 1))}>Next</button>
+                        <button className="events-action-btn" disabled={page >= Math.ceil(filteredEvents.length / PAGE_SIZE)} onClick={() => setPage(p => Math.min(Math.ceil(filteredEvents.length / PAGE_SIZE), p + 1))}>Next</button>
                     </div>
                 )}
             </div>

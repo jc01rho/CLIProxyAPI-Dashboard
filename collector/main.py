@@ -2104,30 +2104,10 @@ def run_full_sync_once():
         _run_management_sync(run_id)
 
     if _should_use_usage_queue():
-        queue_summary = _usage_queue_sync_once()
-        if queue_summary.get("persisted", 0) > 0:
-            _log_sync_event(
-                run_id=run_id,
-                source="collector",
-                category="db",
-                severity="info",
-                title="Usage queue sync ok",
-                message="HTTP usage queue events persisted.",
-                details=queue_summary,
-            )
+        _usage_queue_sync_once()
 
     if _should_use_redis_queue():
-        redis_summary = _redis_queue_sync_once()
-        if redis_summary.get("persisted", 0) > 0:
-            _log_sync_event(
-                run_id=run_id,
-                source="collector",
-                category="db",
-                severity="info",
-                title="Redis queue sync ok",
-                message="Redis queue events persisted.",
-                details=redis_summary,
-            )
+        _redis_queue_sync_once()
 
     duration_ms = int((time.time() - sync_started_at) * 1000)
     _log_sync_event(
@@ -2168,6 +2148,17 @@ def _run_management_sync(run_id: str) -> None:
                     MODEL_USAGE_UPLOAD_INTERVAL_SECONDS,
                 )
                 current_usage = data.get("usage") or {}
+                logger.info(
+                    "Aggregated usage accumulation: syncs=%d, next_upload_in=%ds, interval=%ds, "
+                    "total_requests=%s, success=%s, failure=%s, total_tokens=%s",
+                    _management_deferred_sync_count,
+                    seconds_until_next,
+                    MODEL_USAGE_UPLOAD_INTERVAL_SECONDS,
+                    current_usage.get("total_requests", 0),
+                    current_usage.get("success_count", 0),
+                    current_usage.get("failure_count", 0),
+                    current_usage.get("total_tokens", 0),
+                )
                 _log_sync_event(
                     run_id=run_id,
                     source="collector",
@@ -2213,6 +2204,22 @@ def _run_management_sync(run_id: str) -> None:
         if ok:
             store_summary["deferred_syncs_since_last_upload"] = deferred_syncs
             store_summary["upload_interval_seconds"] = MODEL_USAGE_UPLOAD_INTERVAL_SECONDS
+            logger.info(
+                "Aggregated usage upload ok: deferred_syncs=%d, interval=%ds, "
+                "incremental_requests=%s, incremental_tokens=%s, incremental_cost_usd=%s, "
+                "daily_total_requests=%s, daily_total_tokens=%s, daily_total_cost_usd=%s, "
+                "model_rows_inserted=%s, duration_ms=%s",
+                deferred_syncs,
+                MODEL_USAGE_UPLOAD_INTERVAL_SECONDS,
+                store_summary.get("incremental_requests", 0),
+                store_summary.get("incremental_tokens", 0),
+                store_summary.get("incremental_cost_usd", 0),
+                store_summary.get("daily_total_requests", 0),
+                store_summary.get("daily_total_tokens", 0),
+                store_summary.get("daily_total_cost_usd", 0),
+                store_summary.get("model_rows_inserted", 0),
+                store_summary.get("duration_ms", 0),
+            )
             _log_sync_event(
                 run_id=run_id,
                 source="collector",
@@ -3884,7 +3891,7 @@ def main():
             "interval",
             seconds=REDIS_QUEUE_SYNC_INTERVAL,
             id="redis_queue_sync",
-            next_run_time=datetime.now() + timedelta(seconds=5),
+            next_run_time=datetime.now() + timedelta(seconds=REDIS_QUEUE_SYNC_INTERVAL),
         )
 
     if _should_use_usage_queue():
@@ -3893,7 +3900,7 @@ def main():
             "interval",
             seconds=USAGE_QUEUE_SYNC_INTERVAL,
             id="usage_queue_sync",
-            next_run_time=datetime.now() + timedelta(seconds=5),
+            next_run_time=datetime.now() + timedelta(seconds=USAGE_QUEUE_SYNC_INTERVAL),
         )
 
     scheduler.start()

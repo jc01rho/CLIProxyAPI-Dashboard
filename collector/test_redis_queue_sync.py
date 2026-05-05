@@ -613,6 +613,43 @@ class RedisQueueTransformTests(unittest.TestCase):
             self.module.USAGE_SYNC_MODE = original_mode
             self.module.REDIS_QUEUE_ADDR = original_redis_addr
 
+    def test_run_full_sync_does_not_app_log_request_event_persistence(self):
+        logged_titles = []
+        original_usage_queue = self.module._usage_queue_sync_once
+        original_redis = self.module._redis_queue_sync_once
+        original_log_sync = self.module._log_sync_event
+        original_mode = self.module.USAGE_SYNC_MODE
+        original_redis_addr = self.module.REDIS_QUEUE_ADDR
+        self.module.USAGE_SYNC_MODE = "auto"
+        self.module.REDIS_QUEUE_ADDR = "redis://localhost:6379"
+        self.module.db_client = _DummyDB()
+
+        self.module._usage_queue_sync_once = lambda: {
+            "popped": 1,
+            "parsed": 1,
+            "persisted": 1,
+            "duration_ms": 0,
+            "meta": {},
+        }
+        self.module._redis_queue_sync_once = lambda: {
+            "popped": 1,
+            "parsed": 1,
+            "persisted": 1,
+            "duration_ms": 0,
+        }
+        self.module._log_sync_event = lambda **kw: logged_titles.append(kw.get("title"))
+
+        try:
+            self.module.run_full_sync_once()
+            self.assertNotIn("Usage queue sync ok", logged_titles)
+            self.assertNotIn("Redis queue sync ok", logged_titles)
+        finally:
+            self.module._usage_queue_sync_once = original_usage_queue
+            self.module._redis_queue_sync_once = original_redis
+            self.module._log_sync_event = original_log_sync
+            self.module.USAGE_SYNC_MODE = original_mode
+            self.module.REDIS_QUEUE_ADDR = original_redis_addr
+
     def test_redis_queue_sync_pops_and_persists(self):
         events = []
 

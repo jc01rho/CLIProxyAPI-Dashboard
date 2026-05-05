@@ -550,6 +550,29 @@ class ManagementUploadRateLimitTests(unittest.TestCase):
         self.assertEqual(details["failure_count"], 2)
         self.assertEqual(details["total_tokens"], 345)
 
+    def test_accumulation_snapshot_logs_current_usage_to_stdout(self):
+        self.m.fetch_usage_data = lambda: ({
+            "usage": {
+                "total_requests": 12,
+                "success_count": 10,
+                "failure_count": 2,
+                "total_tokens": 345,
+            }
+        }, {})
+        self.m._log_sync_event = lambda **kw: None
+        self.m._last_management_upload_at = time.time()
+
+        with mock.patch.object(self.m.logger, "info") as info_mock:
+            self.m._run_management_sync("run-008-stdout")
+
+        calls_by_message = {call.args[0]: call.args[1:] for call in info_mock.call_args_list if call.args}
+        message = "Aggregated usage accumulation: syncs=%d, next_upload_in=%ds, interval=%ds, total_requests=%s, success=%s, failure=%s, total_tokens=%s"
+        self.assertIn(message, calls_by_message)
+        args = calls_by_message[message]
+        self.assertEqual(args[0], 1)
+        self.assertGreaterEqual(args[1], self.m.MODEL_USAGE_UPLOAD_INTERVAL_SECONDS - 1)
+        self.assertEqual(args[2:], (self.m.MODEL_USAGE_UPLOAD_INTERVAL_SECONDS, 12, 10, 2, 345))
+
     def test_successful_upload_flushes_buffered_app_logs_once(self):
         flush_calls = []
         summaries = []
@@ -568,6 +591,34 @@ class ManagementUploadRateLimitTests(unittest.TestCase):
         self.assertEqual(len(upload_logs), 1)
         self.assertEqual(upload_logs[0]["details"]["deferred_syncs_since_last_upload"], 2)
         self.assertEqual(upload_logs[0]["details"]["upload_interval_seconds"], self.m.MODEL_USAGE_UPLOAD_INTERVAL_SECONDS)
+
+    def test_successful_upload_logs_aggregated_summary_to_stdout(self):
+        self.m.fetch_usage_data = lambda: ({"usage": {}}, {})
+        self.m.store_usage_data = lambda data, run_id=None: (True, {
+            "incremental_requests": 7,
+            "incremental_tokens": 900,
+            "incremental_cost_usd": 0.0123,
+            "daily_total_requests": 17,
+            "daily_total_tokens": 1900,
+            "daily_total_cost_usd": 0.0456,
+            "model_rows_inserted": 2,
+            "duration_ms": 33,
+        })
+        self.m._compact_model_usage_db = lambda: {"snapshots_deleted": 0, "retained_buckets": 0, "error": False}
+        self.m._flush_app_logs_after_upload_window = lambda: {"buffered": 0, "persisted": 0, "skipped": 0}
+        self.m._log_sync_event = lambda **kw: None
+        self.m._management_deferred_sync_count = 2
+
+        with mock.patch.object(self.m.logger, "info") as info_mock:
+            self.m._run_management_sync("run-009-stdout")
+
+        calls_by_message = {call.args[0]: call.args[1:] for call in info_mock.call_args_list if call.args}
+        message = "Aggregated usage upload ok: deferred_syncs=%d, interval=%ds, incremental_requests=%s, incremental_tokens=%s, incremental_cost_usd=%s, daily_total_requests=%s, daily_total_tokens=%s, daily_total_cost_usd=%s, model_rows_inserted=%s, duration_ms=%s"
+        self.assertIn(message, calls_by_message)
+        self.assertEqual(
+            calls_by_message[message],
+            (2, self.m.MODEL_USAGE_UPLOAD_INTERVAL_SECONDS, 7, 900, 0.0123, 17, 1900, 0.0456, 2, 33),
+        )
 
     def test_app_log_events_are_buffered_until_flush(self):
         calls = []
@@ -673,6 +724,37 @@ class MainSchedulerTests(unittest.TestCase):
     def test_queue_sync_interval_defaults_are_one_minute(self):
         self.assertEqual(self.m.USAGE_QUEUE_SYNC_INTERVAL, 60)
         self.assertEqual(self.m.REDIS_QUEUE_SYNC_INTERVAL, 60)
+
+    def test_queue_sync_jobs_start_after_one_interval(self):
+        serve_calls = []
+        fake_db = object()
+
+        self.m.init_db = lambda: fake_db
+        self.m.db_client = fake_db
+        self.m.flask_app = self.m.Flask(__name__)
+        self.m._cleanup_old_app_logs = lambda: 0
+        self.m._run_startup_cleanup = lambda: {}
+        self.m.run_full_sync_once = lambda: None
+        self.m.sync_credential_stats = lambda *args, **kwargs: None
+        self.m.serve = lambda *args, **kwargs: serve_calls.append(True)
+        original_mode = self.m.USAGE_SYNC_MODE
+        original_redis_addr = self.m.REDIS_QUEUE_ADDR
+        self.m.USAGE_SYNC_MODE = "auto"
+        self.m.REDIS_QUEUE_ADDR = "redis://localhost:6379"
+
+        try:
+            self.m.main()
+        finally:
+            self.m.USAGE_SYNC_MODE = original_mode
+            self.m.REDIS_QUEUE_ADDR = original_redis_addr
+
+        scheduler = _RecordedScheduler.instances[-1]
+        jobs_by_id = {job["kwargs"].get("id"): job for job in scheduler.jobs}
+
+        usage_delay = jobs_by_id["usage_queue_sync"]["kwargs"]["next_run_time"] - self.m.datetime.now()
+        redis_delay = jobs_by_id["redis_queue_sync"]["kwargs"]["next_run_time"] - self.m.datetime.now()
+        self.assertGreaterEqual(usage_delay.total_seconds(), self.m.USAGE_QUEUE_SYNC_INTERVAL - 1)
+        self.assertGreaterEqual(redis_delay.total_seconds(), self.m.REDIS_QUEUE_SYNC_INTERVAL - 1)
 
     def test_model_usage_compaction_interval_default(self):
         self.assertEqual(self.m.MODEL_USAGE_COMPACTION_INTERVAL_MINUTES, 60)

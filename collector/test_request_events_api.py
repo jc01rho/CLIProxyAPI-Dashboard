@@ -638,6 +638,66 @@ class AggregateRequestEventsPythonTests(unittest.TestCase):
         self.assertEqual(calls[0]["limit"], 10000)
         self.assertEqual(len(calls), 1)
         self.assertEqual(buckets[0]["request_count"], 3)
+        self.assertEqual(buckets[0]["models"], {})
+
+    def test_aggregate_default_query_preserves_breakdown_maps(self):
+        class _TrackingTable(_DummyTable):
+            def __init__(self):
+                self._filters = {}
+            def select(self, *a, **kw):
+                return self
+            def gte(self, *a, **kw):
+                return self
+            def lt(self, *a, **kw):
+                return self
+            def eq(self, col, val):
+                self._filters[col] = val
+                return self
+            def limit(self, value):
+                return self
+            def execute(self):
+                return types.SimpleNamespace(data=[{
+                    "occurred_at": "2026-05-01T10:00:00+00:00",
+                    "failed": False,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "cached_tokens": 0,
+                    "total_tokens": 0,
+                    "estimated_cost_usd": 0,
+                    "latency_ms": 0,
+                    "api_endpoint": "__request_events_aggregate__",
+                    "raw_detail": {
+                        "aggregate": "request_events_upload_window",
+                        "day": "2026-05-01",
+                        "request_count": 2,
+                        "failed_count": 1,
+                        "total_tokens": 30,
+                        "models": {"gpt-4o": {"requests": 2, "success": 1, "failure": 1, "tokens": 30, "cost": 0.5}},
+                        "providers": {"openai": {"requests": 2, "success": 1, "failure": 1, "tokens": 30, "cost": 0.5}},
+                        "auth_models": {"auth-1\u001fgpt-4o": {"auth": "auth-1", "model": "gpt-4o", "requests": 2, "success": 1, "failure": 1, "tokens": 30, "cost": 0.5}},
+                        "source_models": {"source-1\u001fgpt-4o": {"source": "source-1", "auth": "auth-1", "provider": "openai", "model": "gpt-4o", "requests": 2, "success": 1, "failure": 1, "tokens": 30, "cost": 0.5}},
+                        "endpoints": {"/v1/chat": {"requests": 2, "success": 1, "failure": 1, "tokens": 30, "cost": 0.5, "models": {"gpt-4o": {"requests": 2, "success": 1, "failure": 1, "tokens": 30, "cost": 0.5}}}},
+                    },
+                }])
+
+        class _DB:
+            def table(self, name):
+                return _TrackingTable()
+
+        from datetime import datetime, timezone
+        self.module.db_client = _DB()
+        buckets = self.module._aggregate_request_events_python(
+            datetime(2026, 5, 1, tzinfo=timezone.utc),
+            datetime(2026, 5, 2, tzinfo=timezone.utc),
+            "day",
+            {},
+        )
+        self.assertEqual(buckets[0]["models"]["gpt-4o"]["requests"], 2)
+        self.assertEqual(buckets[0]["providers"]["openai"]["tokens"], 30)
+        self.assertEqual(buckets[0]["auth_models"]["auth-1\u001fgpt-4o"]["auth"], "auth-1")
+        self.assertEqual(buckets[0]["source_models"]["source-1\u001fgpt-4o"]["provider"], "openai")
+        self.assertEqual(buckets[0]["endpoints"]["/v1/chat"]["models"]["gpt-4o"]["requests"], 2)
 
     def test_aggregate_default_query_raw_fallback_is_limited(self):
         calls = []

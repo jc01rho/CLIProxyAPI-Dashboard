@@ -625,11 +625,11 @@ const requestEventAggregateRows = (aggregatePayload) => {
                     latency_sum_ms: 0,
                     latency_count: 0,
                     avg_latency_ms: Number(bucket.avg_latency_ms) || 0,
-                    models: {},
-                    auth_models: {},
-                    source_models: {},
-                    providers: {},
-                    endpoints: {},
+                    models: bucket.models || {},
+                    auth_models: bucket.auth_models || {},
+                    source_models: bucket.source_models || {},
+                    providers: bucket.providers || {},
+                    endpoints: bucket.endpoints || {},
                 },
             }
         })
@@ -664,7 +664,7 @@ const requestEventAggregateFallbackRows = (aggregatePayload) => {
                 success_count: Math.max(0, totalRequests - failedCount),
                 failure_count: failedCount,
                 estimated_cost_usd: Number(bucket.estimated_cost_usd) || 0,
-                models: {},
+                models: bucket.models || {},
             }
         })
         .filter(Boolean)

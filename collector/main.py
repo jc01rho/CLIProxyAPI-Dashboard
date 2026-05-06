@@ -741,6 +741,10 @@ _REQUEST_EVENT_BUCKET_FIELDS = (
     "input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens",
 )
 
+_REQUEST_EVENT_BREAKDOWN_KEYS = (
+    "models", "auth_models", "source_models", "providers", "endpoints",
+)
+
 
 def _empty_request_event_bucket(**labels: Any) -> Dict[str, Any]:
     bucket = {
@@ -756,6 +760,43 @@ def _empty_request_event_bucket(**labels: Any) -> Dict[str, Any]:
     }
     bucket.update(labels)
     return bucket
+
+
+def _merge_request_event_breakdown_map(target: Dict[str, Any], bucket_key: str, source: Any) -> None:
+    if not isinstance(source, dict):
+        return
+    for name, data in source.items():
+        if not isinstance(data, dict):
+            continue
+        if bucket_key == "auth_models":
+            item = target.setdefault(
+                name,
+                _empty_request_event_bucket(auth=data.get("auth"), model=data.get("model")),
+            )
+        elif bucket_key == "source_models":
+            item = target.setdefault(
+                name,
+                _empty_request_event_bucket(
+                    source=data.get("source"),
+                    auth=data.get("auth"),
+                    provider=data.get("provider"),
+                    model=data.get("model"),
+                ),
+            )
+        else:
+            item = target.setdefault(name, _empty_request_event_bucket())
+        _merge_numeric_bucket(item, data, _REQUEST_EVENT_BUCKET_FIELDS)
+        if bucket_key == "endpoints" and isinstance(data.get("models"), dict):
+            endpoint_models = item.setdefault("models", {})
+            for model_name, model_data in data.get("models", {}).items():
+                model_target = endpoint_models.setdefault(model_name, _empty_request_event_bucket())
+                _merge_numeric_bucket(model_target, model_data, _REQUEST_EVENT_BUCKET_FIELDS)
+
+
+def _merge_request_event_breakdowns(target: Dict[str, Any], detail: Dict[str, Any]) -> None:
+    for bucket_key in _REQUEST_EVENT_BREAKDOWN_KEYS:
+        bucket = target.setdefault(bucket_key, {})
+        _merge_request_event_breakdown_map(bucket, bucket_key, detail.get(bucket_key))
 
 
 def _slim_raw_data(raw_data: Any) -> Any:
@@ -1358,20 +1399,7 @@ def _compact_request_events_daily() -> Dict[str, int]:
                 agg["estimated_cost_usd"] += float(detail.get("estimated_cost_usd") or 0)
             except Exception:
                 pass
-            for bucket_key in ("models", "auth_models", "source_models", "providers", "endpoints"):
-                for name, data in (detail.get(bucket_key) or {}).items():
-                    if bucket_key == "auth_models":
-                        target = agg[bucket_key].setdefault(name, _empty_request_event_bucket(auth=data.get("auth"), model=data.get("model")))
-                    elif bucket_key == "source_models":
-                        target = agg[bucket_key].setdefault(name, _empty_request_event_bucket(source=data.get("source"), auth=data.get("auth"), provider=data.get("provider"), model=data.get("model")))
-                    else:
-                        target = agg[bucket_key].setdefault(name, _empty_request_event_bucket())
-                    _merge_numeric_bucket(target, data, _REQUEST_EVENT_BUCKET_FIELDS)
-                    if bucket_key == "endpoints" and isinstance(data.get("models"), dict):
-                        endpoint_models = target.setdefault("models", {})
-                        for model_name, model_data in data.get("models", {}).items():
-                            model_target = endpoint_models.setdefault(model_name, _empty_request_event_bucket())
-                            _merge_numeric_bucket(model_target, model_data, _REQUEST_EVENT_BUCKET_FIELDS)
+            _merge_request_event_breakdowns(agg, detail)
             continue
 
         agg["request_count"] += 1
@@ -1468,21 +1496,9 @@ def _compact_request_events_daily() -> Dict[str, int]:
                 agg["estimated_cost_usd"] = float(existing.get("estimated_cost_usd") or 0) + float(agg.get("estimated_cost_usd") or 0)
             except Exception:
                 pass
-            for bucket_key in ("models", "auth_models", "source_models", "providers", "endpoints"):
+            for bucket_key in _REQUEST_EVENT_BREAKDOWN_KEYS:
                 existing_bucket = existing.get(bucket_key) if isinstance(existing.get(bucket_key), dict) else {}
-                for name, data in existing_bucket.items():
-                    if bucket_key == "auth_models":
-                        target = agg[bucket_key].setdefault(name, _empty_request_event_bucket(auth=data.get("auth"), model=data.get("model")))
-                    elif bucket_key == "source_models":
-                        target = agg[bucket_key].setdefault(name, _empty_request_event_bucket(source=data.get("source"), auth=data.get("auth"), provider=data.get("provider"), model=data.get("model")))
-                    else:
-                        target = agg[bucket_key].setdefault(name, _empty_request_event_bucket())
-                    _merge_numeric_bucket(target, data, _REQUEST_EVENT_BUCKET_FIELDS)
-                    if bucket_key == "endpoints" and isinstance(data.get("models"), dict):
-                        endpoint_models = target.setdefault("models", {})
-                        for model_name, model_data in data.get("models", {}).items():
-                            model_target = endpoint_models.setdefault(model_name, _empty_request_event_bucket())
-                            _merge_numeric_bucket(model_target, model_data, _REQUEST_EVENT_BUCKET_FIELDS)
+                _merge_request_event_breakdown_map(agg[bucket_key], bucket_key, existing_bucket)
         _append_daily_aggregate_included_ids(agg, existing, day_delete_ids.get(day_key, []))
         agg["estimated_cost_usd"] = round(float(agg["estimated_cost_usd"] or 0), 6)
         agg["avg_latency_ms"] = round(agg["latency_sum_ms"] / agg["latency_count"], 2) if agg["latency_count"] else 0
@@ -2279,6 +2295,65 @@ def _aggregate_request_events_local(
         db_client._pool.putconn(conn)
 
 
+def _merge_local_request_event_aggregate_breakdowns(
+    buckets: List[Dict[str, Any]],
+    from_dt: datetime,
+    to_dt: datetime,
+    granularity: str,
+    filters: Dict[str, Any],
+) -> None:
+    if filters or not buckets:
+        return
+    import psycopg2.extras
+
+    bucket_map: Dict[str, Dict[str, Any]] = {}
+    for bucket in buckets:
+        bucket_value = bucket.get("bucket")
+        if hasattr(bucket_value, "isoformat"):
+            bucket_key = bucket_value.astimezone(timezone.utc).isoformat() if getattr(bucket_value, "tzinfo", None) else bucket_value.replace(tzinfo=timezone.utc).isoformat()
+        else:
+            bucket_key = str(bucket_value or "")
+        if bucket_key:
+            bucket_map[bucket_key] = bucket
+
+    conn = db_client._pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT occurred_at, raw_detail FROM request_events "
+                "WHERE occurred_at >= %s AND occurred_at < %s "
+                "AND api_endpoint = '__request_events_aggregate__' "
+                "AND raw_detail->>'aggregate' IN ('request_events_upload_window', 'daily_request_events') "
+                "LIMIT 10000",
+                (from_dt, to_dt),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        db_client._pool.putconn(conn)
+
+    for row in rows:
+        detail = row.get("raw_detail") if isinstance(row.get("raw_detail"), dict) else {}
+        occurred_at = _parse_iso_datetime(row.get("occurred_at"))
+        if not occurred_at:
+            continue
+        if granularity == "day" and isinstance(detail.get("day"), str):
+            bucket_key = f"{detail['day']}T00:00:00+00:00"
+        elif granularity == "hour":
+            bucket_key = occurred_at.strftime("%Y-%m-%dT%H:00:00+00:00")
+        elif granularity == "week":
+            week_start = occurred_at - timedelta(days=occurred_at.weekday())
+            bucket_key = week_start.strftime("%Y-%m-%dT00:00:00+00:00")
+        else:
+            bucket_key = occurred_at.strftime("%Y-%m-%dT00:00:00+00:00")
+        bucket = bucket_map.get(bucket_key)
+        if not bucket:
+            continue
+        _merge_request_event_breakdowns(bucket, detail)
+
+
 def _aggregate_request_events_python(
     from_dt: datetime,
     to_dt: datetime,
@@ -2324,6 +2399,8 @@ def _aggregate_request_events_python(
         "input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0,
         "cached_tokens": 0, "total_tokens": 0, "estimated_cost_usd": 0.0,
         "_latency_sum": 0, "_latency_count": 0,
+        "models": {}, "auth_models": {}, "source_models": {},
+        "providers": {}, "endpoints": {},
     })
 
     for row in rows:
@@ -2361,6 +2438,7 @@ def _aggregate_request_events_python(
             if latency_count > 0:
                 b["_latency_sum"] += _safe_int(detail.get("latency_sum_ms"), 0)
                 b["_latency_count"] += latency_count
+            _merge_request_event_breakdowns(b, detail)
             continue
 
         b["request_count"] += 1
@@ -2395,6 +2473,11 @@ def _aggregate_request_events_python(
             "total_tokens": b["total_tokens"],
             "estimated_cost_usd": round(b["estimated_cost_usd"], 6),
             "avg_latency_ms": avg_latency,
+            "models": b.get("models", {}),
+            "auth_models": b.get("auth_models", {}),
+            "source_models": b.get("source_models", {}),
+            "providers": b.get("providers", {}),
+            "endpoints": b.get("endpoints", {}),
         })
     return result
 
@@ -2554,12 +2637,16 @@ def request_events_aggregate():
     try:
         if hasattr(db_client, "_pool"):
             buckets = _aggregate_request_events_local(from_dt, to_dt, granularity, filters)
+            _merge_local_request_event_aggregate_breakdowns(buckets, from_dt, to_dt, granularity, filters)
             for b in buckets:
                 for k in ("bucket", "request_count", "failed_count", "input_tokens",
                           "output_tokens", "reasoning_tokens", "cached_tokens",
                           "total_tokens", "estimated_cost_usd", "avg_latency_ms"):
                     if k not in b:
                         b[k] = 0
+                for k in _REQUEST_EVENT_BREAKDOWN_KEYS:
+                    if not isinstance(b.get(k), dict):
+                        b[k] = {}
                 if hasattr(b.get("bucket"), "isoformat"):
                     b["bucket"] = b["bucket"].isoformat()
                 b["estimated_cost_usd"] = round(float(b["estimated_cost_usd"] or 0), 6)

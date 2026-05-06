@@ -115,7 +115,12 @@ const inferProvider = (cred) => {
     const source = (cred?.source || '').toLowerCase()
     const email = (cred?.email || '').toLowerCase()
     const label = (cred?.label || '').toLowerCase()
-    const haystack = `${source} ${email} ${label}`
+    const apiKeyName = (cred?.api_key_name || '').toLowerCase()
+    const displayName = (cred?.display_name || '').toLowerCase()
+    const credentialsUsed = Array.isArray(cred?.credentials_used)
+        ? cred.credentials_used.join(' ').toLowerCase()
+        : ''
+    const haystack = `${source} ${email} ${label} ${apiKeyName} ${displayName} ${credentialsUsed}`
     const configMatch = source.match(/^config:([^\[\]\s]+)\[/)
 
     if (configMatch) {
@@ -333,6 +338,7 @@ const buildRequestEventUsageFallback = (events, includeDay = () => true) => {
             apiKeyMap[auth] = {
                 api_key_name: label,
                 display_name: label,
+                provider,
                 total_requests: 0,
                 total_tokens: 0,
                 success_count: 0,
@@ -364,6 +370,7 @@ const buildRequestEventUsageFallback = (events, includeDay = () => true) => {
             if (!row.keys[auth]) {
                 row.keys[auth] = {
                     api_key_name: label,
+                    provider,
                     total_requests: 0,
                     total_tokens: 0,
                     total_cost: 0,
@@ -501,6 +508,7 @@ const buildRequestEventUsageFallback = (events, includeDay = () => true) => {
     const apiKeys = Object.values(apiKeyMap)
         .map(key => ({
             ...key,
+            provider: inferProvider(key),
             success_rate: key.total_requests > 0 ? Math.round((key.success_count / key.total_requests) * 1000) / 10 : 0,
         }))
         .sort((a, b) => b.total_requests - a.total_requests)
@@ -953,10 +961,22 @@ function App() {
                             }
                         }
 
+                        const providerByApiKey = new Map()
+                        for (const c of (row.credentials || [])) {
+                            const inferred = inferProvider(c)
+                            for (const apiKeyName of (c.api_keys || [])) {
+                                const keyName = apiKeyName || 'unknown'
+                                if (inferred && inferred !== 'unknown' && !providerByApiKey.has(keyName)) {
+                                    providerByApiKey.set(keyName, inferred)
+                                }
+                            }
+                        }
+
                         for (const a of (row.api_keys || [])) {
                             const key = a.api_key_name || ''
+                            const provider = a.provider || providerByApiKey.get(key) || inferProvider(a)
                             if (!akMap[key]) {
-                                akMap[key] = { ...a, models: { ...(a.models || {}) } }
+                                akMap[key] = { ...a, provider, models: { ...(a.models || {}) } }
                             } else {
                                 const ex = akMap[key]
                                 for (const f of AK_NUM) {
@@ -972,6 +992,7 @@ function App() {
                                     }
                                 }
                                 ex.credentials_used = [...new Set([...(ex.credentials_used || []), ...(a.credentials_used || [])])].sort()
+                                if (provider && provider !== 'unknown') ex.provider = provider
                             }
                         }
                     }
@@ -986,6 +1007,7 @@ function App() {
 
                     const aggregatedAKs = Object.values(akMap).map(a => ({
                         ...a,
+                        provider: inferProvider(a),
                         success_rate: a.total_requests > 0
                             ? Math.round((a.success_count / a.total_requests) * 1000) / 10
                             : 0

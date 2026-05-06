@@ -69,6 +69,20 @@ const getProviderSubtitle = (provider, cred) => {
   return getProviderDisplay(provider).name
 }
 
+const ProviderBadge = ({ provider }) => {
+  const normalizedProvider = provider || 'unknown'
+  const display = getProviderDisplay(normalizedProvider).name
+  return (
+    <span
+      className="cred-provider-badge"
+      style={{ background: getProviderHex(normalizedProvider) }}
+      title={display}
+    >
+      {display}
+    </span>
+  )
+}
+
 const shortenApiKeyLabel = (key) => {
   const v = String(key || '')
   if (v.length <= 16) return v
@@ -581,6 +595,7 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
         rows.push({
           api_key_name: ak.api_key_name || 'unknown',
           display_name: ak.display_name || ak.api_key_name,
+          provider: getProviderSubtitle(ak.provider, ak),
           model: modelName,
           requests: req,
           success: succ,
@@ -937,6 +952,7 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
                 <thead>
                   <tr>
                     <th onClick={() => handleFailureRateSort('api_key_name')} className="sortable">API Key <FailureRateSortIcon column="api_key_name" /></th>
+                    <th onClick={() => handleFailureRateSort('provider')} className="sortable">Provider <FailureRateSortIcon column="provider" /></th>
                     <th onClick={() => handleFailureRateSort('model')} className="sortable">Model <FailureRateSortIcon column="model" /></th>
                     <th onClick={() => handleFailureRateSort('requests')} className="sortable">Requests <FailureRateSortIcon column="requests" /></th>
                     <th onClick={() => handleFailureRateSort('failure_rate')} className="sortable">Fail Rate <FailureRateSortIcon column="failure_rate" /></th>
@@ -949,6 +965,7 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
                   {failureRateRows.map((row) => (
                     <tr key={`${row.api_key_name}-${row.model}`}>
                       <td>{shortenApiKeyLabel(row.api_key_name)}</td>
+                      <td><ProviderBadge provider={row.provider} /></td>
                       <td>{row.model}</td>
                       <td>{formatNumber(row.requests)}</td>
                       <td style={{ color: getSuccessColor(row.success_rate) }}>{row.failure_rate.toFixed(1)}%</td>
@@ -1183,6 +1200,7 @@ function ApiKeysTable({ items, onSort, SortIcon, expandedRow, setExpandedRow, on
         <thead>
           <tr>
             <th onClick={() => onSort('api_key_name')} className="sortable">API Key <SortIcon column="api_key_name" /></th>
+            <th onClick={() => onSort('provider')} className="sortable">Provider <SortIcon column="provider" /></th>
             <th onClick={() => onSort('total_requests')} className="sortable">Requests <SortIcon column="total_requests" /></th>
             <th onClick={() => onSort('success_rate')} className="sortable">Success Rate <SortIcon column="success_rate" /></th>
             <th onClick={() => onSort('failure_count')} className="sortable">Failed <SortIcon column="failure_count" /></th>
@@ -1202,6 +1220,7 @@ function ApiKeysTable({ items, onSort, SortIcon, expandedRow, setExpandedRow, on
                 onClick={() => onRowClick ? onRowClick(ak, 'api_key') : setExpandedRow(isExpanded ? null : ak.api_key_name)}
               >
                 <td><span className="cred-apikey-badge" title={ak.api_key_name}>{apiKeyDisplayName}</span></td>
+                <td><ProviderBadge provider={getProviderSubtitle(ak.provider, ak)} /></td>
                 <td className="cred-mono">{formatNumber(ak.total_requests)}</td>
                 <td>
                   <div className="cred-health-cell">

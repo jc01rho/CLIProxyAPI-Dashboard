@@ -180,6 +180,32 @@ const normalizeUsageName = (value, fallback = 'Unknown') => {
     return String(value)
 }
 
+const endpointLikeSourceNames = new Set(['completions', 'messages', 'chat', 'responses', 'embeddings'])
+
+const isEndpointLikeSourceName = (value) => {
+    const normalized = String(value || '').trim().toLowerCase().replace(/^\/+|\/+$/g, '')
+    if (!normalized) return false
+    const tail = normalized.split('/').filter(Boolean).pop() || normalized
+    return endpointLikeSourceNames.has(tail)
+}
+
+const getPlusApiKeyLabelFromUsage = (data = {}, auth = 'Unknown') => {
+    const rawDetail = data.raw_detail && typeof data.raw_detail === 'object' ? data.raw_detail : {}
+    const candidates = [
+        rawDetail.api_key,
+        rawDetail.api_key_redacted,
+        rawDetail.source_redacted,
+        data.api_key,
+        data.api_key_name,
+        data.source,
+    ]
+    for (const candidate of candidates) {
+        const label = normalizeUsageName(candidate, '')
+        if (label && !isEndpointLikeSourceName(label)) return label
+    }
+    return auth === 'Unknown' ? 'Unknown API key' : `Auth ${auth}`
+}
+
 const emptyModelStats = () => ({
     requests: 0,
     success: 0,
@@ -291,7 +317,7 @@ const buildRequestEventUsageFallback = (events, includeDay = () => true, options
     const addCredentialStats = (authName, modelName, data = {}, day, hour) => {
         const auth = normalizeUsageName(authName)
         const source = normalizeUsageName(data.source, '')
-        const label = source || (auth === 'Unknown' ? 'Unknown auth' : `Auth ${auth}`)
+        const label = getPlusApiKeyLabelFromUsage(data, auth)
         const provider = normalizeUsageName(data.provider, 'request-events')
         const requests = Number(data.requests ?? data.request_count) || 0
         if (requests <= 0) return
@@ -314,6 +340,10 @@ const buildRequestEventUsageFallback = (events, includeDay = () => true, options
             output_tokens: Number(data.output_tokens) || 0,
             reasoning_tokens: Number(data.reasoning_tokens) || 0,
             cached_tokens: Number(data.cached_tokens) || 0,
+            raw_detail: data.raw_detail,
+            api_key: data.api_key,
+            api_key_name: data.api_key_name,
+            source,
         }
 
         if (!credentialMap[auth]) {
@@ -449,7 +479,7 @@ const buildRequestEventUsageFallback = (events, includeDay = () => true, options
                 ? Object.values(detail.source_models || {})
                 : Object.values(detail.auth_models || {})
             for (const row of credentialRows) {
-                addCredentialStats(row.auth || row.source, row.model, row, day, hour)
+                addCredentialStats(row.auth || row.source, row.model, { ...row, raw_detail: detail }, day, hour)
             }
             continue
         }
@@ -469,6 +499,7 @@ const buildRequestEventUsageFallback = (events, includeDay = () => true, options
             reasoning_tokens: Number(ev.reasoning_tokens) || 0,
             cached_tokens: Number(ev.cached_tokens) || 0,
             provider: normalizeUsageName(ev.provider, 'request-events'),
+            raw_detail: ev.raw_detail,
         }
         daily.total_requests += 1
         daily.success_count += row.success

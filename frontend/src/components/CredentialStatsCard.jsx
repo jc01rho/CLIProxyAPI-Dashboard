@@ -1210,7 +1210,6 @@ function ApiKeysTable({ items, onSort, SortIcon, expandedRow, setExpandedRow, on
             <th onClick={() => onSort('failure_count')} className="sortable">Failed <SortIcon column="failure_count" /></th>
             <th onClick={() => onSort('total_tokens')} className="sortable">Tokens <SortIcon column="total_tokens" /></th>
             <th onClick={() => onSort('estimated_cost_usd')} className="sortable">Cost <SortIcon column="estimated_cost_usd" /></th>
-            <th>Credentials Used</th>
           </tr>
         </thead>
         <tbody>
@@ -1235,7 +1234,6 @@ function ApiKeysTable({ items, onSort, SortIcon, expandedRow, setExpandedRow, on
                 <td className="cred-mono" style={{ color: ak.failure_count > 0 ? '#ef4444' : undefined }}>{ak.failure_count || 0}</td>
                 <td className="cred-mono">{formatNumber(ak.total_tokens)}</td>
                 <td className="cred-mono">{formatCost(ak.estimated_cost_usd || 0)}</td>
-                <td className="cred-mono cred-center">{ak.credentials_used?.length || 0}</td>
               </tr>
             )
           })}

@@ -559,6 +559,76 @@ const fetchRequestEventRows = async (startTime, endTime) => {
     }
 }
 
+const fetchRequestEventAggregate = async (startTime, endTime, granularity = 'day') => {
+    if (!startTime) return null
+    try {
+        const url = new URL(`${COLLECTOR_BASE}/request_events/aggregate`, window.location.origin)
+        url.searchParams.set('from', startTime)
+        url.searchParams.set('granularity', granularity)
+        if (endTime) url.searchParams.set('to', endTime)
+        const response = await fetch(url.toString(), {
+            credentials: 'include',
+            headers: { Accept: 'application/json' },
+        })
+        const text = await response.text()
+        const payload = text ? JSON.parse(text) : null
+        if (!response.ok) {
+            throw new Error(payload?.message || payload?.error || `Request events aggregate failed: ${response.status}`)
+        }
+        return payload
+    } catch (error) {
+        console.debug('request_events aggregate not available for dashboard fallback:', error?.message || error)
+        return null
+    }
+}
+
+const requestEventAggregateFallbackRows = (aggregatePayload) => {
+    return (aggregatePayload?.buckets || [])
+        .map(bucket => {
+            const bucketValue = bucket.bucket || bucket.stat_date
+            if (!bucketValue) return null
+            const parsed = new Date(bucketValue)
+            const statDate = Number.isNaN(parsed.getTime())
+                ? String(bucketValue).slice(0, 10)
+                : parsed.toLocaleDateString('en-CA')
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(statDate)) return null
+            const totalRequests = Number(bucket.request_count) || 0
+            const failedCount = Number(bucket.failed_count) || 0
+            return {
+                stat_date: statDate,
+                total_requests: totalRequests,
+                total_tokens: Number(bucket.total_tokens) || 0,
+                input_tokens: Number(bucket.input_tokens) || 0,
+                output_tokens: Number(bucket.output_tokens) || 0,
+                reasoning_tokens: Number(bucket.reasoning_tokens) || 0,
+                cached_tokens: Number(bucket.cached_tokens) || 0,
+                success_count: Math.max(0, totalRequests - failedCount),
+                failure_count: failedCount,
+                estimated_cost_usd: Number(bucket.estimated_cost_usd) || 0,
+                models: {},
+            }
+        })
+        .filter(Boolean)
+}
+
+const mergeRequestEventFallbackRows = (baseFallback, aggregatePayload) => {
+    const aggregateRows = requestEventAggregateFallbackRows(aggregatePayload)
+    if (aggregateRows.length === 0) return baseFallback
+    const dailyMap = new Map(baseFallback.dailyRows.map(row => [row.stat_date, { ...row }]))
+    for (const row of aggregateRows) {
+        const existing = dailyMap.get(row.stat_date)
+        if (!existing || (Number(existing.total_requests) || 0) <= 0) {
+            dailyMap.set(row.stat_date, row)
+        }
+    }
+    const dailyRows = Array.from(dailyMap.values()).sort((a, b) => a.stat_date.localeCompare(b.stat_date))
+    return {
+        ...baseFallback,
+        dailyRows,
+        dailyByDate: new Map(dailyRows.map(row => [row.stat_date, row])),
+    }
+}
+
 // Helper to get date boundaries based on range ID
 // Uses local timezone for date display, converts to UTC for timestamp queries
 const getDateBoundaries = (rangeId, customRange) => {
@@ -1227,8 +1297,14 @@ function App() {
 
             const { startTime, endTime, startDate, endDate } = getDateBoundaries(rangeId, customRange)
 
-            const requestEventsData = await fetchRequestEventRows(startTime, endTime)
-            const requestEventFallback = buildRequestEventUsageFallback(requestEventsData || [])
+            const [requestEventsData, requestEventsAggregate] = await Promise.all([
+                fetchRequestEventRows(startTime, endTime),
+                fetchRequestEventAggregate(startTime, endTime, 'day'),
+            ])
+            const requestEventFallback = mergeRequestEventFallbackRows(
+                buildRequestEventUsageFallback(requestEventsData || []),
+                requestEventsAggregate,
+            )
 
             const latestSnapshots = await selectRows('usage_snapshots', {
                 select: '*',

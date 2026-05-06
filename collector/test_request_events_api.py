@@ -359,6 +359,53 @@ class AggregateRequestEventsPythonTests(unittest.TestCase):
         self.assertEqual(day1["failed_count"], 1)
         self.assertEqual(day1["total_tokens"], 225)
 
+    def test_aggregate_counts_request_event_window_rows_by_raw_detail(self):
+        rows = [
+            {
+                "occurred_at": "2026-05-01T10:00:00+00:00",
+                "failed": False,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "cached_tokens": 0,
+                "total_tokens": 0,
+                "estimated_cost_usd": 0,
+                "latency_ms": 0,
+                "model_name": "__request_events_aggregate__",
+                "provider": "__request_events_aggregate__",
+                "api_endpoint": "__request_events_aggregate__",
+                "raw_detail": {
+                    "aggregate": "request_events_upload_window",
+                    "day": "2026-05-01",
+                    "request_count": 5,
+                    "failed_count": 2,
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "reasoning_tokens": 10,
+                    "cached_tokens": 3,
+                    "total_tokens": 160,
+                    "estimated_cost_usd": 0.25,
+                    "latency_sum_ms": 1200,
+                    "latency_count": 5,
+                },
+            }
+        ]
+        from datetime import datetime, timezone
+        from_dt = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        to_dt = datetime(2026, 5, 2, tzinfo=timezone.utc)
+        self.module.db_client = self._make_db_with_rows(rows)
+        buckets = self.module._aggregate_request_events_python(from_dt, to_dt, "day", {})
+        self.assertEqual(len(buckets), 1)
+        self.assertEqual(buckets[0]["request_count"], 5)
+        self.assertEqual(buckets[0]["failed_count"], 2)
+        self.assertEqual(buckets[0]["input_tokens"], 100)
+        self.assertEqual(buckets[0]["output_tokens"], 50)
+        self.assertEqual(buckets[0]["reasoning_tokens"], 10)
+        self.assertEqual(buckets[0]["cached_tokens"], 3)
+        self.assertEqual(buckets[0]["total_tokens"], 160)
+        self.assertEqual(buckets[0]["estimated_cost_usd"], 0.25)
+        self.assertEqual(buckets[0]["avg_latency_ms"], 240)
+
     def test_aggregate_groups_by_hour(self):
         rows = [
             {

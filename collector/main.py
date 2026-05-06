@@ -2090,25 +2090,78 @@ def _aggregate_request_events_local(
     for col, val in filters.items():
         where_parts.append(f'"{col}" = %s')
         params.append(val)
-    where_sql = " AND ".join(where_parts)
+    raw_filters = [part for part in where_parts]
+    raw_filters.append(
+        "NOT (api_endpoint = '__request_events_aggregate__' "
+        "AND raw_detail->>'aggregate' IN ('request_events_upload_window', 'daily_request_events'))"
+    )
+    raw_where_sql = " AND ".join(raw_filters)
+    bucket_expr = f"date_trunc('{granularity}', occurred_at)"
+    raw_sql = (
+        f" SELECT {bucket_expr} AS bucket,"
+        " COUNT(*)::bigint AS request_count,"
+        " SUM(CASE WHEN failed THEN 1 ELSE 0 END)::bigint AS failed_count,"
+        " SUM(input_tokens)::bigint AS input_tokens,"
+        " SUM(output_tokens)::bigint AS output_tokens,"
+        " SUM(reasoning_tokens)::bigint AS reasoning_tokens,"
+        " SUM(cached_tokens)::bigint AS cached_tokens,"
+        " SUM(total_tokens)::bigint AS total_tokens,"
+        " SUM(estimated_cost_usd)::double precision AS estimated_cost_usd,"
+        " SUM(latency_ms)::bigint AS latency_sum_ms,"
+        " COUNT(NULLIF(latency_ms, 0))::bigint AS latency_count"
+        f" FROM request_events WHERE {raw_where_sql} GROUP BY 1"
+    )
+    query_params = list(params)
+
+    if filters:
+        combined_sql = raw_sql
+    else:
+        aggregate_where_sql = (
+            "occurred_at >= %s AND occurred_at < %s "
+            "AND api_endpoint = '__request_events_aggregate__' "
+            "AND raw_detail->>'aggregate' IN ('request_events_upload_window', 'daily_request_events')"
+        )
+        if granularity == "day":
+            aggregate_bucket_expr = "COALESCE((raw_detail->>'day')::date::timestamptz, date_trunc('day', occurred_at))"
+        else:
+            aggregate_bucket_expr = bucket_expr
+        aggregate_sql = (
+            f" SELECT {aggregate_bucket_expr} AS bucket,"
+            " SUM(COALESCE((raw_detail->>'request_count')::bigint, 0)) AS request_count,"
+            " SUM(COALESCE((raw_detail->>'failed_count')::bigint, 0)) AS failed_count,"
+            " SUM(COALESCE((raw_detail->>'input_tokens')::bigint, 0)) AS input_tokens,"
+            " SUM(COALESCE((raw_detail->>'output_tokens')::bigint, 0)) AS output_tokens,"
+            " SUM(COALESCE((raw_detail->>'reasoning_tokens')::bigint, 0)) AS reasoning_tokens,"
+            " SUM(COALESCE((raw_detail->>'cached_tokens')::bigint, 0)) AS cached_tokens,"
+            " SUM(COALESCE((raw_detail->>'total_tokens')::bigint, 0)) AS total_tokens,"
+            " SUM(COALESCE((raw_detail->>'estimated_cost_usd')::double precision, 0)) AS estimated_cost_usd,"
+            " SUM(COALESCE((raw_detail->>'latency_sum_ms')::bigint, 0)) AS latency_sum_ms,"
+            " SUM(COALESCE((raw_detail->>'latency_count')::bigint, 0)) AS latency_count"
+            f" FROM request_events WHERE {aggregate_where_sql} GROUP BY 1"
+        )
+        combined_sql = f"{raw_sql} UNION ALL {aggregate_sql}"
+        query_params.extend([from_dt, to_dt])
+
     sql = (
-        f"SELECT date_trunc('{granularity}', occurred_at) AS bucket,"
-        " COUNT(*) AS request_count,"
-        " SUM(CASE WHEN failed THEN 1 ELSE 0 END) AS failed_count,"
+        "WITH combined AS ("
+        f"{combined_sql}"
+        ") SELECT bucket,"
+        " SUM(request_count) AS request_count,"
+        " SUM(failed_count) AS failed_count,"
         " SUM(input_tokens) AS input_tokens,"
         " SUM(output_tokens) AS output_tokens,"
         " SUM(reasoning_tokens) AS reasoning_tokens,"
         " SUM(cached_tokens) AS cached_tokens,"
         " SUM(total_tokens) AS total_tokens,"
         " SUM(estimated_cost_usd) AS estimated_cost_usd,"
-        " ROUND(AVG(latency_ms)::numeric, 2) AS avg_latency_ms"
-        f" FROM request_events WHERE {where_sql}"
+        " CASE WHEN SUM(latency_count) > 0 THEN ROUND((SUM(latency_sum_ms)::numeric / SUM(latency_count)), 2) ELSE 0 END AS avg_latency_ms"
+        " FROM combined"
         " GROUP BY 1 ORDER BY 1 LIMIT 8784"
     )
     conn = db_client._pool.getconn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, params)
+            cur.execute(sql, query_params)
             return [dict(r) for r in cur.fetchall()]
     except Exception:
         conn.rollback()
@@ -2128,7 +2181,7 @@ def _aggregate_request_events_python(
         db_client.table("request_events")
         .select(
             "occurred_at,failed,input_tokens,output_tokens,reasoning_tokens,"
-            "cached_tokens,total_tokens,estimated_cost_usd,latency_ms,model_name,provider,api_endpoint"
+            "cached_tokens,total_tokens,estimated_cost_usd,latency_ms,model_name,provider,api_endpoint,raw_detail"
         )
         .gte("occurred_at", from_dt.isoformat())
         .lt("occurred_at", to_dt.isoformat())
@@ -2152,7 +2205,15 @@ def _aggregate_request_events_python(
         occurred_at = _parse_iso_datetime(row.get("occurred_at"))
         if not occurred_at:
             continue
-        if granularity == "hour":
+        detail = row.get("raw_detail") if isinstance(row.get("raw_detail"), dict) else {}
+        is_aggregate = (
+            not filters
+            and row.get("api_endpoint") == "__request_events_aggregate__"
+            and detail.get("aggregate") in ("request_events_upload_window", "daily_request_events")
+        )
+        if granularity == "day" and is_aggregate and isinstance(detail.get("day"), str):
+            bucket_key = f"{detail['day']}T00:00:00+00:00"
+        elif granularity == "hour":
             bucket_key = occurred_at.strftime("%Y-%m-%dT%H:00:00+00:00")
         elif granularity == "week":
             week_start = occurred_at - timedelta(days=occurred_at.weekday())
@@ -2161,6 +2222,22 @@ def _aggregate_request_events_python(
             bucket_key = occurred_at.strftime("%Y-%m-%dT00:00:00+00:00")
 
         b = buckets[bucket_key]
+        if is_aggregate:
+            request_count = _safe_int(detail.get("request_count"), 0)
+            b["request_count"] += request_count
+            b["failed_count"] += _safe_int(detail.get("failed_count"), 0)
+            b["input_tokens"] += _safe_int(detail.get("input_tokens"), 0)
+            b["output_tokens"] += _safe_int(detail.get("output_tokens"), 0)
+            b["reasoning_tokens"] += _safe_int(detail.get("reasoning_tokens"), 0)
+            b["cached_tokens"] += _safe_int(detail.get("cached_tokens"), 0)
+            b["total_tokens"] += _safe_int(detail.get("total_tokens"), 0)
+            b["estimated_cost_usd"] += float(detail.get("estimated_cost_usd") or 0)
+            latency_count = _safe_int(detail.get("latency_count"), 0)
+            if latency_count > 0:
+                b["_latency_sum"] += _safe_int(detail.get("latency_sum_ms"), 0)
+                b["_latency_count"] += latency_count
+            continue
+
         b["request_count"] += 1
         if row.get("failed"):
             b["failed_count"] += 1

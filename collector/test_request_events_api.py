@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import sys
+import tempfile
 import types
 import unittest
 from datetime import datetime, timezone
@@ -513,6 +514,153 @@ class AggregateRequestEventsPythonTests(unittest.TestCase):
         cost_str = str(buckets[0]["estimated_cost_usd"])
         decimal_places = len(cost_str.split(".")[-1]) if "." in cost_str else 0
         self.assertLessEqual(decimal_places, 6)
+
+    def test_aggregate_default_query_prefers_aggregate_rows(self):
+        calls = []
+
+        class _TrackingTable(_DummyTable):
+            def __init__(self):
+                self._filters = {}
+                self._limit = None
+            def select(self, *a, **kw):
+                return self
+            def gte(self, *a, **kw):
+                return self
+            def lt(self, *a, **kw):
+                return self
+            def eq(self, col, val):
+                self._filters[col] = val
+                return self
+            def limit(self, value):
+                self._limit = value
+                return self
+            def execute(self):
+                calls.append({"filters": dict(self._filters), "limit": self._limit})
+                return types.SimpleNamespace(data=[{
+                    "occurred_at": "2026-05-01T10:00:00+00:00",
+                    "failed": False,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "cached_tokens": 0,
+                    "total_tokens": 0,
+                    "estimated_cost_usd": 0,
+                    "latency_ms": 0,
+                    "api_endpoint": "__request_events_aggregate__",
+                    "raw_detail": {
+                        "aggregate": "request_events_upload_window",
+                        "day": "2026-05-01",
+                        "request_count": 3,
+                        "failed_count": 0,
+                        "total_tokens": 42,
+                    },
+                }])
+
+        class _DB:
+            def table(self, name):
+                return _TrackingTable()
+
+        from datetime import datetime, timezone
+        self.module.db_client = _DB()
+        buckets = self.module._aggregate_request_events_python(
+            datetime(2026, 5, 1, tzinfo=timezone.utc),
+            datetime(2026, 5, 2, tzinfo=timezone.utc),
+            "day",
+            {},
+        )
+        self.assertEqual(calls[0]["filters"], {"api_endpoint": "__request_events_aggregate__"})
+        self.assertEqual(calls[0]["limit"], 10000)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(buckets[0]["request_count"], 3)
+
+    def test_aggregate_default_query_raw_fallback_is_limited(self):
+        calls = []
+
+        class _TrackingTable(_DummyTable):
+            def __init__(self):
+                self._filters = {}
+                self._limit = None
+            def select(self, *a, **kw):
+                return self
+            def gte(self, *a, **kw):
+                return self
+            def lt(self, *a, **kw):
+                return self
+            def eq(self, col, val):
+                self._filters[col] = val
+                return self
+            def limit(self, value):
+                self._limit = value
+                return self
+            def execute(self):
+                calls.append({"filters": dict(self._filters), "limit": self._limit})
+                if len(calls) == 1:
+                    return types.SimpleNamespace(data=[])
+                return types.SimpleNamespace(data=[])
+
+        class _DB:
+            def table(self, name):
+                return _TrackingTable()
+
+        from datetime import datetime, timezone
+        self.module.db_client = _DB()
+        buckets = self.module._aggregate_request_events_python(
+            datetime(2026, 5, 1, tzinfo=timezone.utc),
+            datetime(2026, 5, 2, tzinfo=timezone.utc),
+            "day",
+            {},
+        )
+        self.assertEqual(calls[0]["filters"], {"api_endpoint": "__request_events_aggregate__"})
+        self.assertEqual(calls[1]["filters"], {})
+        self.assertEqual(calls[1]["limit"], 1000)
+        self.assertEqual(buckets, [])
+
+
+class RequestEventsAggregateCacheTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = _load_module()
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._original_cache_dir = self.module.REQUEST_EVENTS_AGGREGATE_CACHE_DIR
+        self._original_ttl = self.module.REQUEST_EVENTS_AGGREGATE_CACHE_TTL_SECONDS
+        self.module.REQUEST_EVENTS_AGGREGATE_CACHE_DIR = Path(self._tmpdir.name)
+        self.module.REQUEST_EVENTS_AGGREGATE_CACHE_TTL_SECONDS = 300
+
+    def tearDown(self):
+        self.module.REQUEST_EVENTS_AGGREGATE_CACHE_DIR = self._original_cache_dir
+        self.module.REQUEST_EVENTS_AGGREGATE_CACHE_TTL_SECONDS = self._original_ttl
+        self._tmpdir.cleanup()
+
+    def test_cache_key_is_deterministic(self):
+        from datetime import datetime, timezone
+        from_dt = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        to_dt = datetime(2026, 5, 2, tzinfo=timezone.utc)
+        first = self.module._request_events_aggregate_cache_key(from_dt, to_dt, "day", {"provider": "openai"})
+        second = self.module._request_events_aggregate_cache_key(from_dt, to_dt, "day", {"provider": "openai"})
+        self.assertEqual(first, second)
+
+    def test_cache_write_and_read_hit(self):
+        payload = {"granularity": "day", "buckets": [{"request_count": 2}]}
+        self.module._write_request_events_aggregate_cache("abc", payload)
+        self.assertEqual(self.module._read_request_events_aggregate_cache("abc"), payload)
+
+    def test_cache_expired_returns_none(self):
+        payload = {"granularity": "day", "buckets": []}
+        self.module._write_request_events_aggregate_cache("old", payload)
+        self.module.REQUEST_EVENTS_AGGREGATE_CACHE_TTL_SECONDS = 1
+        cache_path = self.module.REQUEST_EVENTS_AGGREGATE_CACHE_DIR / "old.json"
+        old_time = 1000
+        import os
+        os.utime(cache_path, (old_time, old_time))
+        self.assertIsNone(self.module._read_request_events_aggregate_cache("old"))
+
+    def test_clear_cache_removes_json_files(self):
+        self.module._write_request_events_aggregate_cache("a", {"buckets": []})
+        self.module._write_request_events_aggregate_cache("b", {"buckets": []})
+        self.module._clear_request_events_aggregate_cache()
+        self.assertEqual(list(self.module.REQUEST_EVENTS_AGGREGATE_CACHE_DIR.glob("*.json")), [])
 
 
 class PriceSettingsTests(unittest.TestCase):

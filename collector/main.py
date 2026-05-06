@@ -151,6 +151,15 @@ REDIS_QUEUE_SYNC_INTERVAL = _env_int("REDIS_QUEUE_SYNC_INTERVAL_SECONDS", 60)
 REQUEST_EVENTS_SPOOL_PATH = Path(
     os.getenv("REQUEST_EVENTS_SPOOL_PATH", Path(__file__).parent / "request_events_spool.jsonl")
 )
+REQUEST_EVENTS_AGGREGATE_CACHE_DIR = Path(
+    os.getenv(
+        "REQUEST_EVENTS_AGGREGATE_CACHE_DIR",
+        Path(__file__).parent / "request_events_aggregate_cache",
+    )
+)
+REQUEST_EVENTS_AGGREGATE_CACHE_TTL_SECONDS = _env_int(
+    "REQUEST_EVENTS_AGGREGATE_CACHE_TTL_SECONDS", 300, min_value=30
+)
 
 # Default pricing (USD per 1M tokens) - Updated Dec 2024
 DEFAULT_PRICING = {
@@ -206,6 +215,7 @@ _app_log_buffer_lock = threading.Lock()
 _request_event_upload_buffer: List[Dict[str, Any]] = []
 _request_event_upload_lock = threading.Lock()
 _last_request_event_upload_at: float = 0
+_request_events_aggregate_cache_lock = threading.Lock()
 
 # --- Flask App Setup ---
 flask_app = Flask(__name__)
@@ -2177,20 +2187,36 @@ def _aggregate_request_events_python(
     filters: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     from collections import defaultdict
+    aggregate_only = not filters
     query = (
         db_client.table("request_events")
         .select(
             "occurred_at,failed,input_tokens,output_tokens,reasoning_tokens,"
-            "cached_tokens,total_tokens,estimated_cost_usd,latency_ms,model_name,provider,api_endpoint,raw_detail"
+            "cached_tokens,total_tokens,estimated_cost_usd,latency_ms,api_endpoint,raw_detail"
         )
         .gte("occurred_at", from_dt.isoformat())
         .lt("occurred_at", to_dt.isoformat())
         .limit(10000)
     )
-    for col, val in filters.items():
-        if col != "failed":
-            query = query.eq(col, val)
+    if aggregate_only:
+        query = query.eq("api_endpoint", "__request_events_aggregate__")
+    else:
+        for col, val in filters.items():
+            if col != "failed":
+                query = query.eq(col, val)
     rows = query.execute().data or []
+    if aggregate_only and not rows:
+        query = (
+            db_client.table("request_events")
+            .select(
+                "occurred_at,failed,input_tokens,output_tokens,reasoning_tokens,"
+                "cached_tokens,total_tokens,estimated_cost_usd,latency_ms,api_endpoint,raw_detail"
+            )
+            .gte("occurred_at", from_dt.isoformat())
+            .lt("occurred_at", to_dt.isoformat())
+            .limit(1000)
+        )
+        rows = query.execute().data or []
     if "failed" in filters:
         rows = [r for r in rows if bool(r.get("failed")) == filters["failed"]]
 
@@ -2274,6 +2300,67 @@ def _aggregate_request_events_python(
     return result
 
 
+def _request_events_aggregate_cache_key(
+    from_dt: datetime,
+    to_dt: datetime,
+    granularity: str,
+    filters: Dict[str, Any],
+) -> str:
+    seed = json.dumps(
+        {
+            "from": from_dt.isoformat(),
+            "to": to_dt.isoformat(),
+            "granularity": granularity,
+            "filters": filters,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+def _read_request_events_aggregate_cache(cache_key: str) -> Optional[Dict[str, Any]]:
+    cache_path = REQUEST_EVENTS_AGGREGATE_CACHE_DIR / f"{cache_key}.json"
+    try:
+        if not cache_path.exists():
+            return None
+        if time.time() - cache_path.stat().st_mtime > REQUEST_EVENTS_AGGREGATE_CACHE_TTL_SECONDS:
+            return None
+        with cache_path.open("r", encoding="utf-8") as cache_file:
+            cached = json.load(cache_file)
+        return cached if isinstance(cached, dict) else None
+    except Exception as exc:
+        logger.debug("Failed to read request_events aggregate cache: %s", exc)
+        return None
+
+
+def _write_request_events_aggregate_cache(cache_key: str, payload: Dict[str, Any]) -> None:
+    try:
+        REQUEST_EVENTS_AGGREGATE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_path = REQUEST_EVENTS_AGGREGATE_CACHE_DIR / f"{cache_key}.json"
+        temp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        with temp_path.open("w", encoding="utf-8") as cache_file:
+            json.dump(payload, cache_file, separators=(",", ":"), sort_keys=True)
+            cache_file.flush()
+            os.fsync(cache_file.fileno())
+        temp_path.replace(cache_path)
+    except Exception as exc:
+        logger.debug("Failed to write request_events aggregate cache: %s", exc)
+
+
+def _clear_request_events_aggregate_cache() -> None:
+    try:
+        if not REQUEST_EVENTS_AGGREGATE_CACHE_DIR.exists():
+            return
+        for cache_path in REQUEST_EVENTS_AGGREGATE_CACHE_DIR.glob("*.json"):
+            try:
+                cache_path.unlink()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug("Failed to clear request_events aggregate cache: %s", exc)
+
+
 @api_bp.route("/request_events/filter_options", methods=["GET"])
 def request_events_filter_options():
     if not db_client:
@@ -2337,6 +2424,18 @@ def request_events_aggregate():
     elif failed_str in ("false", "0", "no"):
         filters["failed"] = False
 
+    cache_key = _request_events_aggregate_cache_key(from_dt, to_dt, granularity, filters)
+    with _request_events_aggregate_cache_lock:
+        cached_payload = _read_request_events_aggregate_cache(cache_key)
+    if cached_payload is not None:
+        cached_payload = dict(cached_payload)
+        cached_payload["cache"] = {
+            **(cached_payload.get("cache") if isinstance(cached_payload.get("cache"), dict) else {}),
+            "hit": True,
+            "ttl_seconds": REQUEST_EVENTS_AGGREGATE_CACHE_TTL_SECONDS,
+        }
+        return jsonify(cached_payload)
+
     try:
         if hasattr(db_client, "_pool"):
             buckets = _aggregate_request_events_local(from_dt, to_dt, granularity, filters)
@@ -2364,7 +2463,7 @@ def request_events_aggregate():
     total_tokens = sum(b.get("total_tokens", 0) for b in buckets)
     failed_count = sum(b.get("failed_count", 0) for b in buckets)
 
-    return jsonify({
+    payload = {
         "granularity": granularity,
         "buckets": buckets,
         "summary": {
@@ -2373,7 +2472,14 @@ def request_events_aggregate():
             "total_tokens": total_tokens,
             "estimated_cost_usd": total_cost,
         },
-    })
+        "cache": {
+            "hit": False,
+            "ttl_seconds": REQUEST_EVENTS_AGGREGATE_CACHE_TTL_SECONDS,
+        },
+    }
+    with _request_events_aggregate_cache_lock:
+        _write_request_events_aggregate_cache(cache_key, payload)
+    return jsonify(payload)
 
 
 @api_bp.route("/request_events/price_settings", methods=["GET"])
@@ -3663,6 +3769,8 @@ def _flush_request_event_upload_buffer(source: str, force: bool = False) -> Dict
         summary["flushed"] = True
         _last_request_event_upload_at = now
         _request_events_table_warned = False
+        with _request_events_aggregate_cache_lock:
+            _clear_request_events_aggregate_cache()
         _log_request_event_usage_summary(source, events_to_upload)
         logger.info(
             "Request event upload window flushed (%s): buffered=%d, aggregated=%d, persisted=%d, interval=%ds",

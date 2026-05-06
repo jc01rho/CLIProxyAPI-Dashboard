@@ -131,3 +131,8 @@ Thumbs.db
 .tldrignore
 collector/.tldr/
 collector/.tldrignore
+
+# Collector runtime cache/spool data
+collector/request_events_spool.jsonl
+collector/request_events_spool.jsonl.tmp
+collector/request_events_aggregate_cache/

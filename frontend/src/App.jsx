@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { selectRows, selectSingle } from './lib/database'
 import Dashboard from './components/Dashboard'
 
-const FRONTEND_AUTO_REFRESH_MS = Math.max(1000, Number(import.meta.env.VITE_AUTO_REFRESH_SECONDS || 60) * 1000)
+const FRONTEND_AUTO_REFRESH_MS = Math.max(1000, Number(import.meta.env.VITE_AUTO_REFRESH_SECONDS || 300) * 1000)
 const COLLECTOR_BASE = '/api/collector'
 const SESSION_FETCH_TIMEOUT_MS = Math.max(1000, Number(import.meta.env.VITE_SESSION_FETCH_TIMEOUT_MS || 5000))
 const DEV_BYPASS_AUTH = import.meta.env.DEV && String(import.meta.env.VITE_DEV_BYPASS_AUTH || '').toLowerCase() === 'true'
@@ -550,23 +550,6 @@ const buildRequestEventUsageFallback = (events, includeDay = () => true) => {
     }
 }
 
-const fetchRequestEventRows = async (startTime, endTime) => {
-    try {
-        return await selectRows('request_events', {
-            select: 'id,event_uid,occurred_at,api_endpoint,model_name,source_id,auth_index,latency_ms,failed,input_tokens,output_tokens,reasoning_tokens,cached_tokens,total_tokens,provider,estimated_cost_usd,raw_detail',
-            filters: [
-                ...(startTime ? [{ column: 'occurred_at', operator: 'gte', value: startTime }] : []),
-                ...(endTime ? [{ column: 'occurred_at', operator: 'lt', value: endTime }] : []),
-            ],
-            order: { column: 'occurred_at', ascending: false },
-            limit: 2000,
-        })
-    } catch (error) {
-        console.debug('request_events not available for dashboard fallback:', error?.message || error)
-        return []
-    }
-}
-
 const fetchRequestEventAggregate = async (startTime, endTime, granularity = 'day') => {
     if (!startTime) return null
     try {
@@ -588,6 +571,68 @@ const fetchRequestEventAggregate = async (startTime, endTime, granularity = 'day
         console.debug('request_events aggregate not available for dashboard fallback:', error?.message || error)
         return null
     }
+}
+
+const requestEventAggregateRows = (aggregatePayload) => {
+    return (aggregatePayload?.buckets || [])
+        .map((bucket, index) => {
+            const bucketValue = bucket.bucket || bucket.stat_date
+            if (!bucketValue) return null
+            const parsed = new Date(bucketValue)
+            if (Number.isNaN(parsed.getTime())) return null
+            const occurredAt = parsed.toISOString()
+            const statDate = parsed.toLocaleDateString('en-CA')
+            const requestCount = Number(bucket.request_count) || 0
+            const failedCount = Number(bucket.failed_count) || 0
+            const successCount = Math.max(0, requestCount - failedCount)
+            return {
+                event_uid: `request-events-aggregate-ui:${bucketValue}:${index}`,
+                occurred_at: occurredAt,
+                api_endpoint: '__request_events_aggregate__',
+                endpoint_method: 'AGGREGATE',
+                endpoint_path: '__request_events_aggregate__',
+                model_name: '__request_events_aggregate__',
+                source_id: '__request_events_aggregate__',
+                auth_index: '__request_events_aggregate__',
+                latency_ms: Number(bucket.avg_latency_ms) || 0,
+                failed: failedCount > 0,
+                input_tokens: Number(bucket.input_tokens) || 0,
+                output_tokens: Number(bucket.output_tokens) || 0,
+                reasoning_tokens: Number(bucket.reasoning_tokens) || 0,
+                cached_tokens: Number(bucket.cached_tokens) || 0,
+                total_tokens: Number(bucket.total_tokens) || 0,
+                provider: '__request_events_aggregate__',
+                estimated_cost_usd: Number(bucket.estimated_cost_usd) || 0,
+                raw_detail: {
+                    aggregate: 'request_events_upload_window',
+                    source: 'collector_aggregate_cache',
+                    day: statDate,
+                    request_count: requestCount,
+                    success_count: successCount,
+                    failed_count: failedCount,
+                    input_tokens: Number(bucket.input_tokens) || 0,
+                    output_tokens: Number(bucket.output_tokens) || 0,
+                    reasoning_tokens: Number(bucket.reasoning_tokens) || 0,
+                    cached_tokens: Number(bucket.cached_tokens) || 0,
+                    total_tokens: Number(bucket.total_tokens) || 0,
+                    estimated_cost_usd: Number(bucket.estimated_cost_usd) || 0,
+                    latency_sum_ms: 0,
+                    latency_count: 0,
+                    avg_latency_ms: Number(bucket.avg_latency_ms) || 0,
+                    models: {},
+                    auth_models: {},
+                    source_models: {},
+                    providers: {},
+                    endpoints: {},
+                },
+            }
+        })
+        .filter(Boolean)
+}
+
+const fetchRequestEventRows = async (startTime, endTime) => {
+    const aggregatePayload = await fetchRequestEventAggregate(startTime, endTime, 'day')
+    return requestEventAggregateRows(aggregatePayload)
 }
 
 const requestEventAggregateFallbackRows = (aggregatePayload) => {
@@ -1319,10 +1364,8 @@ function App() {
 
             const { startTime, endTime, startDate, endDate } = getDateBoundaries(rangeId, customRange)
 
-            const [requestEventsData, requestEventsAggregate] = await Promise.all([
-                fetchRequestEventRows(startTime, endTime),
-                fetchRequestEventAggregate(startTime, endTime, 'day'),
-            ])
+            const requestEventsAggregate = await fetchRequestEventAggregate(startTime, endTime, 'day')
+            const requestEventsData = requestEventAggregateRows(requestEventsAggregate)
             const requestEventFallback = mergeRequestEventFallbackRows(
                 buildRequestEventUsageFallback(requestEventsData || []),
                 requestEventsAggregate,

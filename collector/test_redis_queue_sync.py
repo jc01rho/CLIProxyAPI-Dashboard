@@ -849,6 +849,59 @@ class RedisQueueTransformTests(unittest.TestCase):
         self.assertEqual([row["raw_detail"]["request_count"] for row in uploaded], [1, 1])
         self.assertEqual([row["raw_detail"]["day"] for row in uploaded], ["2026-04-15", "2026-04-16"])
 
+    def test_flush_removes_nul_characters_before_request_events_upload(self):
+        uploaded = []
+
+        class _RecordingTable(_DummyTable):
+            def upsert(self, data, on_conflict=None):
+                uploaded.extend(data if isinstance(data, list) else [data])
+                return self
+
+        class _RecordingDB:
+            def table(self, *a, **kw):
+                return _RecordingTable()
+
+        def contains_nul(value):
+            if isinstance(value, str):
+                return "\x00" in value
+            if isinstance(value, dict):
+                return any(contains_nul(key) or contains_nul(item) for key, item in value.items())
+            if isinstance(value, list):
+                return any(contains_nul(item) for item in value)
+            return False
+
+        original_db = self.module.db_client
+        original_available = self.module._request_events_table_available
+        self.module.db_client = _RecordingDB()
+        self.module._request_events_table_available = True
+        event = self.module._transform_queue_event({
+            "timestamp": "2026-04-15T10:30:00Z",
+            "request_id": "nul\x00req",
+            "model": "gpt\x00-4o",
+            "endpoint": "/v1/\x00chat",
+            "provider": "open\x00ai",
+            "source": "sk-abcdef\x001234567890",
+            "auth_index": "auth\x00zero",
+            "nested": {"bad\x00key": ["bad\x00value"]},
+            "tokens": {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
+        })
+        try:
+            self.module._buffer_request_events_for_upload([event])
+            result = self.module._flush_request_event_upload_buffer("scheduled", force=True)
+
+            self.assertTrue(result["flushed"])
+            self.assertEqual(result["persisted"], 1)
+            self.assertEqual(len(uploaded), 1)
+            self.assertFalse(contains_nul(uploaded))
+            self.assertNotIn("\\u0000", json.dumps(uploaded, ensure_ascii=False))
+            self.assertIn("gpt-4o", uploaded[0]["raw_detail"]["models"])
+            auth_model_stats = next(iter(uploaded[0]["raw_detail"]["auth_models"].values()))
+            self.assertEqual(auth_model_stats["auth"], "authzero")
+            self.assertEqual(auth_model_stats["model"], "gpt-4o")
+        finally:
+            self.module.db_client = original_db
+            self.module._request_events_table_available = original_available
+
     def test_persist_queue_payloads_deduplicates_event_uid_within_batch(self):
         events = []
 

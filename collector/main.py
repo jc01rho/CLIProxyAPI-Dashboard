@@ -489,6 +489,32 @@ def _safe_text(value: Any, max_len: int = 1000) -> str:
     return str(value or "").strip()[:max_len]
 
 
+def _strip_postgres_text_nuls(value: Any) -> Any:
+    """Return value with NUL bytes removed from strings before PostgreSQL upload."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {
+            _strip_postgres_text_nuls(key): _strip_postgres_text_nuls(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_strip_postgres_text_nuls(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_strip_postgres_text_nuls(item) for item in value)
+    return value
+
+
+def _request_event_compound_key(*parts: Any) -> str:
+    """Stable JSON-safe key for aggregate buckets that also stores fields as values."""
+    seed = json.dumps(
+        [_strip_postgres_text_nuls(str(part)) for part in parts],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
 @flask_app.before_request
 def _enforce_admin_auth() -> Optional[Response]:
     path = request.path.rstrip("/") or "/"
@@ -1295,11 +1321,11 @@ def _compact_request_events_daily() -> Dict[str, int]:
         add_bucket(agg["endpoints"], endpoint)
         endpoint_models = agg["endpoints"].setdefault(endpoint, _empty_request_event_bucket()).setdefault("models", {})
         add_bucket(endpoint_models, model)
-        auth_model_key = f"{auth}\u0000{model}"
+        auth_model_key = _request_event_compound_key(auth, model)
         auth_model = agg["auth_models"].setdefault(auth_model_key, {
             "auth": auth, "model": model, **_empty_request_event_bucket(),
         })
-        source_model_key = f"{source}\u0000{model}"
+        source_model_key = _request_event_compound_key(source, model)
         source_model = agg["source_models"].setdefault(source_model_key, {
             "source": source, "auth": auth, "provider": provider, "model": model, **_empty_request_event_bucket(),
         })
@@ -3267,7 +3293,7 @@ def _summarize_request_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         endpoint_bucket = summary["endpoints"].setdefault(endpoint, {})
         endpoint_models = endpoint_bucket.setdefault("models", {})
         add_bucket(endpoint_models, model_name)
-        auth_model_key = f"{auth}\u0000{model_name}"
+        auth_model_key = _request_event_compound_key(auth, model_name)
         auth_model = summary["auth_models"].setdefault(auth_model_key, {
             "auth": auth,
             "model": model_name,
@@ -3292,7 +3318,7 @@ def _summarize_request_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         auth_model["output_tokens"] += output_tokens
         auth_model["reasoning_tokens"] += reasoning_tokens
         auth_model["cached_tokens"] += cached_tokens
-        source_model_key = f"{source}\u0000{model_name}"
+        source_model_key = _request_event_compound_key(source, model_name)
         source_model = summary["source_models"].setdefault(source_model_key, {
             "source": source,
             "auth": auth,
@@ -3427,7 +3453,7 @@ def _log_request_event_usage_summary(source: str, events: List[Dict[str, Any]]) 
 def _upsert_request_events_batch(events: List[Dict[str, Any]]) -> int:
     persisted = 0
     for i in range(0, len(events), 100):
-        batch = events[i: i + 100]
+        batch = _strip_postgres_text_nuls(events[i: i + 100])
         db_client.table("request_events").upsert(batch, on_conflict="event_uid").execute()
         persisted += len(batch)
     return persisted

@@ -2341,6 +2341,12 @@ def _merge_local_request_event_aggregate_breakdowns(
             continue
         if granularity == "day" and isinstance(detail.get("day"), str):
             bucket_key = f"{detail['day']}T00:00:00+00:00"
+        elif granularity == "hour" and isinstance(detail.get("hour"), str):
+            hour_value = detail["hour"]
+            parsed_hour = _parse_iso_datetime(hour_value)
+            if not parsed_hour:
+                parsed_hour = _parse_iso_datetime(f"{hour_value}+00:00")
+            bucket_key = parsed_hour.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:00:00+00:00") if parsed_hour else occurred_at.strftime("%Y-%m-%dT%H:00:00+00:00")
         elif granularity == "hour":
             bucket_key = occurred_at.strftime("%Y-%m-%dT%H:00:00+00:00")
         elif granularity == "week":
@@ -2415,6 +2421,12 @@ def _aggregate_request_events_python(
         )
         if granularity == "day" and is_aggregate and isinstance(detail.get("day"), str):
             bucket_key = f"{detail['day']}T00:00:00+00:00"
+        elif granularity == "hour" and is_aggregate and isinstance(detail.get("hour"), str):
+            hour_value = detail["hour"]
+            parsed_hour = _parse_iso_datetime(hour_value)
+            if not parsed_hour:
+                parsed_hour = _parse_iso_datetime(f"{hour_value}+00:00")
+            bucket_key = parsed_hour.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:00:00+00:00") if parsed_hour else occurred_at.strftime("%Y-%m-%dT%H:00:00+00:00")
         elif granularity == "hour":
             bucket_key = occurred_at.strftime("%Y-%m-%dT%H:00:00+00:00")
         elif granularity == "week":
@@ -3617,8 +3629,9 @@ def _summarize_request_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         "latency_count": 0,
     }
     for event in events:
-        failed = bool(event.get("failed"))
-        if event.get("failed"):
+        total_tokens = _safe_int(event.get("total_tokens"), 0)
+        failed = bool(event.get("failed")) or total_tokens <= 0
+        if failed:
             summary["failure"] += 1
         else:
             summary["success"] += 1
@@ -3638,7 +3651,6 @@ def _summarize_request_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         endpoint = str(event.get("api_endpoint") or "Unknown")
         source = str(event.get("source_id") or "Unknown")
         auth = str(event.get("auth_index") if event.get("auth_index") is not None else "Unknown") or "Unknown"
-        total_tokens = _safe_int(event.get("total_tokens"), 0)
         try:
             cost = float(event.get("estimated_cost_usd") or 0)
         except Exception:
@@ -3796,16 +3808,27 @@ def _request_events_aggregate_row(source: str, events: List[Dict[str, Any]]) -> 
     }
 
 
+def _event_local_hour(row: Dict[str, Any], timestamp_key: str) -> Optional[str]:
+    occurred_at = _parse_iso_datetime(row.get(timestamp_key))
+    if not occurred_at:
+        return None
+    local = occurred_at.astimezone(APP_TIMEZONE)
+    return local.strftime("%Y-%m-%dT%H:00:00")
+
+
 def _request_events_aggregate_rows(source: str, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    events_by_day: Dict[str, List[Dict[str, Any]]] = {}
+    events_by_hour: Dict[str, List[Dict[str, Any]]] = {}
     for event in events:
-        day_key = _event_local_day(event, "occurred_at") or "unknown"
-        events_by_day.setdefault(day_key, []).append(event)
+        hour_key = _event_local_hour(event, "occurred_at") or "unknown"
+        events_by_hour.setdefault(hour_key, []).append(event)
     rows = []
-    for day_key in sorted(events_by_day):
-        row = _request_events_aggregate_row(source, events_by_day[day_key])
+    for hour_key in sorted(events_by_hour):
+        row = _request_events_aggregate_row(source, events_by_hour[hour_key])
         if row:
+            day_key = hour_key[:10] if hour_key != "unknown" else "unknown"
             row["raw_detail"]["day"] = None if day_key == "unknown" else day_key
+            row["raw_detail"]["hour"] = None if hour_key == "unknown" else hour_key
+            row["raw_detail"]["granularity"] = "hour"
             rows.append(row)
     return rows
 

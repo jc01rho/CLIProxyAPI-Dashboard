@@ -216,7 +216,8 @@ const addModelStats = (bucket, modelName, data = {}) => {
     target.cached_tokens += Number(data.cached_tokens) || 0
 }
 
-const buildRequestEventUsageFallback = (events, includeDay = () => true) => {
+const buildRequestEventUsageFallback = (events, includeDay = () => true, options = {}) => {
+    const includeHourly = options.includeHourly !== false
     const effectiveEvents = removeRowsCoveredByDailyAggregates(events)
     const dailyMap = new Map()
     const modelMap = {}
@@ -422,7 +423,7 @@ const buildRequestEventUsageFallback = (events, includeDay = () => true) => {
     for (const ev of effectiveEvents || []) {
         const day = requestEventStatDate(ev)
         if (!day || !includeDay(day)) continue
-        const hour = requestEventHourBucket(ev)
+        const hour = includeHourly ? requestEventHourBucket(ev) : null
         const daily = ensureDaily(day)
 
         if (isRequestEventAggregate(ev)) {
@@ -439,7 +440,7 @@ const buildRequestEventUsageFallback = (events, includeDay = () => true) => {
             for (const [modelName, data] of Object.entries(detail.models || {})) {
                 addModelStats(daily.models, modelName, data)
                 addModelStats(modelMap, modelName, data)
-                addHourlyUsage(hour, modelName, data)
+                if (includeHourly) addHourlyUsage(hour, modelName, data)
             }
             for (const [endpointName, data] of Object.entries(detail.endpoints || {})) {
                 addEndpointStats(endpointName, data)
@@ -579,7 +580,7 @@ const fetchRequestEventAggregate = async (startTime, endTime, granularity = 'day
     }
 }
 
-const requestEventAggregateRows = (aggregatePayload) => {
+const requestEventAggregateRows = (aggregatePayload, granularity = 'day') => {
     return (aggregatePayload?.buckets || [])
         .map((bucket, index) => {
             const bucketValue = bucket.bucket || bucket.stat_date
@@ -612,7 +613,10 @@ const requestEventAggregateRows = (aggregatePayload) => {
                 raw_detail: {
                     aggregate: 'request_events_upload_window',
                     source: 'collector_aggregate_cache',
-                    day: statDate,
+                    granularity,
+                    ...(granularity === 'day' ? { day: statDate } : {}),
+                    first_occurred_at: bucket.first_occurred_at || occurredAt,
+                    last_occurred_at: bucket.last_occurred_at || occurredAt,
                     request_count: requestCount,
                     success_count: successCount,
                     failed_count: failedCount,
@@ -636,9 +640,9 @@ const requestEventAggregateRows = (aggregatePayload) => {
         .filter(Boolean)
 }
 
-const fetchRequestEventRows = async (startTime, endTime) => {
-    const aggregatePayload = await fetchRequestEventAggregate(startTime, endTime, 'day')
-    return requestEventAggregateRows(aggregatePayload)
+const fetchRequestEventRows = async (startTime, endTime, granularity = 'day') => {
+    const aggregatePayload = await fetchRequestEventAggregate(startTime, endTime, granularity)
+    return requestEventAggregateRows(aggregatePayload, granularity)
 }
 
 const requestEventAggregateFallbackRows = (aggregatePayload) => {
@@ -953,7 +957,10 @@ function App() {
             setCredentialLoading(true)
 
             const { startTime, endTime, startDate, endDate } = getDateBoundaries(rangeId, customRange)
-            const requestEventsRows = await fetchRequestEventRows(startTime, endTime)
+            const isHourlyRange = rangeId === 'today' || rangeId === 'yesterday' || (
+                rangeId === 'custom' && startDate && endDate && startDate === endDate
+            )
+            const requestEventsRows = await fetchRequestEventRows(startTime, endTime, isHourlyRange ? 'hour' : 'day')
             const requestEventFallback = buildRequestEventUsageFallback(requestEventsRows || [])
 
             let useDailyStats = false
@@ -1370,10 +1377,23 @@ function App() {
 
             const { startTime, endTime, startDate, endDate } = getDateBoundaries(rangeId, customRange)
 
+            const isHourlyRange = rangeId === 'today' || rangeId === 'yesterday' || (
+                rangeId === 'custom' && startDate && endDate && startDate === endDate
+            )
             const requestEventsAggregate = await fetchRequestEventAggregate(startTime, endTime, 'day')
-            const requestEventsData = requestEventAggregateRows(requestEventsAggregate)
+            const requestEventsHourlyAggregate = isHourlyRange
+                ? await fetchRequestEventAggregate(startTime, endTime, 'hour')
+                : null
+            const requestEventsData = requestEventAggregateRows(requestEventsAggregate, 'day')
+            const requestEventsHourlyData = requestEventAggregateRows(requestEventsHourlyAggregate, 'hour')
             const requestEventFallback = mergeRequestEventFallbackRows(
-                buildRequestEventUsageFallback(requestEventsData || []),
+                buildRequestEventUsageFallback(
+                    isHourlyRange
+                        ? [...(requestEventsData || []), ...(requestEventsHourlyData || [])]
+                        : (requestEventsData || []),
+                    undefined,
+                    { includeHourly: isHourlyRange }
+                ),
                 requestEventsAggregate,
             )
 

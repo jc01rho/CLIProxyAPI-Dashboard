@@ -588,8 +588,12 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
       for (const [modelName, m] of Object.entries(ak.models)) {
         const req = m.requests || m.total_requests || 0
         if (req === 0) continue
-        const fail = m.failure || m.failure_count || 0
-        const succ = m.success || m.success_count || 0
+        const tokens = m.tokens || m.total_tokens || 0
+        const cost = m.estimated_cost_usd || m.cost || 0
+        const rawFail = m.failure || m.failure_count || 0
+        const zeroTokenFail = tokens <= 0 ? req : 0
+        const fail = Math.max(rawFail, zeroTokenFail)
+        const succ = Math.max(0, req - fail)
         const failRate = req > 0 ? (fail / req) * 100 : 0
         const succRate = req > 0 ? (succ / req) * 100 : 0
         rows.push({
@@ -602,8 +606,8 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
           failure: fail,
           failure_rate: failRate,
           success_rate: succRate,
-          tokens: m.tokens || m.total_tokens || 0,
-          cost: m.estimated_cost_usd || m.cost || 0
+          tokens,
+          cost
         })
       }
     }

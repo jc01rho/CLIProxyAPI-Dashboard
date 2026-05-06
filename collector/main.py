@@ -99,6 +99,11 @@ ADMIN_ALLOWED_ORIGINS = [
     for origin in str(os.getenv("ADMIN_ALLOWED_ORIGINS", "")).split(",")
     if origin.strip()
 ]
+ADMIN_SESSION_CACHE_TTL_SECONDS = _env_int("ADMIN_SESSION_CACHE_TTL_SECONDS", 60, min_value=5)
+ADMIN_SESSION_TOUCH_INTERVAL_SECONDS = _env_int(
+    "ADMIN_SESSION_TOUCH_INTERVAL_SECONDS", 300, min_value=30
+)
+HEALTH_CHECK_CACHE_TTL_SECONDS = _env_int("HEALTH_CHECK_CACHE_TTL_SECONDS", 30, min_value=5)
 
 LOG_VERBOSITY = str(os.getenv("LOG_VERBOSITY", "normal")).strip().lower()
 if LOG_VERBOSITY not in {"minimal", "normal", "debug"}:
@@ -160,6 +165,9 @@ REQUEST_EVENTS_AGGREGATE_CACHE_DIR = Path(
 REQUEST_EVENTS_AGGREGATE_CACHE_TTL_SECONDS = _env_int(
     "REQUEST_EVENTS_AGGREGATE_CACHE_TTL_SECONDS", 300, min_value=30
 )
+REQUEST_EVENTS_AGGREGATE_TO_BUCKET_SECONDS = _env_int(
+    "REQUEST_EVENTS_AGGREGATE_TO_BUCKET_SECONDS", 300, min_value=30
+)
 
 # Default pricing (USD per 1M tokens) - Updated Dec 2024
 DEFAULT_PRICING = {
@@ -216,6 +224,12 @@ _request_event_upload_buffer: List[Dict[str, Any]] = []
 _request_event_upload_lock = threading.Lock()
 _last_request_event_upload_at: float = 0
 _request_events_aggregate_cache_lock = threading.Lock()
+_admin_session_cache: Dict[str, Dict[str, Any]] = {}
+_admin_session_cache_lock = threading.Lock()
+_admin_session_last_touch_at: Dict[str, float] = {}
+_admin_session_touch_lock = threading.Lock()
+_health_check_cache: Optional[Dict[str, Any]] = None
+_health_check_cache_lock = threading.Lock()
 
 # --- Flask App Setup ---
 flask_app = Flask(__name__)
@@ -273,6 +287,64 @@ def _format_http_datetime(value: datetime) -> str:
 
 def _hash_session_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _admin_session_cache_key(token_hash: str) -> str:
+    return token_hash
+
+
+def _admin_session_is_active(row: Optional[Dict[str, Any]], now: Optional[datetime] = None) -> bool:
+    if not row:
+        return False
+    current = now or _utcnow()
+    revoked_at = _parse_iso_datetime(row.get("revoked_at"))
+    expires_at = _parse_iso_datetime(row.get("expires_at"))
+    return not revoked_at and bool(expires_at) and expires_at > current
+
+
+def _get_cached_admin_session(token_hash: str, now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+    current = now or _utcnow()
+    current_ts = time.time()
+    cache_key = _admin_session_cache_key(token_hash)
+    with _admin_session_cache_lock:
+        entry = _admin_session_cache.get(cache_key)
+        if not entry:
+            return None
+        if current_ts - float(entry.get("cached_at") or 0) > ADMIN_SESSION_CACHE_TTL_SECONDS:
+            _admin_session_cache.pop(cache_key, None)
+            return None
+        row = entry.get("row")
+        if not isinstance(row, dict) or not _admin_session_is_active(row, current):
+            _admin_session_cache.pop(cache_key, None)
+            return None
+        return dict(row)
+
+
+def _cache_admin_session(token_hash: str, row: Dict[str, Any]) -> None:
+    if not _admin_session_is_active(row):
+        return
+    with _admin_session_cache_lock:
+        _admin_session_cache[_admin_session_cache_key(token_hash)] = {
+            "row": dict(row),
+            "cached_at": time.time(),
+        }
+
+
+def _invalidate_admin_session_cache(
+    token_hash: Optional[str] = None,
+    session_id: Optional[Any] = None,
+) -> None:
+    with _admin_session_cache_lock:
+        if token_hash:
+            _admin_session_cache.pop(_admin_session_cache_key(token_hash), None)
+        if session_id is not None:
+            for key, entry in list(_admin_session_cache.items()):
+                row = entry.get("row") if isinstance(entry, dict) else None
+                if isinstance(row, dict) and row.get("id") == session_id:
+                    _admin_session_cache.pop(key, None)
+    if session_id is not None:
+        with _admin_session_touch_lock:
+            _admin_session_last_touch_at.pop(str(session_id), None)
 
 
 def _generate_session_token() -> str:
@@ -354,6 +426,10 @@ def _get_session_row(token: Optional[str]) -> Optional[Dict[str, Any]]:
     if not db_client or not token:
         return None
     token_hash = _hash_session_token(token)
+    now = _utcnow()
+    cached_row = _get_cached_admin_session(token_hash, now)
+    if cached_row:
+        return cached_row
     try:
         row = (
             db_client.table("admin_sessions")
@@ -372,11 +448,10 @@ def _get_session_row(token: Optional[str]) -> Optional[Dict[str, Any]]:
     if not row:
         return None
 
-    revoked_at = _parse_iso_datetime(row.get("revoked_at"))
-    expires_at = _parse_iso_datetime(row.get("expires_at"))
-    now = _utcnow()
-    if revoked_at or not expires_at or expires_at <= now:
-        if not revoked_at:
+    was_revoked = bool(_parse_iso_datetime(row.get("revoked_at")))
+    if not _admin_session_is_active(row, now):
+        _invalidate_admin_session_cache(token_hash=token_hash, session_id=row.get("id"))
+        if not was_revoked:
             try:
                 db_client.table("admin_sessions").update(
                     {"revoked_at": now.isoformat()}
@@ -387,6 +462,7 @@ def _get_session_row(token: Optional[str]) -> Optional[Dict[str, Any]]:
                 )
         return None
 
+    _cache_admin_session(token_hash, row)
     return row
 
 
@@ -402,11 +478,27 @@ def _get_authenticated_session() -> Optional[Dict[str, Any]]:
 def _touch_session(session_row: Dict[str, Any]) -> None:
     if not db_client or not session_row or not session_row.get("id"):
         return
+    session_id = str(session_row["id"])
+    now_ts = time.time()
+    with _admin_session_touch_lock:
+        last_touch_at = _admin_session_last_touch_at.get(session_id, 0)
+        if now_ts - last_touch_at < ADMIN_SESSION_TOUCH_INTERVAL_SECONDS:
+            return
+        _admin_session_last_touch_at[session_id] = now_ts
+    now_iso = _utcnow().isoformat()
     try:
         db_client.table("admin_sessions").update(
-            {"last_seen_at": _utcnow().isoformat()}
+            {"last_seen_at": now_iso}
         ).eq("id", session_row["id"]).execute()
+        session_row["last_seen_at"] = now_iso
+        with _admin_session_cache_lock:
+            for entry in _admin_session_cache.values():
+                row = entry.get("row") if isinstance(entry, dict) else None
+                if isinstance(row, dict) and row.get("id") == session_row["id"]:
+                    row["last_seen_at"] = now_iso
     except Exception as e:
+        with _admin_session_touch_lock:
+            _admin_session_last_touch_at.pop(session_id, None)
         logger.error(f"Failed to update admin session last_seen_at: {e}", exc_info=True)
 
 
@@ -417,6 +509,7 @@ def _revoke_session(session_row: Optional[Dict[str, Any]]) -> None:
         db_client.table("admin_sessions").update(
             {"revoked_at": _utcnow().isoformat()}
         ).eq("id", session_row["id"]).execute()
+        _invalidate_admin_session_cache(session_id=session_row.get("id"))
     except Exception as e:
         logger.error(f"Failed to revoke admin session: {e}", exc_info=True)
 
@@ -1947,23 +2040,29 @@ def _log_app_event(
 @api_bp.route("/health", methods=["GET"])
 def health_check():
     """Health check endpoint."""
-    database = {"provider": DATABASE_PROVIDER, "connected": False}
+    global _health_check_cache
+    now_ts = time.time()
+    with _health_check_cache_lock:
+        if (
+            isinstance(_health_check_cache, dict)
+            and now_ts - float(_health_check_cache.get("checked_at") or 0) <= HEALTH_CHECK_CACHE_TTL_SECONDS
+        ):
+            payload = dict(_health_check_cache.get("payload") or {})
+            payload["timestamp"] = datetime.now(APP_TIMEZONE).isoformat()
+            payload["cache"] = {"hit": True, "ttl_seconds": HEALTH_CHECK_CACHE_TTL_SECONDS}
+            return jsonify(payload)
 
-    if db_client:
-        try:
-            db_client.table("admin_sessions").select("id").limit(1).execute()
-            database["connected"] = True
-        except Exception as e:
-            database["error"] = str(e)
-
+    database = {"provider": DATABASE_PROVIDER, "connected": bool(db_client)}
     status = "healthy" if database["connected"] else "degraded"
-    return jsonify(
-        {
-            "status": status,
-            "timestamp": datetime.now(APP_TIMEZONE).isoformat(),
-            "database": database,
-        }
-    )
+    payload = {
+        "status": status,
+        "timestamp": datetime.now(APP_TIMEZONE).isoformat(),
+        "database": database,
+        "cache": {"hit": False, "ttl_seconds": HEALTH_CHECK_CACHE_TTL_SECONDS},
+    }
+    with _health_check_cache_lock:
+        _health_check_cache = {"checked_at": now_ts, "payload": dict(payload)}
+    return jsonify(payload)
 
 
 @api_bp.route("/auth/login", methods=["POST"])
@@ -2319,6 +2418,15 @@ def _request_events_aggregate_cache_key(
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
+def _ceil_datetime_to_bucket(value: datetime, bucket_seconds: int) -> datetime:
+    if bucket_seconds <= 1:
+        return value.astimezone(timezone.utc)
+    dt = value.astimezone(timezone.utc)
+    epoch = int(dt.timestamp())
+    bucketed_epoch = ((epoch + bucket_seconds - 1) // bucket_seconds) * bucket_seconds
+    return datetime.fromtimestamp(bucketed_epoch, tz=timezone.utc)
+
+
 def _read_request_events_aggregate_cache(cache_key: str) -> Optional[Dict[str, Any]]:
     cache_path = REQUEST_EVENTS_AGGREGATE_CACHE_DIR / f"{cache_key}.json"
     try:
@@ -2397,7 +2505,14 @@ def request_events_aggregate():
         return jsonify({"error": "invalid from datetime"}), 400
 
     to_str = (request.args.get("to") or "").strip()
-    to_dt = _parse_iso_datetime(to_str) if to_str else _utcnow()
+    if to_str:
+        to_dt = _parse_iso_datetime(to_str)
+        if to_dt and REQUEST_EVENTS_AGGREGATE_TO_BUCKET_SECONDS > 1:
+            now = _utcnow()
+            if to_dt >= now - timedelta(seconds=REQUEST_EVENTS_AGGREGATE_TO_BUCKET_SECONDS):
+                to_dt = _ceil_datetime_to_bucket(to_dt, REQUEST_EVENTS_AGGREGATE_TO_BUCKET_SECONDS)
+    else:
+        to_dt = _ceil_datetime_to_bucket(_utcnow(), REQUEST_EVENTS_AGGREGATE_TO_BUCKET_SECONDS)
     if not to_dt:
         return jsonify({"error": "invalid to datetime"}), 400
 

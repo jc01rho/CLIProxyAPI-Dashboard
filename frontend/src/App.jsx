@@ -5,6 +5,7 @@ import Dashboard from './components/Dashboard'
 const FRONTEND_AUTO_REFRESH_MS = Math.max(1000, Number(import.meta.env.VITE_AUTO_REFRESH_SECONDS || 300) * 1000)
 const COLLECTOR_BASE = '/api/collector'
 const SESSION_FETCH_TIMEOUT_MS = Math.max(1000, Number(import.meta.env.VITE_SESSION_FETCH_TIMEOUT_MS || 5000))
+const REQUEST_EVENT_AGGREGATE_TO_BUCKET_MS = Math.max(1000, Number(import.meta.env.VITE_REQUEST_EVENT_AGGREGATE_TO_BUCKET_SECONDS || 300) * 1000)
 const DEV_BYPASS_AUTH = import.meta.env.DEV && String(import.meta.env.VITE_DEV_BYPASS_AUTH || '').toLowerCase() === 'true'
 const DEV_MOCK_SKILLS = import.meta.env.DEV && String(import.meta.env.VITE_DEV_MOCK_SKILLS || '').toLowerCase() === 'true'
 
@@ -556,7 +557,12 @@ const fetchRequestEventAggregate = async (startTime, endTime, granularity = 'day
         const url = new URL(`${COLLECTOR_BASE}/request_events/aggregate`, window.location.origin)
         url.searchParams.set('from', startTime)
         url.searchParams.set('granularity', granularity)
-        if (endTime) url.searchParams.set('to', endTime)
+        if (endTime) {
+            url.searchParams.set('to', endTime)
+        } else {
+            const bucketedTo = new Date(Math.ceil(Date.now() / REQUEST_EVENT_AGGREGATE_TO_BUCKET_MS) * REQUEST_EVENT_AGGREGATE_TO_BUCKET_MS)
+            url.searchParams.set('to', bucketedTo.toISOString())
+        }
         const response = await fetch(url.toString(), {
             credentials: 'include',
             headers: { Accept: 'application/json' },

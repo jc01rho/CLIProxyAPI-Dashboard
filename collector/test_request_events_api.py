@@ -211,6 +211,72 @@ class TransformQueueEventCostProviderTests(unittest.TestCase):
         finally:
             self.module.db_client = original_db
 
+    def test_admin_session_row_is_cached_for_ttl(self):
+        calls = []
+        row = {
+            "id": 7,
+            "token_hash": self.module._hash_session_token("session-token"),
+            "expires_at": "2026-05-01T01:00:00+00:00",
+            "revoked_at": None,
+            "remember_me": False,
+        }
+
+        class _SessionTable(_DummyTable):
+            def single(self):
+                return self
+            def execute(self):
+                calls.append("select")
+                return types.SimpleNamespace(data=row)
+
+        class _DB:
+            def table(self, name):
+                return _SessionTable()
+
+        original_db = self.module.db_client
+        original_ttl = self.module.ADMIN_SESSION_CACHE_TTL_SECONDS
+        self.module.db_client = _DB()
+        self.module.ADMIN_SESSION_CACHE_TTL_SECONDS = 300
+        self.module._admin_session_cache.clear()
+        try:
+            with mock.patch.object(self.module, "_utcnow", return_value=datetime(2026, 5, 1, tzinfo=timezone.utc)):
+                self.assertEqual(self.module._get_session_row("session-token")["id"], 7)
+                self.assertEqual(self.module._get_session_row("session-token")["id"], 7)
+            self.assertEqual(calls, ["select"])
+        finally:
+            self.module._admin_session_cache.clear()
+            self.module.ADMIN_SESSION_CACHE_TTL_SECONDS = original_ttl
+            self.module.db_client = original_db
+
+    def test_touch_session_is_throttled(self):
+        updates = []
+
+        class _TouchTable(_DummyTable):
+            def update(self, payload):
+                updates.append(payload)
+                return self
+            def eq(self, *a, **kw):
+                return self
+
+        class _DB:
+            def table(self, name):
+                return _TouchTable()
+
+        original_db = self.module.db_client
+        original_interval = self.module.ADMIN_SESSION_TOUCH_INTERVAL_SECONDS
+        self.module.db_client = _DB()
+        self.module.ADMIN_SESSION_TOUCH_INTERVAL_SECONDS = 300
+        self.module._admin_session_last_touch_at.clear()
+        try:
+            with mock.patch.object(self.module.time, "time", side_effect=[1000, 1010, 1301]):
+                self.module._touch_session({"id": 7})
+                self.module._touch_session({"id": 7})
+                self.module._touch_session({"id": 7})
+            self.assertEqual(len(updates), 2)
+        finally:
+            self.module._admin_session_last_touch_at.clear()
+            self.module.ADMIN_SESSION_TOUCH_INTERVAL_SECONDS = original_interval
+            self.module.db_client = original_db
+
     def test_provider_defaults_to_empty_string(self):
         payload = {"timestamp": "2026-04-15T10:00:00Z", "model": "gpt-4o"}
         row = self.module._transform_queue_event(payload)
@@ -640,6 +706,18 @@ class RequestEventsAggregateCacheTests(unittest.TestCase):
         first = self.module._request_events_aggregate_cache_key(from_dt, to_dt, "day", {"provider": "openai"})
         second = self.module._request_events_aggregate_cache_key(from_dt, to_dt, "day", {"provider": "openai"})
         self.assertEqual(first, second)
+
+    def test_ceil_datetime_to_bucket_stabilizes_live_to(self):
+        from datetime import datetime, timezone
+        value = datetime(2026, 5, 1, 10, 2, 3, tzinfo=timezone.utc)
+        bucketed = self.module._ceil_datetime_to_bucket(value, 300)
+        self.assertEqual(bucketed.isoformat(), "2026-05-01T10:05:00+00:00")
+
+    def test_ceil_datetime_to_bucket_keeps_boundary(self):
+        from datetime import datetime, timezone
+        value = datetime(2026, 5, 1, 10, 5, 0, tzinfo=timezone.utc)
+        bucketed = self.module._ceil_datetime_to_bucket(value, 300)
+        self.assertEqual(bucketed.isoformat(), "2026-05-01T10:05:00+00:00")
 
     def test_cache_write_and_read_hit(self):
         payload = {"granularity": "day", "buckets": [{"request_count": 2}]}

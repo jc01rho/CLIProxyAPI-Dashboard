@@ -132,6 +132,433 @@ const inferProvider = (cred) => {
     return 'unknown'
 }
 
+const isRequestEventAggregate = (ev) => ['daily_request_events', 'request_events_upload_window'].includes(ev?.raw_detail?.aggregate)
+const isDailyRequestEventAggregate = (ev) => ev?.raw_detail?.aggregate === 'daily_request_events'
+
+const removeRowsCoveredByDailyAggregates = (events) => {
+    const coveredIds = new Set()
+    for (const ev of events || []) {
+        if (!isDailyRequestEventAggregate(ev)) continue
+        for (const id of ev?.raw_detail?.included_ids || []) {
+            coveredIds.add(String(id))
+        }
+    }
+    if (coveredIds.size === 0) return events || []
+    return (events || []).filter((ev) => {
+        if (isDailyRequestEventAggregate(ev)) return true
+        const id = ev?.id
+        return id === undefined || id === null || !coveredIds.has(String(id))
+    })
+}
+
+const requestEventStatDate = (ev) => {
+    const aggregateDay = ev?.raw_detail?.day
+    if (typeof aggregateDay === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(aggregateDay)) return aggregateDay
+    const value = aggregateDay || ev?.occurred_at
+    if (!value) return null
+    const parsed = new Date(value)
+    if (Number.isNaN(parsed.getTime())) return null
+    return parsed.toLocaleDateString('en-CA')
+}
+
+const requestEventHourBucket = (ev) => {
+    const value = ev?.raw_detail?.first_occurred_at || ev?.occurred_at
+    if (!value) return null
+    const parsed = new Date(value)
+    if (Number.isNaN(parsed.getTime())) return null
+    return `${parsed.toLocaleDateString('en-CA')} ${parsed.getHours().toString().padStart(2, '0')}:00`
+}
+
+const normalizeUsageName = (value, fallback = 'Unknown') => {
+    if (value === undefined || value === null || value === '') return fallback
+    return String(value)
+}
+
+const emptyModelStats = () => ({
+    requests: 0,
+    success: 0,
+    failure: 0,
+    tokens: 0,
+    total_tokens: 0,
+    cost: 0,
+    estimated_cost_usd: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    reasoning_tokens: 0,
+    cached_tokens: 0,
+})
+
+const addModelStats = (bucket, modelName, data = {}) => {
+    const name = normalizeUsageName(modelName)
+    if (!bucket[name]) bucket[name] = emptyModelStats()
+    const target = bucket[name]
+    const requests = Number(data.requests ?? data.request_count) || 0
+    const success = Number(data.success ?? data.success_count) || 0
+    const failure = Number(data.failure ?? data.failure_count ?? data.failed_count) || 0
+    const tokens = Number(data.tokens ?? data.total_tokens) || 0
+    const cost = Number(data.cost ?? data.estimated_cost_usd) || 0
+    target.requests += requests
+    target.success += success
+    target.failure += failure
+    target.tokens += tokens
+    target.total_tokens += tokens
+    target.cost += cost
+    target.estimated_cost_usd += cost
+    target.input_tokens += Number(data.input_tokens) || 0
+    target.output_tokens += Number(data.output_tokens) || 0
+    target.reasoning_tokens += Number(data.reasoning_tokens) || 0
+    target.cached_tokens += Number(data.cached_tokens) || 0
+}
+
+const buildRequestEventUsageFallback = (events, includeDay = () => true) => {
+    const effectiveEvents = removeRowsCoveredByDailyAggregates(events)
+    const dailyMap = new Map()
+    const modelMap = {}
+    const endpointMap = {}
+    const credentialMap = {}
+    const apiKeyMap = {}
+    const hourlyUsageMap = new Map()
+    const daySeriesMap = new Map()
+    const hourSeriesMap = new Map()
+
+    const ensureDaily = (day) => {
+        if (!dailyMap.has(day)) {
+            dailyMap.set(day, {
+                stat_date: day,
+                total_requests: 0,
+                total_tokens: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                reasoning_tokens: 0,
+                cached_tokens: 0,
+                success_count: 0,
+                failure_count: 0,
+                estimated_cost_usd: 0,
+                models: {},
+            })
+        }
+        return dailyMap.get(day)
+    }
+
+    const ensureSeriesRow = (map, key, bucketKey) => {
+        if (!key) return null
+        if (!map.has(key)) {
+            map.set(key, {
+                [bucketKey]: key,
+                total_requests: 0,
+                total_tokens: 0,
+                total_cost: 0,
+                keys: {},
+            })
+        }
+        return map.get(key)
+    }
+
+    const ensureHourlyUsage = (hour) => {
+        if (!hour) return null
+        const time = hour.slice(11, 16)
+        if (!hourlyUsageMap.has(time)) {
+            hourlyUsageMap.set(time, {
+                time,
+                requests: 0,
+                tokens: 0,
+                cost: 0,
+                models: {},
+            })
+        }
+        return hourlyUsageMap.get(time)
+    }
+
+    const addHourlyUsage = (hour, modelName, data = {}) => {
+        const row = ensureHourlyUsage(hour)
+        if (!row) return
+        const requests = Number(data.requests ?? data.request_count) || 0
+        const tokens = Number(data.tokens ?? data.total_tokens) || 0
+        const cost = Number(data.cost ?? data.estimated_cost_usd) || 0
+        row.requests += requests
+        row.tokens += tokens
+        row.cost += cost
+        addModelStats(row.models, modelName, data)
+    }
+
+    const addCredentialStats = (authName, modelName, data = {}, day, hour) => {
+        const auth = normalizeUsageName(authName)
+        const source = normalizeUsageName(data.source, '')
+        const label = source || (auth === 'Unknown' ? 'Unknown auth' : `Auth ${auth}`)
+        const provider = normalizeUsageName(data.provider, 'request-events')
+        const requests = Number(data.requests ?? data.request_count) || 0
+        if (requests <= 0) return
+        const success = Number(data.success ?? data.success_count) || 0
+        const failure = Number(data.failure ?? data.failure_count ?? data.failed_count) || 0
+        const tokens = Number(data.tokens ?? data.total_tokens) || 0
+        const cost = Number(data.cost ?? data.estimated_cost_usd) || 0
+        const metric = {
+            requests,
+            total_requests: requests,
+            success,
+            success_count: success,
+            failure,
+            failure_count: failure,
+            tokens,
+            total_tokens: tokens,
+            cost,
+            estimated_cost_usd: cost,
+            input_tokens: Number(data.input_tokens) || 0,
+            output_tokens: Number(data.output_tokens) || 0,
+            reasoning_tokens: Number(data.reasoning_tokens) || 0,
+            cached_tokens: Number(data.cached_tokens) || 0,
+        }
+
+        if (!credentialMap[auth]) {
+            credentialMap[auth] = {
+                auth_index: auth,
+                source: source || label,
+                label,
+                email: label,
+                provider,
+                total_requests: 0,
+                success_count: 0,
+                failure_count: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                reasoning_tokens: 0,
+                cached_tokens: 0,
+                total_tokens: 0,
+                estimated_cost_usd: 0,
+                api_keys: [label],
+                models: {},
+            }
+        }
+        if (!apiKeyMap[auth]) {
+            apiKeyMap[auth] = {
+                api_key_name: label,
+                display_name: label,
+                total_requests: 0,
+                total_tokens: 0,
+                success_count: 0,
+                failure_count: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                estimated_cost_usd: 0,
+                credentials_used: [label],
+                models: {},
+            }
+        }
+
+        for (const target of [credentialMap[auth], apiKeyMap[auth]]) {
+            target.total_requests += requests
+            target.success_count += success
+            target.failure_count += failure
+            target.input_tokens += metric.input_tokens
+            target.output_tokens += metric.output_tokens
+            target.reasoning_tokens = (target.reasoning_tokens || 0) + metric.reasoning_tokens
+            target.cached_tokens = (target.cached_tokens || 0) + metric.cached_tokens
+            target.total_tokens += tokens
+            target.estimated_cost_usd = (target.estimated_cost_usd || 0) + cost
+            addModelStats(target.models, modelName, metric)
+        }
+
+        for (const [map, key, bucketKey] of [[daySeriesMap, day, 'stat_date'], [hourSeriesMap, hour, 'hour']]) {
+            const row = ensureSeriesRow(map, key, bucketKey)
+            if (!row) continue
+            if (!row.keys[auth]) {
+                row.keys[auth] = {
+                    api_key_name: label,
+                    total_requests: 0,
+                    total_tokens: 0,
+                    total_cost: 0,
+                    success_count: 0,
+                    failure_count: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    estimated_cost_usd: 0,
+                }
+            }
+            const keyRow = row.keys[auth]
+            keyRow.total_requests += requests
+            keyRow.total_tokens += tokens
+            keyRow.total_cost += cost
+            keyRow.success_count += success
+            keyRow.failure_count += failure
+            keyRow.input_tokens += metric.input_tokens
+            keyRow.output_tokens += metric.output_tokens
+            keyRow.estimated_cost_usd += cost
+            row.total_requests += requests
+            row.total_tokens += tokens
+            row.total_cost += cost
+        }
+    }
+
+    const addEndpointStats = (endpointName, data = {}) => {
+        const endpoint = normalizeUsageName(endpointName)
+        if (!endpointMap[endpoint]) {
+            endpointMap[endpoint] = {
+                api_endpoint: endpoint,
+                request_count: 0,
+                total_tokens: 0,
+                estimated_cost_usd: 0,
+                models: {},
+            }
+        }
+        const target = endpointMap[endpoint]
+        target.request_count += Number(data.requests ?? data.request_count) || 0
+        target.total_tokens += Number(data.tokens ?? data.total_tokens) || 0
+        target.estimated_cost_usd += Number(data.cost ?? data.estimated_cost_usd) || 0
+        if (data.models && typeof data.models === 'object') {
+            for (const [modelName, modelData] of Object.entries(data.models)) {
+                addModelStats(target.models, modelName, modelData)
+            }
+        }
+    }
+
+    for (const ev of effectiveEvents || []) {
+        const day = requestEventStatDate(ev)
+        if (!day || !includeDay(day)) continue
+        const hour = requestEventHourBucket(ev)
+        const daily = ensureDaily(day)
+
+        if (isRequestEventAggregate(ev)) {
+            const detail = ev.raw_detail || {}
+            daily.total_requests += Number(detail.request_count) || 0
+            daily.success_count += Number(detail.success_count) || 0
+            daily.failure_count += Number(detail.failed_count) || 0
+            daily.input_tokens += Number(detail.input_tokens) || 0
+            daily.output_tokens += Number(detail.output_tokens) || 0
+            daily.reasoning_tokens += Number(detail.reasoning_tokens) || 0
+            daily.cached_tokens += Number(detail.cached_tokens) || 0
+            daily.total_tokens += Number(detail.total_tokens) || 0
+            daily.estimated_cost_usd += Number(detail.estimated_cost_usd) || 0
+            for (const [modelName, data] of Object.entries(detail.models || {})) {
+                addModelStats(daily.models, modelName, data)
+                addModelStats(modelMap, modelName, data)
+                addHourlyUsage(hour, modelName, data)
+            }
+            for (const [endpointName, data] of Object.entries(detail.endpoints || {})) {
+                addEndpointStats(endpointName, data)
+            }
+            const credentialRows = Object.keys(detail.source_models || {}).length > 0
+                ? Object.values(detail.source_models || {})
+                : Object.values(detail.auth_models || {})
+            for (const row of credentialRows) {
+                addCredentialStats(row.auth || row.source, row.model, row, day, hour)
+            }
+            continue
+        }
+
+        const failed = Boolean(ev.failed)
+        const modelName = normalizeUsageName(ev.model_name)
+        const endpointName = normalizeUsageName(ev.api_endpoint)
+        const auth = normalizeUsageName(ev.auth_index)
+        const row = {
+            requests: 1,
+            success: failed ? 0 : 1,
+            failure: failed ? 1 : 0,
+            tokens: Number(ev.total_tokens) || 0,
+            cost: Number(ev.estimated_cost_usd) || 0,
+            input_tokens: Number(ev.input_tokens) || 0,
+            output_tokens: Number(ev.output_tokens) || 0,
+            reasoning_tokens: Number(ev.reasoning_tokens) || 0,
+            cached_tokens: Number(ev.cached_tokens) || 0,
+            provider: normalizeUsageName(ev.provider, 'request-events'),
+        }
+        daily.total_requests += 1
+        daily.success_count += row.success
+        daily.failure_count += row.failure
+        daily.input_tokens += row.input_tokens
+        daily.output_tokens += row.output_tokens
+        daily.reasoning_tokens += row.reasoning_tokens
+        daily.cached_tokens += row.cached_tokens
+        daily.total_tokens += row.tokens
+        daily.estimated_cost_usd += row.cost
+        addModelStats(daily.models, modelName, row)
+        addModelStats(modelMap, modelName, row)
+        addHourlyUsage(hour, modelName, row)
+        addEndpointStats(endpointName, row)
+        addCredentialStats(auth, modelName, row, day, hour)
+    }
+
+    const toSeries = (map, bucketKey) => Array.from(map.values())
+        .map(row => ({
+            ...row,
+            keys: Object.values(row.keys)
+                .map(keyRow => ({
+                    ...keyRow,
+                    success_rate: keyRow.total_requests > 0
+                        ? Math.round((keyRow.success_count / keyRow.total_requests) * 1000) / 10
+                        : 0,
+                }))
+                .sort((a, b) => b.total_requests - a.total_requests),
+        }))
+        .sort((a, b) => String(a[bucketKey] || '').localeCompare(String(b[bucketKey] || '')))
+
+    const credentials = Object.values(credentialMap)
+        .map(cred => ({
+            ...cred,
+            provider: inferProvider(cred),
+            success_rate: cred.total_requests > 0 ? Math.round((cred.success_count / cred.total_requests) * 1000) / 10 : 0,
+        }))
+        .sort((a, b) => b.total_requests - a.total_requests)
+    const apiKeys = Object.values(apiKeyMap)
+        .map(key => ({
+            ...key,
+            success_rate: key.total_requests > 0 ? Math.round((key.success_count / key.total_requests) * 1000) / 10 : 0,
+        }))
+        .sort((a, b) => b.total_requests - a.total_requests)
+
+    return {
+        dailyRows: Array.from(dailyMap.values()).sort((a, b) => a.stat_date.localeCompare(b.stat_date)),
+        dailyByDate: dailyMap,
+        modelRows: Object.entries(modelMap)
+            .map(([modelName, data]) => ({
+                model_name: modelName,
+                request_count: data.requests,
+                total_tokens: data.total_tokens || data.tokens,
+                estimated_cost_usd: data.estimated_cost_usd || data.cost,
+                input_tokens: data.input_tokens,
+                output_tokens: data.output_tokens,
+                reasoning_tokens: data.reasoning_tokens,
+                cached_tokens: data.cached_tokens,
+            }))
+            .sort((a, b) => b.estimated_cost_usd - a.estimated_cost_usd),
+        endpointRows: Object.values(endpointMap).sort((a, b) => b.estimated_cost_usd - a.estimated_cost_usd),
+        hourlyRows: Array.from(hourlyUsageMap.values()).sort((a, b) => a.time.localeCompare(b.time)),
+        credentialData: {
+            credentials,
+            api_keys: apiKeys,
+            total_credentials: credentials.length,
+            total_api_keys: apiKeys.length,
+        },
+        credentialTimeSeries: {
+            byDay: toSeries(daySeriesMap, 'stat_date'),
+            byHour: toSeries(hourSeriesMap, 'hour'),
+            meta: {
+                hasRawSnapshots: true,
+                hasHourlyData: hourSeriesMap.size > 0,
+                hourlySupported: true,
+                dailyLoaded: true,
+                hourlyLoaded: true,
+            },
+        },
+    }
+}
+
+const fetchRequestEventRows = async (startTime, endTime) => {
+    try {
+        return await selectRows('request_events', {
+            select: 'id,event_uid,occurred_at,api_endpoint,model_name,source_id,auth_index,latency_ms,failed,input_tokens,output_tokens,reasoning_tokens,cached_tokens,total_tokens,provider,estimated_cost_usd,raw_detail',
+            filters: [
+                ...(startTime ? [{ column: 'occurred_at', operator: 'gte', value: startTime }] : []),
+                ...(endTime ? [{ column: 'occurred_at', operator: 'lt', value: endTime }] : []),
+            ],
+            order: { column: 'occurred_at', ascending: false },
+            limit: 2000,
+        })
+    } catch (error) {
+        console.debug('request_events not available for dashboard fallback:', error?.message || error)
+        return []
+    }
+}
+
 // Helper to get date boundaries based on range ID
 // Uses local timezone for date display, converts to UTC for timestamp queries
 const getDateBoundaries = (rangeId, customRange) => {
@@ -396,7 +823,9 @@ function App() {
         try {
             setCredentialLoading(true)
 
-            const { startDate, endDate } = getDateBoundaries(rangeId, customRange)
+            const { startTime, endTime, startDate, endDate } = getDateBoundaries(rangeId, customRange)
+            const requestEventsRows = await fetchRequestEventRows(startTime, endTime)
+            const requestEventFallback = buildRequestEventUsageFallback(requestEventsRows || [])
 
             let useDailyStats = false
             let dailyRowsForSeries = []
@@ -550,7 +979,6 @@ function App() {
                 })
                 .sort((a, b) => (a.stat_date || '').localeCompare(b.stat_date || ''))
 
-            const { startTime, endTime } = getDateBoundaries(rangeId, customRange)
             const snapshotsRawRows = await selectRows('usage_snapshots', {
                 select: 'id,collected_at,raw_data,model_usage(api_endpoint,estimated_cost_usd)',
                 filters: [
@@ -736,16 +1164,28 @@ function App() {
                 .sort((a, b) => a.hour.localeCompare(b.hour))
 
             setCredentialTimeSeries({
-                byDay: apiKeyDailySeries,
-                byHour: apiKeyHourlySeries,
+                byDay: apiKeyDailySeries.length > 0 ? apiKeyDailySeries : requestEventFallback.credentialTimeSeries.byDay,
+                byHour: apiKeyHourlySeries.length > 0 ? apiKeyHourlySeries : requestEventFallback.credentialTimeSeries.byHour,
                 meta: {
                     hasRawSnapshots: !snapshotsRawError,
-                    hasHourlyData: apiKeyHourlySeries.length > 0,
+                    hasHourlyData: apiKeyHourlySeries.length > 0 || requestEventFallback.credentialTimeSeries.byHour.length > 0,
+                    dailyLoaded: true,
+                    hourlyLoaded: true,
                     rangeId,
                 },
             })
 
             if (!useDailyStats) {
+                if (requestEventFallback.credentialData.credentials.length > 0 || requestEventFallback.credentialData.api_keys.length > 0) {
+                    setCredentialData(requestEventFallback.credentialData)
+                    setCredentialTimeSeries({
+                        ...requestEventFallback.credentialTimeSeries,
+                        meta: { ...requestEventFallback.credentialTimeSeries.meta, rangeId },
+                    })
+                    setCredentialSetupRequired(false)
+                    return
+                }
+
                 const rows = await selectSingle('credential_usage_summary', {
                     select: '*',
                     filters: [{ column: 'id', operator: 'eq', value: 1 }],
@@ -786,6 +1226,9 @@ function App() {
             }
 
             const { startTime, endTime, startDate, endDate } = getDateBoundaries(rangeId, customRange)
+
+            const requestEventsData = await fetchRequestEventRows(startTime, endTime)
+            const requestEventFallback = buildRequestEventUsageFallback(requestEventsData || [])
 
             const latestSnapshots = await selectRows('usage_snapshots', {
                 select: '*',
@@ -980,25 +1423,30 @@ function App() {
 
             const allDates = new Set([
                 ...Object.keys(dailyMap),
-                ...Object.keys(dailyStatsFromDB)
+                ...Object.keys(dailyStatsFromDB),
+                ...requestEventFallback.dailyRows.map(row => row.stat_date)
             ])
 
             const mergedDailyArray = Array.from(allDates).map(dateKey => {
                 const fromDB = dailyStatsFromDB[dateKey]
                 const calculated = dailyMap[dateKey]
-                const dayModels = breakdownByDate[dateKey] || {}
+                const fallbackDay = requestEventFallback.dailyByDate.get(dateKey)
+                const useFallbackDay = fallbackDay && (fromDB?.total_requests ?? calculated?.requests ?? 0) <= 0
+                const dayModels = useFallbackDay ? fallbackDay.models : (breakdownByDate[dateKey] || {})
                 const fallbackInputTokens = Object.values(dayModels).reduce((sum, model) => sum + (model.input_tokens || 0), 0)
                 const fallbackOutputTokens = Object.values(dayModels).reduce((sum, model) => sum + (model.output_tokens || 0), 0)
 
                 return {
                     stat_date: dateKey,
-                    total_requests: fromDB?.total_requests ?? (calculated?.requests || 0),
-                    total_tokens: fromDB?.total_tokens ?? (calculated?.tokens || 0),
-                    input_tokens: fromDB?.input_tokens ?? fallbackInputTokens,
-                    output_tokens: fromDB?.output_tokens ?? fallbackOutputTokens,
-                    success_count: fromDB?.success_count ?? (calculated?.success || 0),
-                    failure_count: fromDB?.failure_count ?? (calculated?.failure || 0),
-                    estimated_cost_usd: fromDB?.estimated_cost_usd ?? 0,
+                    total_requests: useFallbackDay ? fallbackDay.total_requests : (fromDB?.total_requests ?? (calculated?.requests || 0)),
+                    total_tokens: useFallbackDay ? fallbackDay.total_tokens : (fromDB?.total_tokens ?? (calculated?.tokens || 0)),
+                    input_tokens: useFallbackDay ? fallbackDay.input_tokens : (fromDB?.input_tokens ?? fallbackInputTokens),
+                    output_tokens: useFallbackDay ? fallbackDay.output_tokens : (fromDB?.output_tokens ?? fallbackOutputTokens),
+                    reasoning_tokens: useFallbackDay ? fallbackDay.reasoning_tokens : 0,
+                    cached_tokens: useFallbackDay ? fallbackDay.cached_tokens : 0,
+                    success_count: useFallbackDay ? fallbackDay.success_count : (fromDB?.success_count ?? (calculated?.success || 0)),
+                    failure_count: useFallbackDay ? fallbackDay.failure_count : (fromDB?.failure_count ?? (calculated?.failure || 0)),
+                    estimated_cost_usd: useFallbackDay ? fallbackDay.estimated_cost_usd : (fromDB?.estimated_cost_usd ?? 0),
                     models: dayModels
                 }
             }).sort((a, b) => a.stat_date.localeCompare(b.stat_date))
@@ -1009,11 +1457,13 @@ function App() {
             const hoursToShow = rangeId === 'today' ? now.getHours() + 1 : 24
             const hourlyArray = Array.from({ length: hoursToShow }, (_, i) => {
                 const hourKey = i.toString().padStart(2, '0')
-                const hData = hourlyMap[hourKey] || { requests: 0, tokens: 0, models: {} }
+                const fallbackHour = requestEventFallback.hourlyRows.find(row => row.time === `${hourKey}:00`)
+                const hData = hourlyMap[hourKey] || fallbackHour || { requests: 0, tokens: 0, models: {} }
                 return {
                     time: `${hourKey}:00`,
                     requests: hData.requests,
                     tokens: hData.tokens,
+                    cost: hData.cost || 0,
                     models: hData.models || {}
                 }
             })
@@ -1027,6 +1477,9 @@ function App() {
                 const finalEndpoints = Object.values(aggregatedBreakdown.endpoints)
                     .sort((a, b) => b.estimated_cost_usd - a.estimated_cost_usd)
                 setEndpointUsage(finalEndpoints)
+            } else if (requestEventFallback.modelRows.length > 0 || requestEventFallback.endpointRows.length > 0) {
+                setModelUsage(requestEventFallback.modelRows)
+                setEndpointUsage(requestEventFallback.endpointRows)
             } else {
                 if (snapshotsData?.length > 0) {
                     let totalByModel = new Map()
@@ -1198,7 +1651,7 @@ function App() {
                 }
             }
 
-            const [skillRunsData, skillDailyData, requestEventsData] = await Promise.all([
+            const [skillRunsData, skillDailyData] = await Promise.all([
                 selectRows('skill_runs', {
                     select: 'event_uid,tool_use_id,skill_name,session_id,machine_id,source,triggered_at,status,error_type,error_message,attempt_no,arguments,tokens_used,output_tokens,duration_ms,model,tool_calls,estimated_cost_usd,is_skeleton,project_dir',
                     filters: [
@@ -1216,17 +1669,6 @@ function App() {
                         ...(endDate ? [{ column: 'stat_date', operator: 'lt', value: endDate }] : []),
                     ],
                     order: { column: 'stat_date', ascending: true },
-                }),
-                // Events tab uses request_events as its exclusive source of truth.
-                // Do not merge these rows into snapshot-based daily/model aggregates.
-                selectRows('request_events', {
-                    select: 'id,event_uid,occurred_at,api_endpoint,model_name,source_id,auth_index,latency_ms,failed,input_tokens,output_tokens,reasoning_tokens,cached_tokens,total_tokens,provider,estimated_cost_usd,raw_detail',
-                    filters: [
-                        ...(startTime ? [{ column: 'occurred_at', operator: 'gte', value: startTime }] : []),
-                        ...(endTime ? [{ column: 'occurred_at', operator: 'lt', value: endTime }] : []),
-                    ],
-                    order: { column: 'occurred_at', ascending: false },
-                    limit: 2000,
                 }),
             ])
 

@@ -607,6 +607,28 @@ def _merge_numeric_bucket(target: Dict[str, Any], source: Dict[str, Any], fields
             pass
 
 
+_REQUEST_EVENT_BUCKET_FIELDS = (
+    "requests", "success", "failure", "tokens", "cost",
+    "input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens",
+)
+
+
+def _empty_request_event_bucket(**labels: Any) -> Dict[str, Any]:
+    bucket = {
+        "requests": 0,
+        "success": 0,
+        "failure": 0,
+        "tokens": 0,
+        "cost": 0.0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "cached_tokens": 0,
+    }
+    bucket.update(labels)
+    return bucket
+
+
 def _slim_raw_data(raw_data: Any) -> Any:
     if not raw_data or not isinstance(raw_data, dict):
         return raw_data
@@ -1192,6 +1214,7 @@ def _compact_request_events_daily() -> Dict[str, int]:
             "latency_count": 0,
             "models": {},
             "auth_models": {},
+            "source_models": {},
             "providers": {},
             "endpoints": {},
         })
@@ -1206,13 +1229,20 @@ def _compact_request_events_daily() -> Dict[str, int]:
                 agg["estimated_cost_usd"] += float(detail.get("estimated_cost_usd") or 0)
             except Exception:
                 pass
-            for bucket_key in ("models", "auth_models", "providers", "endpoints"):
+            for bucket_key in ("models", "auth_models", "source_models", "providers", "endpoints"):
                 for name, data in (detail.get(bucket_key) or {}).items():
                     if bucket_key == "auth_models":
-                        target = agg[bucket_key].setdefault(name, {"auth": data.get("auth"), "model": data.get("model"), "requests": 0, "success": 0, "failure": 0, "tokens": 0, "cost": 0.0})
+                        target = agg[bucket_key].setdefault(name, _empty_request_event_bucket(auth=data.get("auth"), model=data.get("model")))
+                    elif bucket_key == "source_models":
+                        target = agg[bucket_key].setdefault(name, _empty_request_event_bucket(source=data.get("source"), auth=data.get("auth"), provider=data.get("provider"), model=data.get("model")))
                     else:
-                        target = agg[bucket_key].setdefault(name, {"requests": 0, "success": 0, "failure": 0, "tokens": 0, "cost": 0.0})
-                    _merge_numeric_bucket(target, data, ("requests", "success", "failure", "tokens", "cost"))
+                        target = agg[bucket_key].setdefault(name, _empty_request_event_bucket())
+                    _merge_numeric_bucket(target, data, _REQUEST_EVENT_BUCKET_FIELDS)
+                    if bucket_key == "endpoints" and isinstance(data.get("models"), dict):
+                        endpoint_models = target.setdefault("models", {})
+                        for model_name, model_data in data.get("models", {}).items():
+                            model_target = endpoint_models.setdefault(model_name, _empty_request_event_bucket())
+                            _merge_numeric_bucket(model_target, model_data, _REQUEST_EVENT_BUCKET_FIELDS)
             continue
 
         agg["request_count"] += 1
@@ -1233,39 +1263,58 @@ def _compact_request_events_daily() -> Dict[str, int]:
 
         model = str(row.get("model_name") or "Unknown")
         auth = str(row.get("auth_index") if row.get("auth_index") is not None else "Unknown") or "Unknown"
+        source = str(row.get("source_id") or "Unknown")
         provider = str(row.get("provider") or "Unknown")
         endpoint = str(row.get("api_endpoint") or "Unknown")
+        total_tokens = _safe_int(row.get("total_tokens"), 0)
+        input_tokens = _safe_int(row.get("input_tokens"), 0)
+        output_tokens = _safe_int(row.get("output_tokens"), 0)
+        reasoning_tokens = _safe_int(row.get("reasoning_tokens"), 0)
+        cached_tokens = _safe_int(row.get("cached_tokens"), 0)
+        try:
+            row_cost = float(row.get("estimated_cost_usd") or 0)
+        except Exception:
+            row_cost = 0.0
 
         def add_bucket(bucket: Dict[str, Any], name: str) -> None:
-            item = bucket.setdefault(name, {"requests": 0, "success": 0, "failure": 0, "tokens": 0, "cost": 0.0})
+            item = bucket.setdefault(name, _empty_request_event_bucket())
             item["requests"] += 1
             if row.get("failed"):
                 item["failure"] += 1
             else:
                 item["success"] += 1
-            item["tokens"] += _safe_int(row.get("total_tokens"), 0)
-            try:
-                item["cost"] += float(row.get("estimated_cost_usd") or 0)
-            except Exception:
-                pass
+            item["tokens"] += total_tokens
+            item["cost"] += row_cost
+            item["input_tokens"] += input_tokens
+            item["output_tokens"] += output_tokens
+            item["reasoning_tokens"] += reasoning_tokens
+            item["cached_tokens"] += cached_tokens
 
         add_bucket(agg["models"], model)
         add_bucket(agg["providers"], provider)
         add_bucket(agg["endpoints"], endpoint)
+        endpoint_models = agg["endpoints"].setdefault(endpoint, _empty_request_event_bucket()).setdefault("models", {})
+        add_bucket(endpoint_models, model)
         auth_model_key = f"{auth}\u0000{model}"
         auth_model = agg["auth_models"].setdefault(auth_model_key, {
-            "auth": auth, "model": model, "requests": 0, "success": 0, "failure": 0, "tokens": 0, "cost": 0.0,
+            "auth": auth, "model": model, **_empty_request_event_bucket(),
         })
-        auth_model["requests"] += 1
-        if row.get("failed"):
-            auth_model["failure"] += 1
-        else:
-            auth_model["success"] += 1
-        auth_model["tokens"] += _safe_int(row.get("total_tokens"), 0)
-        try:
-            auth_model["cost"] += float(row.get("estimated_cost_usd") or 0)
-        except Exception:
-            pass
+        source_model_key = f"{source}\u0000{model}"
+        source_model = agg["source_models"].setdefault(source_model_key, {
+            "source": source, "auth": auth, "provider": provider, "model": model, **_empty_request_event_bucket(),
+        })
+        for item in (auth_model, source_model):
+            item["requests"] += 1
+            if row.get("failed"):
+                item["failure"] += 1
+            else:
+                item["success"] += 1
+            item["tokens"] += total_tokens
+            item["cost"] += row_cost
+            item["input_tokens"] += input_tokens
+            item["output_tokens"] += output_tokens
+            item["reasoning_tokens"] += reasoning_tokens
+            item["cached_tokens"] += cached_tokens
 
     if not days:
         if delete_ids:
@@ -1290,14 +1339,21 @@ def _compact_request_events_daily() -> Dict[str, int]:
                 agg["estimated_cost_usd"] = float(existing.get("estimated_cost_usd") or 0) + float(agg.get("estimated_cost_usd") or 0)
             except Exception:
                 pass
-            for bucket_key in ("models", "auth_models", "providers", "endpoints"):
+            for bucket_key in ("models", "auth_models", "source_models", "providers", "endpoints"):
                 existing_bucket = existing.get(bucket_key) if isinstance(existing.get(bucket_key), dict) else {}
                 for name, data in existing_bucket.items():
                     if bucket_key == "auth_models":
-                        target = agg[bucket_key].setdefault(name, {"auth": data.get("auth"), "model": data.get("model"), "requests": 0, "success": 0, "failure": 0, "tokens": 0, "cost": 0.0})
+                        target = agg[bucket_key].setdefault(name, _empty_request_event_bucket(auth=data.get("auth"), model=data.get("model")))
+                    elif bucket_key == "source_models":
+                        target = agg[bucket_key].setdefault(name, _empty_request_event_bucket(source=data.get("source"), auth=data.get("auth"), provider=data.get("provider"), model=data.get("model")))
                     else:
-                        target = agg[bucket_key].setdefault(name, {"requests": 0, "success": 0, "failure": 0, "tokens": 0, "cost": 0.0})
-                    _merge_numeric_bucket(target, data, ("requests", "success", "failure", "tokens", "cost"))
+                        target = agg[bucket_key].setdefault(name, _empty_request_event_bucket())
+                    _merge_numeric_bucket(target, data, _REQUEST_EVENT_BUCKET_FIELDS)
+                    if bucket_key == "endpoints" and isinstance(data.get("models"), dict):
+                        endpoint_models = target.setdefault("models", {})
+                        for model_name, model_data in data.get("models", {}).items():
+                            model_target = endpoint_models.setdefault(model_name, _empty_request_event_bucket())
+                            _merge_numeric_bucket(model_target, model_data, _REQUEST_EVENT_BUCKET_FIELDS)
         _append_daily_aggregate_included_ids(agg, existing, day_delete_ids.get(day_key, []))
         agg["estimated_cost_usd"] = round(float(agg["estimated_cost_usd"] or 0), 6)
         agg["avg_latency_ms"] = round(agg["latency_sum_ms"] / agg["latency_count"], 2) if agg["latency_count"] else 0
@@ -3143,6 +3199,7 @@ def _summarize_request_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         "estimated_cost_usd": 0.0,
         "models": {},
         "auth_models": {},
+        "source_models": {},
         "providers": {},
         "endpoints": {},
         "latency_sum_ms": 0,
@@ -3168,15 +3225,30 @@ def _summarize_request_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         model_name = str(event.get("model_name") or "Unknown")
         provider = str(event.get("provider") or "Unknown")
         endpoint = str(event.get("api_endpoint") or "Unknown")
+        source = str(event.get("source_id") or "Unknown")
         auth = str(event.get("auth_index") if event.get("auth_index") is not None else "Unknown") or "Unknown"
         total_tokens = _safe_int(event.get("total_tokens"), 0)
         try:
             cost = float(event.get("estimated_cost_usd") or 0)
         except Exception:
             cost = 0.0
+        input_tokens = _safe_int(event.get("input_tokens"), 0)
+        output_tokens = _safe_int(event.get("output_tokens"), 0)
+        reasoning_tokens = _safe_int(event.get("reasoning_tokens"), 0)
+        cached_tokens = _safe_int(event.get("cached_tokens"), 0)
 
         def add_bucket(bucket: Dict[str, Any], name: str) -> None:
-            item = bucket.setdefault(name, {"requests": 0, "success": 0, "failure": 0, "tokens": 0, "cost": 0.0})
+            item = bucket.setdefault(name, {
+                "requests": 0,
+                "success": 0,
+                "failure": 0,
+                "tokens": 0,
+                "cost": 0.0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "cached_tokens": 0,
+            })
             item["requests"] += 1
             if failed:
                 item["failure"] += 1
@@ -3184,13 +3256,30 @@ def _summarize_request_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
                 item["success"] += 1
             item["tokens"] += total_tokens
             item["cost"] += cost
+            item["input_tokens"] += input_tokens
+            item["output_tokens"] += output_tokens
+            item["reasoning_tokens"] += reasoning_tokens
+            item["cached_tokens"] += cached_tokens
 
         add_bucket(summary["models"], model_name)
         add_bucket(summary["providers"], provider)
         add_bucket(summary["endpoints"], endpoint)
+        endpoint_bucket = summary["endpoints"].setdefault(endpoint, {})
+        endpoint_models = endpoint_bucket.setdefault("models", {})
+        add_bucket(endpoint_models, model_name)
         auth_model_key = f"{auth}\u0000{model_name}"
         auth_model = summary["auth_models"].setdefault(auth_model_key, {
-            "auth": auth, "model": model_name, "requests": 0, "success": 0, "failure": 0, "tokens": 0, "cost": 0.0,
+            "auth": auth,
+            "model": model_name,
+            "requests": 0,
+            "success": 0,
+            "failure": 0,
+            "tokens": 0,
+            "cost": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+            "cached_tokens": 0,
         })
         auth_model["requests"] += 1
         if failed:
@@ -3199,6 +3288,37 @@ def _summarize_request_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
             auth_model["success"] += 1
         auth_model["tokens"] += total_tokens
         auth_model["cost"] += cost
+        auth_model["input_tokens"] += input_tokens
+        auth_model["output_tokens"] += output_tokens
+        auth_model["reasoning_tokens"] += reasoning_tokens
+        auth_model["cached_tokens"] += cached_tokens
+        source_model_key = f"{source}\u0000{model_name}"
+        source_model = summary["source_models"].setdefault(source_model_key, {
+            "source": source,
+            "auth": auth,
+            "provider": provider,
+            "model": model_name,
+            "requests": 0,
+            "success": 0,
+            "failure": 0,
+            "tokens": 0,
+            "cost": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+            "cached_tokens": 0,
+        })
+        source_model["requests"] += 1
+        if failed:
+            source_model["failure"] += 1
+        else:
+            source_model["success"] += 1
+        source_model["tokens"] += total_tokens
+        source_model["cost"] += cost
+        source_model["input_tokens"] += input_tokens
+        source_model["output_tokens"] += output_tokens
+        source_model["reasoning_tokens"] += reasoning_tokens
+        source_model["cached_tokens"] += cached_tokens
     summary["estimated_cost_usd"] = round(summary["estimated_cost_usd"], 6)
     return summary
 
@@ -3237,6 +3357,7 @@ def _request_events_aggregate_row(source: str, events: List[Dict[str, Any]]) -> 
         "avg_latency_ms": avg_latency_ms,
         "models": summary["models"],
         "auth_models": summary["auth_models"],
+        "source_models": summary["source_models"],
         "providers": summary["providers"],
         "endpoints": summary["endpoints"],
     }

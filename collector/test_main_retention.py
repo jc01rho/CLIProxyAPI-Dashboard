@@ -556,6 +556,16 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(aggregate["raw_detail"]["failed_count"], 1)
             self.assertEqual(aggregate["raw_detail"]["total_tokens"], 40)
             self.assertEqual(aggregate["raw_detail"]["included_ids"], ["1", "2"])
+            model_stats = aggregate["raw_detail"]["models"]["gpt-4o"]
+            self.assertEqual(model_stats["input_tokens"], 30)
+            self.assertEqual(model_stats["output_tokens"], 10)
+            self.assertEqual(model_stats["tokens"], 40)
+            endpoint_stats = aggregate["raw_detail"]["endpoints"]["/v1/chat"]
+            self.assertEqual(endpoint_stats["models"]["gpt-4o"]["tokens"], 40)
+            source_stats = next(iter(aggregate["raw_detail"]["source_models"].values()))
+            self.assertEqual(source_stats["source"], "sk-a")
+            self.assertEqual(source_stats["model"], "gpt-4o")
+            self.assertEqual(source_stats["tokens"], 40)
         finally:
             self.module.db_client = original_db
 

@@ -461,6 +461,14 @@ class RedisQueueTransformTests(unittest.TestCase):
             self.assertEqual(events[0]["api_endpoint"], "__request_events_aggregate__")
             self.assertEqual(events[0]["raw_detail"]["request_count"], 1)
             self.assertEqual(len(events[0]["raw_detail"]["event_uids"]), 1)
+            model_stats = events[0]["raw_detail"]["models"]["gpt-5.4"]
+            self.assertEqual(model_stats["input_tokens"], 3)
+            self.assertEqual(model_stats["output_tokens"], 4)
+            self.assertEqual(model_stats["tokens"], 7)
+            auth_model_stats = next(iter(events[0]["raw_detail"]["auth_models"].values()))
+            self.assertEqual(auth_model_stats["input_tokens"], 3)
+            self.assertEqual(auth_model_stats["output_tokens"], 4)
+            self.assertEqual(auth_model_stats["tokens"], 7)
         finally:
             self.module.fetch_usage_queue_items = original_fetch
             self.module._request_events_table_available = original_available

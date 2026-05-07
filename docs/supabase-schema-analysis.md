@@ -1,258 +1,74 @@
 # CLIProxy Collector Supabase Schema Analysis
 
-## 1. 필수 테이블 목록 (7개)
+## 필수 테이블 목록
 
-Collector가 `db_client.table()`로 접근하는 모든 테이블:
+Collector가 현재 DB에 직접 접근하는 주요 테이블입니다. `app_logs`는 제거되었고 운영 로그는 컨테이너/stdout 로그로만 남습니다.
 
-| 테이블 | 용도 | INSERT/UPSERT | SELECT | DELETE |
-|--------|------|---------------|--------|--------|
-| `app_logs` | 운영 로그 저장 | ✅ UPSERT/INSERT | ✅ | ✅ |
-| `usage_snapshots` | cumulative 스냅샷 | ✅ INSERT | ✅ | - |
-| `model_usage` | 모델별 사용량 | ✅ INSERT | - | - |
-| `daily_stats` | 일일 통계 aggregation | ✅ UPSERT | ✅ | - |
-| `skill_runs` | 스킬 실행 기록 | ✅ UPSERT | - | - |
-| `skill_daily_stats` | 스킬 일일 통계 | ✅ UPSERT | - | - |
-| `admin_sessions` | 관리자 세션 | ✅ INSERT | ✅ | ✅ |
+| 테이블 | 용도 | 주요 작성 경로 | 주요 조회 경로 |
+|--------|------|---------------|---------------|
+| `request_events` | usage-queue/Redis/management detail 기반 요청 이벤트와 aggregate marker | `collector/main.py:_flush_request_event_upload_buffer()` | `/api/collector/request_events/*`, dashboard aggregate fallback |
+| `skill_runs` | OpenCode skill 실행 이벤트 | `/api/collector/skill-events` | skill usage endpoints |
+| `skill_daily_stats` | skill 일일 집계 | skill compaction path | skill usage endpoints |
+| `admin_sessions` | 관리자 로그인 세션 | auth login/touch/logout | auth/session middleware |
+| `credential_usage_summary` | legacy management credential summary | `credential_stats_sync.py` when management polling is enabled | credential stats API/fallback |
+| `credential_daily_stats` | legacy credential daily delta | `credential_stats_sync.py` when management polling is enabled | credential daily/hourly APIs/fallback |
+| `usage_snapshots` | legacy `/v0/management/usage` cumulative snapshots | `store_usage_data()` when management polling is enabled | legacy fallback/retention/compaction |
+| `model_usage` | legacy per-model snapshot rows | `store_usage_data()` when management polling is enabled | legacy fallback/compaction |
+| `daily_stats` | legacy daily aggregate | `store_usage_data()` when management polling is enabled | legacy fallback |
+| `model_pricing` | optional local pricing overrides | manual/seeded DB data | pricing lookup |
 
----
+## app_logs 제거
 
-## 2. app_logs 테이블 상세 분석
-
-### 2.1 main.py INSERT 컬럼 (실제 사용)
-
-`_normalize_app_log_event()` 함수에서 생성하는 dict:
-
-```python
-{
-    "event_uid": str | None,        # upsert conflict key
-    "logged_at": ISO8601 UTC,       # NOT NULL
-    "source": str,                  # default: 'collector'
-    "category": str,                # default: 'system'
-    "severity": str,                # default: 'info'
-    "title": str | None,
-    "message": str,                 # NOT NULL (필수)
-    "details": dict | list | None,  # JSONB
-    "session_id": str | None,
-    "machine_id": str | None,
-    "project_dir": str | None,
-    "created_at": ISO8601 UTC,      # NOT NULL default NOW()
-}
-```
-
-### 2.2 Supabase 최소 스키마 (바로 실행 가능)
+`app_logs`는 더 이상 신규 스키마에서 생성되지 않습니다. 기존 설치는 migration `0012_drop_app_logs.sql`이 다음 작업을 수행합니다.
 
 ```sql
--- app_logs table for operational log viewer
-CREATE TABLE IF NOT EXISTS app_logs (
-    id BIGSERIAL PRIMARY KEY,
-    event_uid TEXT,
-    logged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    source TEXT NOT NULL DEFAULT 'collector',
-    category TEXT NOT NULL DEFAULT 'system',
-    severity TEXT NOT NULL DEFAULT 'info',
-    title TEXT,
-    message TEXT NOT NULL,
-    details JSONB,
-    session_id TEXT,
-    machine_id TEXT,
-    project_dir TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- 필수 인덱스
-CREATE INDEX IF NOT EXISTS idx_app_logs_logged_at ON app_logs(logged_at DESC);
-CREATE INDEX IF NOT EXISTS idx_app_logs_logged_at_id_desc ON app_logs(logged_at DESC, id DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_app_logs_event_uid ON app_logs(event_uid);
-
--- PostgREST 읽기 권한 (Supabase anon key 사용 시)
-GRANT SELECT ON app_logs TO anon;
--- 또는 서비스 롤 사용 시
-GRANT ALL ON app_logs TO service_role;
+DROP TABLE IF EXISTS app_logs CASCADE;
 ```
 
-### 2.3 Supabase 특이사항
+삭제 이유:
 
-- Supabase는 기본적으로 `anon` role 사용 → `GRANT SELECT` 필요
-- `service_role` 사용 시 → `GRANT ALL` 또는 스키마 생성 시 자동 권한
-- JSONB 컬럼 `details`는 db.py에서 `psycopg2.extras.Json` wrapping 처리
+- Dashboard frontend가 DB `app_logs`를 표시하지 않습니다.
+- Supabase Free egress/storage 환경에서 운영 로그를 DB row로 저장하는 것은 불필요한 write/retention 비용을 만듭니다.
+- Collector 운영 이벤트는 Python logger를 통해 stdout/stderr로 출력되므로 Docker/Kubernetes/hosting log pipeline에서 확인할 수 있습니다.
 
----
+## usage_snapshots / model_usage / daily_stats가 비어 있을 수 있는 이유
 
-## 3. 전체 Supabase 실행 스키마 (모든 테이블)
+이 세 테이블은 현재 주 경로가 아니라 legacy management polling 경로입니다.
 
-### 3.1 usage_snapshots
+### Legacy management polling 경로
 
-```sql
-CREATE TABLE IF NOT EXISTS usage_snapshots (
-    id BIGSERIAL PRIMARY KEY,
-    collected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    raw_data JSONB,
-    total_requests BIGINT NOT NULL DEFAULT 0,
-    success_count BIGINT NOT NULL DEFAULT 0,
-    failure_count BIGINT NOT NULL DEFAULT 0,
-    total_tokens BIGINT NOT NULL DEFAULT 0,
-    cumulative_cost_usd NUMERIC(20, 6) NOT NULL DEFAULT 0
-);
-
-CREATE INDEX IF NOT EXISTS idx_usage_snapshots_collected_at ON usage_snapshots(collected_at DESC);
-GRANT SELECT ON usage_snapshots TO anon;
+```text
+run_full_sync_once()
+  -> _run_management_sync()
+  -> fetch_usage_data()              # Plus /v0/management/usage
+  -> store_usage_data()
+       -> usage_snapshots INSERT
+       -> model_usage INSERT
+       -> daily_stats UPSERT
 ```
 
-### 3.2 model_usage
+이 경로는 `USAGE_SYNC_MODE=management`이거나 management polling이 활성화된 경우에만 의미가 있습니다. 또한 DB write는 `MODEL_USAGE_UPLOAD_INTERVAL_SECONDS` upload window에 의해 지연/집계됩니다.
 
-```sql
-CREATE TABLE IF NOT EXISTS model_usage (
-    id BIGSERIAL PRIMARY KEY,
-    snapshot_id BIGINT NOT NULL REFERENCES usage_snapshots(id),
-    model_name TEXT NOT NULL,
-    api_endpoint TEXT NOT NULL,
-    request_count BIGINT NOT NULL DEFAULT 0,
-    input_tokens BIGINT NOT NULL DEFAULT 0,
-    output_tokens BIGINT NOT NULL DEFAULT 0,
-    reasoning_tokens BIGINT NOT NULL DEFAULT 0,
-    cached_tokens BIGINT NOT NULL DEFAULT 0,
-    total_tokens BIGINT NOT NULL DEFAULT 0,
-    estimated_cost_usd NUMERIC(20, 6) NOT NULL DEFAULT 0
-);
+### 현재 기본 request-events 경로
 
-CREATE INDEX IF NOT EXISTS idx_model_usage_snapshot_id ON model_usage(snapshot_id);
-CREATE INDEX IF NOT EXISTS idx_model_usage_model_name ON model_usage(model_name);
-GRANT SELECT ON model_usage TO anon;
+```text
+run_full_sync_once()
+  -> _usage_queue_sync_once() / _redis_queue_sync_once()
+  -> _persist_queue_payloads()
+  -> _flush_request_event_upload_buffer()
+       -> request_events UPSERT
+       -> request_events aggregate marker rows
+
+frontend
+  -> /api/collector/request_events/aggregate
+  -> RequestEventsPanel / Usage Trends / Cost Analysis / Credential Usage Statistics
 ```
 
-### 3.3 daily_stats
+따라서 `request_events`가 채워지고 dashboard가 정상 표시된다면 `usage_snapshots`, `model_usage`, `daily_stats`가 비어 있는 것은 request-events 기반 운영에서는 예상 가능한 상태입니다.
 
-```sql
-CREATE TABLE IF NOT EXISTS daily_stats (
-    id BIGSERIAL PRIMARY KEY,
-    stat_date DATE NOT NULL UNIQUE,
-    total_requests BIGINT NOT NULL DEFAULT 0,
-    success_count BIGINT NOT NULL DEFAULT 0,
-    failure_count BIGINT NOT NULL DEFAULT 0,
-    total_tokens BIGINT NOT NULL DEFAULT 0,
-    input_tokens BIGINT NOT NULL DEFAULT 0,
-    output_tokens BIGINT NOT NULL DEFAULT 0,
-    estimated_cost_usd NUMERIC(20, 6) NOT NULL DEFAULT 0,
-    breakdown JSONB,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+반대로 `USAGE_SYNC_MODE=management`인데도 세 테이블이 계속 비어 있으면 다음을 의심해야 합니다.
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_daily_stats_stat_date ON daily_stats(stat_date);
-CREATE INDEX IF NOT EXISTS idx_daily_stats_stat_date ON daily_stats(stat_date DESC);
-GRANT SELECT ON daily_stats TO anon;
-```
-
-### 3.4 skill_runs
-
-```sql
-CREATE TABLE IF NOT EXISTS skill_runs (
-    id BIGSERIAL PRIMARY KEY,
-    event_uid TEXT,
-    machine_id TEXT NOT NULL DEFAULT '',
-    source TEXT NOT NULL DEFAULT 'manual',
-    sqlite_id INTEGER,
-    tool_use_id TEXT,
-    skill_name TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    triggered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    trigger_type TEXT NOT NULL DEFAULT 'explicit',
-    status TEXT NOT NULL DEFAULT 'success',
-    error_type TEXT,
-    error_message TEXT,
-    attempt_no INTEGER NOT NULL DEFAULT 1,
-    arguments TEXT,
-    tokens_used INTEGER NOT NULL DEFAULT 0,
-    output_tokens INTEGER NOT NULL DEFAULT 0,
-    tool_calls INTEGER NOT NULL DEFAULT 0,
-    duration_ms INTEGER NOT NULL DEFAULT 0,
-    estimated_cost_usd NUMERIC(20, 6) NOT NULL DEFAULT 0,
-    skill_version_hash TEXT,
-    model TEXT,
-    is_skeleton BOOLEAN NOT NULL DEFAULT FALSE,
-    synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    project_dir TEXT NOT NULL DEFAULT '',
-    CONSTRAINT uq_skill_run_source UNIQUE NULLS NOT DISTINCT (machine_id, sqlite_id, session_id, skill_name)
-);
-
-CREATE INDEX IF NOT EXISTS idx_skill_runs_triggered ON skill_runs(triggered_at DESC);
-CREATE INDEX IF NOT EXISTS idx_skill_runs_event_uid ON skill_runs(event_uid);
-CREATE INDEX IF NOT EXISTS idx_skill_runs_status ON skill_runs(status);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_skill_runs_event_uid ON skill_runs(event_uid) WHERE event_uid IS NOT NULL;
-GRANT SELECT ON skill_runs TO anon;
-```
-
-### 3.5 skill_daily_stats
-
-```sql
-CREATE TABLE IF NOT EXISTS skill_daily_stats (
-    id BIGSERIAL PRIMARY KEY,
-    stat_date DATE NOT NULL,
-    skill_name TEXT NOT NULL,
-    machine_id TEXT NOT NULL DEFAULT '',
-    run_count INTEGER NOT NULL DEFAULT 0,
-    success_count INTEGER NOT NULL DEFAULT 0,
-    failure_count INTEGER NOT NULL DEFAULT 0,
-    total_tokens INTEGER NOT NULL DEFAULT 0,
-    total_input_tokens INTEGER NOT NULL DEFAULT 0,
-    total_output_tokens INTEGER NOT NULL DEFAULT 0,
-    total_duration_ms BIGINT NOT NULL DEFAULT 0,
-    total_tool_calls BIGINT NOT NULL DEFAULT 0,
-    total_cost_usd NUMERIC(20, 6) NOT NULL DEFAULT 0,
-    avg_tokens INTEGER NOT NULL DEFAULT 0,
-    avg_duration_ms INTEGER NOT NULL DEFAULT 0,
-    CONSTRAINT uq_skill_daily UNIQUE (stat_date, skill_name, machine_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_skill_daily_date ON skill_daily_stats(stat_date DESC);
-GRANT SELECT ON skill_daily_stats TO anon;
-```
-
-### 3.6 admin_sessions
-
-```sql
-CREATE TABLE IF NOT EXISTS admin_sessions (
-    id BIGSERIAL PRIMARY KEY,
-    token_hash CHAR(64) NOT NULL UNIQUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    expires_at TIMESTAMPTZ NOT NULL,
-    remember_me BOOLEAN NOT NULL DEFAULT FALSE,
-    created_ip TEXT,
-    user_agent TEXT,
-    revoked_at TIMESTAMPTZ
-);
-
-CREATE INDEX IF NOT EXISTS idx_admin_sessions_token_hash ON admin_sessions(token_hash);
-CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires_at ON admin_sessions(expires_at);
-GRANT SELECT ON admin_sessions TO anon;
-```
-
----
-
-## 4. Supabase 설정 순서
-
-1. Supabase Dashboard → SQL Editor 열기
-2. 위 스크립트 순서대로 실행 (테이블 생성)
-3. RLS (Row Level Security) 설정 여부 확인:
-   - `anon` role로만 SELECT → RLS 정책 불필요
-   - 제한된 접근 필요 → RLS 정책 추가
-4. Supabase 연결 확인:
-   - `DATABASE_URL` = Supabase connection string (postgres://...)
-   - Collector 시작 → migrations 자동 실행 확인
-
----
-
-## 5. PGRST205 에러 원인
-
-- **PostgREST 에러 코드 PGRST205**: "The table does not exist"
-- Supabase 프로젝트에 `app_logs` 테이블이 없어서 발생
-- 위 `app_logs` CREATE TABLE SQL을 Supabase SQL Editor에서 실행하면 해결
-
----
-
-## 6. 파일 참조
-
-- 스키마 정의: `init-db/schema.sql`
-- Migration 파일: `collector/migrations/*.sql`
-- 실제 INSERT 로직: `collector/main.py` → `_normalize_app_log_event()`
-- JSONB 처리: `collector/db.py` → `JSONB_COLUMNS` dict
+- Plus legacy `/v0/management/usage` 호출 실패
+- `MODEL_USAGE_UPLOAD_INTERVAL_SECONDS` upload window 대기 중
+- `store_usage_data()` 실패
+- DB 권한/스키마 불일치

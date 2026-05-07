@@ -11,7 +11,6 @@ const authBypassPaths = new Set([
     '/api/collector/auth/session',
     '/api/collector/auth/logout',
     '/api/collector/auth/verify',
-    '/api/collector/log-events',
     '/api/collector/skill-events',
 ])
 

@@ -1,3 +1,2 @@
--- Add composite index for stable app_logs pagination by logged_at + id
-CREATE INDEX IF NOT EXISTS idx_app_logs_logged_at_id_desc
-    ON app_logs(logged_at DESC, id DESC);
+-- app_logs was removed from the dashboard database.
+-- Keep this migration as a no-op so existing schema_migrations histories remain compatible.

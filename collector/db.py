@@ -23,7 +23,6 @@ JSONB_COLUMNS: Dict[str, set] = {
     'daily_stats': {'breakdown'},
     'credential_usage_summary': {'credentials', 'api_keys'},
     'credential_daily_stats': {'credentials', 'api_keys'},
-    'app_logs': {'details'},
     'request_events': {'raw_detail'},
 }
 

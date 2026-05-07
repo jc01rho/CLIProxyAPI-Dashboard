@@ -77,7 +77,6 @@ COLLECTOR_INTERVAL = _env_int("COLLECTOR_INTERVAL_SECONDS", 60)
 CREDENTIAL_SYNC_INTERVAL = _env_int(
     "CREDENTIAL_SYNC_INTERVAL_SECONDS", COLLECTOR_INTERVAL
 )
-APP_LOG_CLEANUP_INTERVAL_MINUTES = _env_int("APP_LOG_CLEANUP_INTERVAL_MINUTES", 30)
 TRIGGER_PORT = _env_int("COLLECTOR_TRIGGER_PORT", 5001)
 
 ADMIN_PASSWORD = str(os.getenv("ADMIN_PASSWORD", "")).strip()
@@ -117,7 +116,6 @@ LOG_DEBUG_EVENTS = str(os.getenv("LOG_DEBUG_EVENTS", "false")).strip().lower() i
 LOG_DEBUG_EVENTS_MAX_PER_SYNC = _env_int(
     "LOG_DEBUG_EVENTS_MAX_PER_SYNC", 200, min_value=0
 )
-APP_LOG_RETENTION_DAYS = _env_int("APP_LOG_RETENTION_DAYS", 1)
 RAW_DATA_RETENTION_DAYS = _env_int("RAW_DATA_RETENTION_DAYS", 7)
 
 # Intraday compaction: compact same-day snapshots hourly, keeping last per hour
@@ -218,8 +216,6 @@ _request_events_next_check_at: float = 0
 _last_management_upload_at: float = 0
 _management_upload_lock = threading.Lock()
 _management_deferred_sync_count: int = 0
-_app_log_buffer: List[Dict[str, Any]] = []
-_app_log_buffer_lock = threading.Lock()
 _request_event_upload_buffer: List[Dict[str, Any]] = []
 _request_event_upload_lock = threading.Lock()
 _last_request_event_upload_at: float = 0
@@ -246,13 +242,11 @@ AUTH_PUBLIC_PATHS = {
     "/api/collector/auth/logout",
     "/api/collector/auth/session",
     "/api/collector/auth/verify",
-    "/api/collector/log-events",
     "/api/collector/skill-events",
 }
 AUTH_PROTECTED_POST_PATHS = {
     "/api/collector/trigger",
     "/api/collector/credential-stats/sync",
-    "/api/collector/logs/clear",
     "/api/collector/auth/logout",
 }
 
@@ -572,6 +566,37 @@ def _log_sync_event(
         details=merged_details,
         event_uid=event_uid,
     )
+
+
+def _log_app_event(
+    *,
+    source: str,
+    category: str,
+    severity: str,
+    title: str,
+    message: str,
+    details: Optional[Dict[str, Any]] = None,
+    event_uid: Optional[str] = None,
+) -> None:
+    """Emit operational events to the process logger only.
+
+    The former app_logs database table was removed to avoid unnecessary DB writes
+    and Supabase egress/storage. Keep structured context in stdout/stderr logs.
+    """
+    sev = _normalize_log_severity(severity)
+    log_fn = {
+        "debug": logger.debug,
+        "info": logger.info,
+        "warn": logger.warning,
+        "error": logger.error,
+    }.get(sev, logger.info)
+    context = {
+        "source": source,
+        "category": category,
+        "event_uid": event_uid,
+        "details": details or {},
+    }
+    log_fn("%s: %s | context=%s", title, message, context)
 
 
 def _normalize_log_severity(value: Any) -> str:
@@ -1017,7 +1042,7 @@ def _run_maintenance_vacuum() -> None:
         cursor = conn.cursor()
         
         # Vacuum only tables touched by cleanup
-        tables = ["app_logs", "usage_snapshots", "model_usage", "skill_runs", "request_events"]
+        tables = ["usage_snapshots", "model_usage", "skill_runs", "request_events"]
         for table in tables:
             try:
                 cursor.execute(f"VACUUM (ANALYZE, TRUNCATE ON) {table}")
@@ -1048,32 +1073,6 @@ def _is_html_gateway_error(exc: Exception) -> bool:
     return any(marker in message for marker in html_markers) and any(
         marker in message for marker in gateway_markers
     )
-
-
-def _cleanup_old_app_logs() -> int:
-    if not db_client:
-        return 0
-
-    now_local = datetime.now(APP_TIMEZONE)
-    cutoff_local = now_local - timedelta(days=APP_LOG_RETENTION_DAYS)
-    cutoff_utc = cutoff_local.astimezone(timezone.utc).isoformat()
-
-    try:
-        deleted_rows = (
-            db_client.table("app_logs").delete().lt("logged_at", cutoff_utc).execute().data
-        ) or []
-        deleted_count = len(deleted_rows)
-        _run_maintenance_vacuum()
-        return deleted_count
-    except Exception as e:
-        if _is_html_gateway_error(e):
-            logger.warning(
-                "Cleanup old app logs skipped due to likely transient Supabase/PostgREST HTML gateway response: %s",
-                e,
-            )
-        else:
-            logger.error(f"Failed to cleanup old app logs: {e}", exc_info=True)
-        return 0
 
 
 def _cleanup_old_raw_data() -> Dict[str, int]:
@@ -1934,125 +1933,6 @@ def _run_startup_cleanup() -> Dict[str, int]:
     return aggregate
 
 
-def _normalize_app_log_event(evt: Any) -> Optional[Dict[str, Any]]:
-    if not isinstance(evt, dict):
-        return None
-
-    message = _safe_text(evt.get("message"), 4000)
-    if not message:
-        return None
-
-    details = evt.get("details")
-    if details is not None and not isinstance(
-        details, (dict, list, str, int, float, bool)
-    ):
-        details = str(details)
-
-    return {
-        "event_uid": _safe_text(evt.get("event_uid"), 255) or None,
-        "logged_at": _to_iso_utc(evt.get("logged_at")),
-        "source": _safe_text(evt.get("source") or "collector", 100) or "collector",
-        "category": _normalize_log_category(evt.get("category") or "system"),
-        "severity": _normalize_log_severity(evt.get("severity") or "info"),
-        "title": _safe_text(evt.get("title"), 255) or None,
-        "message": message,
-        "details": details,
-        "session_id": _safe_text(evt.get("session_id"), 255) or None,
-        "machine_id": _safe_text(evt.get("machine_id"), 255) or None,
-        "project_dir": _safe_text(evt.get("project_dir"), 500) or None,
-        "created_at": datetime.utcnow().isoformat(),
-    }
-
-
-def _buffer_app_log_event(evt: Dict[str, Any]) -> None:
-    with _app_log_buffer_lock:
-        _app_log_buffer.append(evt)
-
-
-def _flush_app_log_buffer() -> Dict[str, int]:
-    if not db_client:
-        return {"buffered": 0, "persisted": 0, "skipped": 0}
-
-    with _app_log_buffer_lock:
-        pending = list(_app_log_buffer)
-        _app_log_buffer.clear()
-
-    summary = {"buffered": len(pending), "persisted": 0, "skipped": 0}
-    if not pending:
-        return summary
-
-    try:
-        deduped: Dict[str, Dict[str, Any]] = {}
-        inserts: List[Dict[str, Any]] = []
-        for evt in pending:
-            event_uid = evt.get("event_uid")
-            if event_uid:
-                deduped[str(event_uid)] = evt
-            else:
-                inserts.append(evt)
-
-        upserts = list(deduped.values())
-        for i in range(0, len(upserts), 100):
-            batch = upserts[i : i + 100]
-            db_client.table("app_logs").upsert(batch, on_conflict="event_uid").execute()
-            summary["persisted"] += len(batch)
-
-        for i in range(0, len(inserts), 100):
-            batch = inserts[i : i + 100]
-            db_client.table("app_logs").insert(batch).execute()
-            summary["persisted"] += len(batch)
-    except Exception as e:
-        with _app_log_buffer_lock:
-            _app_log_buffer[:0] = pending
-        summary["persisted"] = 0
-        summary["skipped"] = len(pending)
-        logger.error(f"Failed to flush app log buffer: {e}", exc_info=True)
-
-    return summary
-
-
-def _flush_app_logs_after_upload_window() -> Dict[str, int]:
-    summary = _flush_app_log_buffer()
-    if summary.get("buffered", 0) > 0:
-        logger.info(
-            "App log buffer flushed after upload window: buffered=%d, persisted=%d, skipped=%d",
-            summary.get("buffered", 0),
-            summary.get("persisted", 0),
-            summary.get("skipped", 0),
-        )
-    return summary
-
-
-def _log_app_event(
-    *,
-    source: str,
-    category: str,
-    severity: str,
-    title: str,
-    message: str,
-    details: Optional[Dict[str, Any]] = None,
-    event_uid: Optional[str] = None,
-) -> None:
-    if not db_client:
-        return
-
-    evt = _normalize_app_log_event(
-        {
-            "event_uid": event_uid,
-            "logged_at": datetime.utcnow().isoformat(),
-            "source": source,
-            "category": category,
-            "severity": severity,
-            "title": title,
-            "message": message,
-            "details": details,
-        }
-    )
-    if not evt:
-        return
-    _buffer_app_log_event(evt)
-
-
 @api_bp.route("/health", methods=["GET"])
 def health_check():
     """Health check endpoint."""
@@ -2769,60 +2649,6 @@ def trigger_credential_stats_sync():
     return jsonify({"message": "Credential stats sync triggered."}), 202
 
 
-@api_bp.route("/logs/clear", methods=["POST"])
-def clear_logs_endpoint():
-    if not db_client:
-        return jsonify({"error": "database not initialized"}), 500
-
-    body = request.get_json(force=True, silent=True) or {}
-    clear_scope = str(body.get("scope") or "").strip().lower()
-    if clear_scope != "all":
-        return jsonify({"error": "scope must be all"}), 400
-
-    try:
-        deleted_rows = db_client.table("app_logs").delete().execute().data or []
-        deleted = len(deleted_rows)
-
-        _log_app_event(
-            source="collector",
-            category="system",
-            severity="warn",
-            title="App logs cleared",
-            message="App logs were cleared from dashboard clear action.",
-            details={"deleted_rows": deleted, "scope": "all"},
-        )
-
-        return jsonify({"status": "ok", "deleted": deleted})
-    except Exception as e:
-        logger.error(f"Failed to clear app logs: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
-
-
-@api_bp.route("/log-events", methods=["POST"])
-def ingest_log_events():
-    if not db_client:
-        return jsonify({"error": "database not initialized"}), 500
-
-    body = request.get_json(force=True, silent=True)
-    if not body or "events" not in body or not isinstance(body.get("events"), list):
-        return jsonify({"error": "missing events"}), 400
-
-    events = body["events"]
-    upserted = 0
-    skipped = 0
-
-    for raw_evt in events:
-        evt = _normalize_app_log_event(raw_evt)
-        if not evt:
-            skipped += 1
-            continue
-
-        _buffer_app_log_event(evt)
-        upserted += 1
-
-    return jsonify({"status": "ok", "upserted": upserted, "skipped": skipped})
-
-
 @api_bp.route("/skill-events", methods=["POST"])
 def ingest_skill_events():
     if not db_client:
@@ -3183,7 +3009,6 @@ def _run_management_sync(run_id: str) -> None:
                 message="Buffered management usage was merged into one DB upload window and persisted successfully.",
                 details=store_summary,
             )
-            _flush_app_logs_after_upload_window()
             try:
                 compact_result = _compact_model_usage_db()
                 if compact_result.get("snapshots_deleted", 0) > 0:
@@ -5187,11 +5012,6 @@ def main():
             db_client.run_migrations()
         if _should_use_usage_queue() or _should_use_redis_queue():
             _request_events_available()
-        deleted = _cleanup_old_app_logs()
-        if deleted > 0:
-            logger.info(
-                f"Initial app logs cleanup removed {deleted} rows older than {APP_LOG_RETENTION_DAYS} day(s)."
-            )
         _run_startup_cleanup()
     except Exception as e:
         logger.critical(
@@ -5220,23 +5040,6 @@ def main():
             id="credential_stats_sync",
             next_run_time=datetime.now() + timedelta(seconds=10),  # Run 10s after startup
         )
-
-    # Keep app logs by retention window, clear periodically
-    scheduler.add_job(
-        _cleanup_old_app_logs,
-        "interval",
-        minutes=APP_LOG_CLEANUP_INTERVAL_MINUTES,
-        id="app_logs_cleanup",
-        next_run_time=datetime.now() + timedelta(seconds=20),
-    )
-
-    scheduler.add_job(
-        _flush_app_logs_after_upload_window,
-        "interval",
-        seconds=MODEL_USAGE_UPLOAD_INTERVAL_SECONDS,
-        id="app_logs_upload_flush",
-        next_run_time=datetime.now() + timedelta(seconds=MODEL_USAGE_UPLOAD_INTERVAL_SECONDS),
-    )
 
     scheduler.add_job(
         lambda: _flush_request_event_upload_buffer("scheduled"),
@@ -5318,9 +5121,6 @@ def main():
         logger.info(
             "Legacy credential stats sync disabled; request events are collected from usage-queue/redis."
         )
-    logger.info(
-        f"App logs cleanup scheduled every {APP_LOG_CLEANUP_INTERVAL_MINUTES} minute(s) (retention={APP_LOG_RETENTION_DAYS} day(s))."
-    )
     logger.info(
         "Raw data compaction scheduled daily at 00:00 local time "
         f"(skill_runs retention={RAW_DATA_RETENTION_DAYS} day(s))."

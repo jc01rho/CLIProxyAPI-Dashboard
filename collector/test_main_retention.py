@@ -203,9 +203,6 @@ class RetentionTests(unittest.TestCase):
     def setUpClass(cls):
         cls.module = _load_module()
 
-    def test_app_log_retention_defaults_to_one_day(self):
-        self.assertEqual(self.module.APP_LOG_RETENTION_DAYS, 1)
-
     def test_is_html_gateway_error_requires_html_and_gateway_markers(self):
         html_gateway_error = Exception(
             "{'message': 'JSON could not be generated', 'code': 522, 'details': 'b\'<!DOCTYPE html><html>Cloudflare Error code 522 Connection timed out</html>\''}"
@@ -253,7 +250,6 @@ class RetentionTests(unittest.TestCase):
         self.module.init_db = lambda: fake_db
         self.module.db_client = fake_db
         self.module.flask_app = self.module.Flask(__name__)
-        self.module._cleanup_old_app_logs = lambda: 0
         self.module._cleanup_old_raw_data = lambda: cleanup_calls.append("startup") or {}
         self.module.run_full_sync_once = lambda: None
         self.module.sync_credential_stats = lambda *args, **kwargs: None
@@ -283,61 +279,6 @@ class RetentionTests(unittest.TestCase):
         self.assertTrue(not self.module.MAINTENANCE_DATABASE_URL)
         self.module.MAINTENANCE_DATABASE_URL = "postgresql://test"
         self.assertTrue(self.module.MAINTENANCE_DATABASE_URL)
-
-    def test_cleanup_old_app_logs_always_calls_vacuum(self):
-        vacuum_calls = []
-        self.module.MAINTENANCE_DATABASE_URL = "postgresql://test"
-        self.module._run_maintenance_vacuum = lambda: vacuum_calls.append("called")
-        self.module.db_client = _DummyDB()
-        
-        result = self.module._cleanup_old_app_logs()
-        self.assertIsInstance(result, int)
-        self.assertEqual(vacuum_calls, ["called"])
-
-    def test_cleanup_old_app_logs_warns_without_traceback_for_html_gateway_error(self):
-        class FailingTable(_DummyTable):
-            def execute(self):
-                raise Exception(
-                    "{'message': 'JSON could not be generated', 'code': 502, 'details': 'b\'<!DOCTYPE html><html>Cloudflare Bad Gateway error code 502</html>\''}"
-                )
-
-        class FailingDB:
-            def table(self, *args, **kwargs):
-                return FailingTable()
-
-        self.module.db_client = FailingDB()
-        self.module.MAINTENANCE_DATABASE_URL = ""
-
-        with mock.patch.object(self.module.logger, "warning") as warning_mock, mock.patch.object(
-            self.module.logger, "error"
-        ) as error_mock:
-            result = self.module._cleanup_old_app_logs()
-
-        self.assertEqual(result, 0)
-        warning_mock.assert_called_once()
-        error_mock.assert_not_called()
-
-    def test_cleanup_old_app_logs_keeps_error_traceback_for_non_html_failure(self):
-        class FailingTable(_DummyTable):
-            def execute(self):
-                raise Exception("database permission denied")
-
-        class FailingDB:
-            def table(self, *args, **kwargs):
-                return FailingTable()
-
-        self.module.db_client = FailingDB()
-        self.module.MAINTENANCE_DATABASE_URL = ""
-
-        with mock.patch.object(self.module.logger, "warning") as warning_mock, mock.patch.object(
-            self.module.logger, "error"
-        ) as error_mock:
-            result = self.module._cleanup_old_app_logs()
-
-        self.assertEqual(result, 0)
-        warning_mock.assert_not_called()
-        error_mock.assert_called_once()
-        self.assertTrue(error_mock.call_args.kwargs.get("exc_info"))
 
     def test_cleanup_old_raw_data_always_calls_vacuum(self):
         vacuum_calls = []
@@ -1104,7 +1045,6 @@ class RetentionTests(unittest.TestCase):
         self.module.init_db = lambda: fake_db
         self.module.db_client = fake_db
         self.module.flask_app = self.module.Flask(__name__)
-        self.module._cleanup_old_app_logs = lambda: 0
         self.module._cleanup_old_raw_data = lambda: cleanup_calls.append("daily") or {}
         self.module._cleanup_intraday_raw_data = lambda: cleanup_calls.append("intraday") or {}
         self.module.run_full_sync_once = lambda: None

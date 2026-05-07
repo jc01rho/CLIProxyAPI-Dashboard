@@ -151,26 +151,6 @@ CREATE TABLE IF NOT EXISTS skill_daily_stats (
 );
 
 -- =====================
--- App Logs Table
--- =====================
-
-CREATE TABLE IF NOT EXISTS app_logs (
-    id BIGSERIAL PRIMARY KEY,
-    event_uid TEXT,
-    logged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    source TEXT NOT NULL DEFAULT 'collector',
-    category TEXT NOT NULL DEFAULT 'system',
-    severity TEXT NOT NULL DEFAULT 'info',
-    title TEXT,
-    message TEXT NOT NULL,
-    details JSONB,
-    session_id TEXT,
-    machine_id TEXT,
-    project_dir TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- =====================
 -- Indexes
 -- =====================
 
@@ -190,13 +170,6 @@ CREATE INDEX IF NOT EXISTS idx_skill_runs_event_uid ON skill_runs(event_uid);
 CREATE INDEX IF NOT EXISTS idx_skill_runs_status ON skill_runs(status);
 CREATE INDEX IF NOT EXISTS idx_skill_runs_source ON skill_runs(source);
 CREATE INDEX IF NOT EXISTS idx_skill_daily_date ON skill_daily_stats(stat_date DESC);
-
-CREATE INDEX IF NOT EXISTS idx_app_logs_logged_at ON app_logs(logged_at DESC);
-CREATE INDEX IF NOT EXISTS idx_app_logs_logged_at_id_desc ON app_logs(logged_at DESC, id DESC);
-CREATE INDEX IF NOT EXISTS idx_app_logs_severity_logged_at ON app_logs(severity, logged_at DESC);
-CREATE INDEX IF NOT EXISTS idx_app_logs_category_logged_at ON app_logs(category, logged_at DESC);
-CREATE INDEX IF NOT EXISTS idx_app_logs_source_logged_at ON app_logs(source, logged_at DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_app_logs_event_uid ON app_logs(event_uid);
 
 -- =====================
 -- Request Events Table
@@ -262,7 +235,6 @@ ALTER TABLE credential_daily_stats ENABLE ROW LEVEL SECURITY;
 ALTER TABLE admin_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE skill_runs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE skill_daily_stats ENABLE ROW LEVEL SECURITY;
-ALTER TABLE app_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE request_events ENABLE ROW LEVEL SECURITY;
 
 -- Read-only policies for anon (frontend with publishable key)
@@ -275,7 +247,6 @@ CREATE POLICY "anon_read_credential_daily_stats" ON credential_daily_stats FOR S
 CREATE POLICY "anon_read_admin_sessions" ON admin_sessions FOR SELECT TO anon USING (true);
 CREATE POLICY "anon_read_skill_runs" ON skill_runs FOR SELECT TO anon USING (true);
 CREATE POLICY "anon_read_skill_daily_stats" ON skill_daily_stats FOR SELECT TO anon USING (true);
-CREATE POLICY "anon_read_app_logs" ON app_logs FOR SELECT TO anon USING (true);
 CREATE POLICY "anon_read_request_events" ON request_events FOR SELECT TO anon USING (true);
 
 -- Read-only policies for authenticated users
@@ -288,5 +259,4 @@ CREATE POLICY "auth_read_credential_daily_stats" ON credential_daily_stats FOR S
 CREATE POLICY "auth_read_admin_sessions" ON admin_sessions FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read_skill_runs" ON skill_runs FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read_skill_daily_stats" ON skill_daily_stats FOR SELECT TO authenticated USING (true);
-CREATE POLICY "auth_read_app_logs" ON app_logs FOR SELECT TO authenticated USING (true);
 CREATE POLICY "auth_read_request_events" ON request_events FOR SELECT TO authenticated USING (true);

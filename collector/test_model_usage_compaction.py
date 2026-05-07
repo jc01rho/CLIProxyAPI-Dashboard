@@ -430,19 +430,15 @@ class ManagementUploadRateLimitTests(unittest.TestCase):
         cls.m = _load_module()
         cls._original_log_sync_event = cls.m._log_sync_event
         cls._original_log_app_event = cls.m._log_app_event
-        cls._original_flush_app_logs_after_upload_window = cls.m._flush_app_logs_after_upload_window
 
     def setUp(self):
         self.m._last_management_upload_at = 0
         self.m._management_deferred_sync_count = 0
-        self.m._app_log_buffer = []
         self.m.LOG_VERBOSITY = "normal"
         self.m._log_sync_event = type(self)._original_log_sync_event
         self.m._log_app_event = type(self)._original_log_app_event
-        self.m._flush_app_logs_after_upload_window = type(self)._original_flush_app_logs_after_upload_window
         import threading
         self.m._management_upload_lock = threading.Lock()
-        self.m._app_log_buffer_lock = threading.Lock()
 
     def test_first_call_proceeds(self):
         fetch_calls = []
@@ -576,25 +572,6 @@ class ManagementUploadRateLimitTests(unittest.TestCase):
         self.assertGreaterEqual(args[1], self.m.MODEL_USAGE_UPLOAD_INTERVAL_SECONDS - 1)
         self.assertEqual(args[2:], (self.m.MODEL_USAGE_UPLOAD_INTERVAL_SECONDS, 12, 10, 2, 345))
 
-    def test_successful_upload_flushes_buffered_app_logs_once(self):
-        flush_calls = []
-        summaries = []
-
-        self.m.fetch_usage_data = lambda: ({"usage": {}}, {})
-        self.m.store_usage_data = lambda data, run_id=None: (True, {})
-        self.m._compact_model_usage_db = lambda: {"snapshots_deleted": 0, "retained_buckets": 0, "error": False}
-        self.m._flush_app_logs_after_upload_window = lambda: flush_calls.append(1) or {"buffered": 3, "persisted": 3, "skipped": 0}
-        self.m._log_sync_event = lambda **kw: summaries.append(kw)
-
-        self.m._management_deferred_sync_count = 2
-        self.m._run_management_sync("run-009")
-
-        self.assertEqual(len(flush_calls), 1)
-        upload_logs = [item for item in summaries if item.get("title") == "30-minute usage upload ok"]
-        self.assertEqual(len(upload_logs), 1)
-        self.assertEqual(upload_logs[0]["details"]["deferred_syncs_since_last_upload"], 2)
-        self.assertEqual(upload_logs[0]["details"]["upload_interval_seconds"], self.m.MODEL_USAGE_UPLOAD_INTERVAL_SECONDS)
-
     def test_successful_upload_logs_aggregated_summary_to_stdout(self):
         self.m.fetch_usage_data = lambda: ({"usage": {}}, {})
         self.m.store_usage_data = lambda data, run_id=None: (True, {
@@ -608,7 +585,6 @@ class ManagementUploadRateLimitTests(unittest.TestCase):
             "duration_ms": 33,
         })
         self.m._compact_model_usage_db = lambda: {"snapshots_deleted": 0, "retained_buckets": 0, "error": False}
-        self.m._flush_app_logs_after_upload_window = lambda: {"buffered": 0, "persisted": 0, "skipped": 0}
         self.m._log_sync_event = lambda **kw: None
         self.m._management_deferred_sync_count = 2
 
@@ -623,48 +599,6 @@ class ManagementUploadRateLimitTests(unittest.TestCase):
             (2, self.m.MODEL_USAGE_UPLOAD_INTERVAL_SECONDS, 7, 900, 0.0123, 17, 1900, 0.0456, 2, 33),
         )
 
-    def test_app_log_events_are_buffered_until_flush(self):
-        calls = []
-
-        class _RecordingTable(_DummyTable):
-            def upsert(self, data, on_conflict=None):
-                calls.append(("upsert", data, on_conflict))
-                return self
-
-            def insert(self, data):
-                calls.append(("insert", data, None))
-                return self
-
-        class _RecordingDB:
-            def table(self, name):
-                self.name = name
-                return _RecordingTable()
-
-        original_db = self.m.db_client
-        self.m.db_client = _RecordingDB()
-        try:
-            self.m._log_app_event(
-                source="collector",
-                category="sync",
-                severity="info",
-                title="Buffered event",
-                message="This app log should wait for the upload window.",
-                event_uid="evt-1",
-            )
-            self.assertEqual(calls, [])
-            self.assertEqual(len(self.m._app_log_buffer), 1)
-
-            summary = self.m._flush_app_log_buffer()
-
-            self.assertEqual(summary["buffered"], 1)
-            self.assertEqual(summary["persisted"], 1)
-            self.assertEqual(len(calls), 1)
-            self.assertEqual(calls[0][0], "upsert")
-        finally:
-            self.m.db_client = original_db
-            self.m._app_log_buffer = []
-
-
 class MainSchedulerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -677,7 +611,6 @@ class MainSchedulerTests(unittest.TestCase):
         self.m.init_db = lambda: fake_db
         self.m.db_client = fake_db
         self.m.flask_app = self.m.Flask(__name__)
-        self.m._cleanup_old_app_logs = lambda: 0
         self.m._run_startup_cleanup = lambda: {}
         self.m.run_full_sync_once = lambda: None
         self.m.sync_credential_stats = lambda *args, **kwargs: None
@@ -696,31 +629,6 @@ class MainSchedulerTests(unittest.TestCase):
         self.assertIn("minutes", job["kwargs"])
         self.assertEqual(job["kwargs"]["minutes"], self.m.MODEL_USAGE_COMPACTION_INTERVAL_MINUTES)
 
-    def test_main_schedules_app_log_upload_flush_job(self):
-        serve_calls = []
-        fake_db = object()
-
-        self.m.init_db = lambda: fake_db
-        self.m.db_client = fake_db
-        self.m.flask_app = self.m.Flask(__name__)
-        self.m._cleanup_old_app_logs = lambda: 0
-        self.m._run_startup_cleanup = lambda: {}
-        self.m.run_full_sync_once = lambda: None
-        self.m.sync_credential_stats = lambda *args, **kwargs: None
-        self.m.serve = lambda *args, **kwargs: serve_calls.append(True)
-
-        self.m.main()
-
-        scheduler = _RecordedScheduler.instances[-1]
-        flush_jobs = [
-            job for job in scheduler.jobs
-            if job["kwargs"].get("id") == "app_logs_upload_flush"
-        ]
-        self.assertEqual(len(flush_jobs), 1)
-        job = flush_jobs[0]
-        self.assertEqual(job["trigger"], "interval")
-        self.assertEqual(job["kwargs"]["seconds"], self.m.MODEL_USAGE_UPLOAD_INTERVAL_SECONDS)
-
     def test_main_schedules_request_events_upload_flush_job(self):
         serve_calls = []
         fake_db = object()
@@ -728,7 +636,6 @@ class MainSchedulerTests(unittest.TestCase):
         self.m.init_db = lambda: fake_db
         self.m.db_client = fake_db
         self.m.flask_app = self.m.Flask(__name__)
-        self.m._cleanup_old_app_logs = lambda: 0
         self.m._run_startup_cleanup = lambda: {}
         self.m.run_full_sync_once = lambda: None
         self.m.sync_credential_stats = lambda *args, **kwargs: None
@@ -760,7 +667,6 @@ class MainSchedulerTests(unittest.TestCase):
         self.m.init_db = lambda: fake_db
         self.m.db_client = fake_db
         self.m.flask_app = self.m.Flask(__name__)
-        self.m._cleanup_old_app_logs = lambda: 0
         self.m._run_startup_cleanup = lambda: {}
         self.m.run_full_sync_once = lambda: None
         self.m.sync_credential_stats = lambda *args, **kwargs: None

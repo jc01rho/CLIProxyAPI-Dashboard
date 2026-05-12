@@ -593,7 +593,7 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
         const rawFail = m.failure || m.failure_count || 0
         const zeroTokenFail = tokens <= 0 ? req : 0
         const fail = Math.max(rawFail, zeroTokenFail)
-        const succ = Math.max(0, req - fail)
+        const succ = m.success ?? m.success_count ?? Math.max(0, req - fail)
         const failRate = req > 0 ? (fail / req) * 100 : 0
         const succRate = req > 0 ? (succ / req) * 100 : 0
         rows.push({
@@ -959,6 +959,7 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
                     <th onClick={() => handleFailureRateSort('provider')} className="sortable">Provider <FailureRateSortIcon column="provider" /></th>
                     <th onClick={() => handleFailureRateSort('model')} className="sortable">Model <FailureRateSortIcon column="model" /></th>
                     <th onClick={() => handleFailureRateSort('requests')} className="sortable">Requests <FailureRateSortIcon column="requests" /></th>
+                    <th onClick={() => handleFailureRateSort('success_rate')} className="sortable">Success Rate <FailureRateSortIcon column="success_rate" /></th>
                     <th onClick={() => handleFailureRateSort('failure_rate')} className="sortable">Fail Rate <FailureRateSortIcon column="failure_rate" /></th>
                     <th onClick={() => handleFailureRateSort('failure')} className="sortable">Failed <FailureRateSortIcon column="failure" /></th>
                     <th onClick={() => handleFailureRateSort('tokens')} className="sortable">Tokens <FailureRateSortIcon column="tokens" /></th>
@@ -967,11 +968,12 @@ export default function CredentialStatsCard({ onRowClick, data, timeSeries, date
                 </thead>
                 <tbody>
                   {failureRateRows.map((row) => (
-                    <tr key={`${row.api_key_name}-${row.model}`}>
+                    <tr key={JSON.stringify([row.api_key_name, row.provider, row.model])}>
                       <td>{shortenApiKeyLabel(row.api_key_name)}</td>
                       <td><ProviderBadge provider={row.provider} /></td>
                       <td>{row.model}</td>
                       <td>{formatNumber(row.requests)}</td>
+                      <td style={{ color: getSuccessColor(row.success_rate) }}>{row.success_rate.toFixed(1)}%</td>
                       <td style={{ color: getSuccessColor(row.success_rate) }}>{row.failure_rate.toFixed(1)}%</td>
                       <td>{row.failure}</td>
                       <td>{formatNumber(row.tokens)}</td>
@@ -1257,21 +1259,30 @@ function ApiKeysTable({ items, onSort, SortIcon, expandedRow, setExpandedRow, on
                 <div className="cred-detail-model-bar">
                   <span className="cred-detail-model-stats">Requests</span>
                   <span className="cred-detail-model-stats">Success</span>
+                  <span className="cred-detail-model-stats">Success Rate</span>
                   <span className="cred-detail-model-stats">Failed</span>
                   <span className="cred-detail-model-stats">Tokens</span>
                 </div>
               </div>
-              {modelEntries.map(([modelName, m]) => (
-                <div key={modelName} className="cred-detail-model">
-                  <span className="cred-detail-model-name">{modelName}</span>
-                  <div className="cred-detail-model-bar">
-                    <span className="cred-detail-model-stats">{formatNumber(m.requests)}</span>
-                    <span className="cred-detail-model-stats" style={{ color: '#10b981' }}>{formatNumber(m.success)}</span>
-                    <span className="cred-detail-model-stats" style={{ color: m.failure > 0 ? '#ef4444' : undefined }}>{m.failure || 0}</span>
-                    <span className="cred-detail-model-stats">{formatNumber(m.tokens)}</span>
+              {modelEntries.map(([modelName, m]) => {
+                const req = m.requests || m.total_requests || 0
+                const fail = m.failure || m.failure_count || 0
+                const succ = m.success ?? m.success_count ?? Math.max(0, req - fail)
+                const rate = req > 0 ? (succ / req) * 100 : 0
+                const tokens = m.tokens || m.total_tokens || 0
+                return (
+                  <div key={modelName} className="cred-detail-model">
+                    <span className="cred-detail-model-name">{modelName}</span>
+                    <div className="cred-detail-model-bar">
+                      <span className="cred-detail-model-stats">{formatNumber(req)}</span>
+                      <span className="cred-detail-model-stats" style={{ color: '#10b981' }}>{formatNumber(succ)}</span>
+                      <span className="cred-detail-model-stats" style={{ color: getSuccessColor(rate) }}>{rate.toFixed(1)}%</span>
+                      <span className="cred-detail-model-stats" style={{ color: fail > 0 ? '#ef4444' : undefined }}>{fail}</span>
+                      <span className="cred-detail-model-stats">{formatNumber(tokens)}</span>
+                    </div>
                   </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         )

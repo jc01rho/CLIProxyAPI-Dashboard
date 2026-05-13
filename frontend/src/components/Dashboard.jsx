@@ -686,21 +686,16 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
         return { tokenTrendData: data, tokenTrendModels: topModels, tokenTrendTotals: typeTotals }
     }, [hourlyStats, dailyStats, dateRange])
 
-    // API Endpoint usage - uses granular endpointUsage passed from App.jsx
+    // API Keys usage - uses credentialData.api_keys for actual key names
     const endpointUsage = useMemo(() => {
-        const normalized = (rawEndpointUsage || [])
+        const apiKeys = credentialData?.api_keys || []
+        const normalized = apiKeys
             .map(m => {
-                const name = m.api_endpoint || 'Default'
-                const cleanName = name.replace(/^https?:\/\//, '')
-                const parts = cleanName.split('/')
-                const displayName = parts.length > 1 && parts[parts.length - 1]
-                    ? parts[parts.length - 1]
-                    : parts[0]
-
+                const name = m.api_key_name || m.display_name || 'Unknown'
                 return {
-                    endpoint: shortenApiKeyLabel(displayName),
-                    endpoint_full: displayName,
-                    requests: m.request_count || 0,
+                    endpoint: shortenApiKeyLabel(name),
+                    endpoint_full: name,
+                    requests: m.total_requests || 0,
                     tokens: m.total_tokens || 0,
                     cost: m.estimated_cost_usd || 0,
                     ...m
@@ -711,7 +706,7 @@ function Dashboard({ stats, dailyStats, modelUsage, hourlyStats, loading, isRefr
             return normalized.sort((a, b) => (b.cost || 0) - (a.cost || 0))
         }
         return normalized.sort((a, b) => (b.requests || 0) - (a.requests || 0))
-    }, [rawEndpointUsage, endpointSort])
+    }, [credentialData, endpointSort])
 
     const sparklineData = hourlyChartData.slice(-12)
     const costSparkline = dailyChartData.length >= 2 ? dailyChartData : [...Array(7)].map((_, i) => ({ cost: i === 6 ? totalCost : totalCost * (i * 0.1) }))
